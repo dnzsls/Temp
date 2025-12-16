@@ -2,18 +2,26 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 def parse_time(time_str):
-    """Saat string'ini datetime objesine çevir"""
     time_str = time_str.strip()
-    # 00:00 gece yarısı için özel durum
+    if not time_str:
+        return None
     return datetime.strptime(time_str, "%H:%M")
 
 def calculate_shift_duration(shift_range):
-    """Tek bir vardiya aralığının süresini hesapla (saat)"""
-    parts = shift_range.strip().split("-")
+    shift_range = shift_range.strip()
+    if not shift_range or "-" not in shift_range:
+        return 0
+    
+    parts = shift_range.split("-")
+    if len(parts) != 2:
+        return 0
+    
     start = parse_time(parts[0])
     end = parse_time(parts[1])
     
-    # Gece yarısını geçen vardiyalar için (örn: 19:00 - 00:00)
+    if start is None or end is None:
+        return 0
+    
     if end <= start:
         end += timedelta(days=1)
     
@@ -21,60 +29,22 @@ def calculate_shift_duration(shift_range):
     return duration
 
 def analyze_shift(shift_str):
-    """
-    Vardiya string'ini analiz et
-    Returns: (toplam_saat, kategori)
-    - F: Bölünmüş vardiya (split shift)
-    - N: Normal (8-9 saat)
-    - K: Kısa (8 saatten az)
-    """
-    if pd.isna(shift_str) or shift_str.strip() == "":
+    # Boş/null → null döndür
+    if pd.isna(shift_str) or str(shift_str).strip() == "":
         return None, None
     
-    # "/" ile bölünmüş vardiyaları kontrol et
-    segments = shift_str.split("/")
+    shift_str = str(shift_str).strip()
+    segments = [s.strip() for s in shift_str.split("/") if s.strip()]
+    
+    if not segments:
+        return None, None
+    
     is_split = len(segments) > 1
+    total_hours = sum(calculate_shift_duration(seg) for seg in segments)
     
-    total_hours = 0
-    for segment in segments:
-        total_hours += calculate_shift_duration(segment)
+    if total_hours == 0:
+        return None, None
     
-    # Kategori belirleme
     if is_split:
-        category = "F"  # Full-split (bölünmüş vardiya)
+        category = "F"
     elif total_hours >= 8:
-        category = "N"  # Normal
-    else:
-        category = "K"  # Kısa
-    
-    return round(total_hours, 2), category
-
-# Örnek kullanım
-df = pd.DataFrame({
-    "vardiya": [
-        "09:00 - 18:00",
-        "09:00 - 13:00 / 19:00 - 00:00",
-        "08:00 - 16:00",
-        "10:00 - 15:00",
-        "22:00 - 06:00",
-        "09:00 - 12:00 / 14:00 - 18:00"
-    ]
-})
-
-# Uygula
-df[["calisma_saati", "kategori"]] = df["vardiya"].apply(
-    lambda x: pd.Series(analyze_shift(x))
-)
-
-print(df)
-```
-
-**Çıktı:**
-```
-                         vardiya  calisma_saati kategori
-0                  09:00 - 18:00           9.00        N
-1  09:00 - 13:00 / 19:00 - 00:00           9.00        F
-2                  08:00 - 16:00           8.00        N
-3                  10:00 - 15:00           5.00        K
-4                  22:00 - 06:00           8.00        N
-5  09:00 - 12:00 / 14:00 - 18:00           7.00        F
