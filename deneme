@@ -48,3 +48,13 @@ def analyze_shift(shift_str):
     if is_split:
         category = "F"
     elif total_hours >= 8:
+        category = "N"
+    else:
+        category = "K"
+    
+    return round(total_hours, 2), category
+
+# Uygula - kendi kolon adını yaz
+df[["calisma_saati", "kategori"]] = df["vardiya"].apply(
+    lambda x: pd.Series(analyze_shift(x))
+)
