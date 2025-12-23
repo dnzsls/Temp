@@ -1,60 +1,57 @@
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
-def parse_time(time_str):
-    time_str = time_str.strip()
-    if not time_str:
-        return None
-    return datetime.strptime(time_str, "%H:%M")
-
-def calculate_shift_duration(shift_range):
-    shift_range = shift_range.strip()
-    if not shift_range or "-" not in shift_range:
-        return 0
-    
-    parts = shift_range.split("-")
-    if len(parts) != 2:
-        return 0
-    
-    start = parse_time(parts[0])
-    end = parse_time(parts[1])
-    
-    if start is None or end is None:
-        return 0
-    
-    if end <= start:
-        end += timedelta(days=1)
-    
-    duration = (end - start).total_seconds() / 3600
-    return duration
-
-def analyze_shift(shift_str):
-    # Boş/null → null döndür
-    if pd.isna(shift_str) or str(shift_str).strip() == "":
-        return None, None
-    
-    shift_str = str(shift_str).strip()
-    segments = [s.strip() for s in shift_str.split("/") if s.strip()]
-    
-    if not segments:
-        return None, None
-    
-    is_split = len(segments) > 1
-    total_hours = sum(calculate_shift_duration(seg) for seg in segments)
-    
-    if total_hours == 0:
-        return None, None
-    
-    if is_split:
-        category = "F"
-    elif total_hours >= 8:
-        category = "N"
-    else:
-        category = "K"
-    
-    return round(total_hours, 2), category
-
-# Uygula - kendi kolon adını yaz
-df[["calisma_saati", "kategori"]] = df["vardiya"].apply(
-    lambda x: pd.Series(analyze_shift(x))
+# Shift sütununu time formatına çevir
+df_tam["shifts_start_hour"] = df_tam["shifts_start_hour"].apply(
+    lambda x: datetime.strptime(str(x).strip(), '%H:%M:%S').time() if pd.notna(x) else None
 )
+
+# Shift sütununu HH:MM formatına çevir (saat_map ile eşleşmek için)
+df_tam["shift_key"] = df_tam["shifts_start_hour"].astype(str).str[:5]  # "08:00:00" -> "08:00"
+
+# LOKASYON BAZLI
+rows_lokasyon = []
+
+for day in df_tam["working_day"].unique():
+    dfd = df_tam[df_tam["working_day"] == day]
+    
+    for lokasyon in dfd["lokasyon"].unique():
+        subset_lokasyon = dfd[dfd["lokasyon"] == lokasyon]
+        
+        for out_hour, start_list in saat_map.items():
+            # Bu saatte çalışan shiftleri bul
+            calisanlar = subset_lokasyon[subset_lokasyon["shift_key"].isin(start_list)]
+            kisi_sayisi = len(calisanlar)
+            
+            rows_lokasyon.append({
+                "tarih": day,
+                "lokasyon": lokasyon,
+                "saatler": out_hour,
+                "calisan_kisi_sayisi": kisi_sayisi
+            })
+
+df_lokasyon_bazli = pd.DataFrame(rows_lokasyon).sort_values(["tarih", "lokasyon", "saatler"])
+
+# TOPLAM (Lokasyon olmadan)
+rows_toplam = []
+
+for day in df_tam["working_day"].unique():
+    dfd = df_tam[df_tam["working_day"] == day]
+    
+    for out_hour, start_list in saat_map.items():
+        calisanlar = dfd[dfd["shift_key"].isin(start_list)]
+        kisi_sayisi = len(calisanlar)
+        
+        rows_toplam.append({
+            "tarih": day,
+            "saatler": out_hour,
+            "calisan_kisi_sayisi": kisi_sayisi
+        })
+
+df_toplam = pd.DataFrame(rows_toplam).sort_values(["tarih", "saatler"])
+
+# Sonuçları göster
+print("LOKASYON BAZLI:")
+print(df_lokasyon_bazli.head(20))
+print("\nTOPLAM:")
+print(df_toplam.head(20))
