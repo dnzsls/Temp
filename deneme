@@ -1,57 +1,53 @@
-import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# Shift sütununu time formatına çevir
-df_tam["shifts_start_hour"] = df_tam["shifts_start_hour"].apply(
-    lambda x: datetime.strptime(str(x).strip(), '%H:%M:%S').time() if pd.notna(x) else None
-)
+# Shift tanımları (başlangıç ve bitiş saatleri)
+shift_definitions = {
+    "08:00": "17:00",
+    "08:30": "17:30",
+    "00:00": "08:00",
+    "09:00": "18:00",
+    # ... diğer shiftler
+}
 
-# Shift sütununu HH:MM formatına çevir (saat_map ile eşleşmek için)
-df_tam["shift_key"] = df_tam["shifts_start_hour"].astype(str).str[:5]  # "08:00:00" -> "08:00"
+# Time objesine çevir
+def time_from_str(time_str):
+    return datetime.strptime(time_str, '%H:%M').time()
 
-# LOKASYON BAZLI
-rows_lokasyon = []
-
-for day in df_tam["working_day"].unique():
-    dfd = df_tam[df_tam["working_day"] == day]
+# Bir saatte hangi shiftler aktif?
+def get_active_shifts(check_hour, shift_definitions):
+    check_time = time_from_str(check_hour)
+    active_shifts = []
     
-    for lokasyon in dfd["lokasyon"].unique():
-        subset_lokasyon = dfd[dfd["lokasyon"] == lokasyon]
+    for start, end in shift_definitions.items():
+        start_time = time_from_str(start)
+        end_time = time_from_str(end)
         
-        for out_hour, start_list in saat_map.items():
-            # Bu saatte çalışan shiftleri bul
-            calisanlar = subset_lokasyon[subset_lokasyon["shift_key"].isin(start_list)]
-            kisi_sayisi = len(calisanlar)
-            
-            rows_lokasyon.append({
-                "tarih": day,
-                "lokasyon": lokasyon,
-                "saatler": out_hour,
-                "calisan_kisi_sayisi": kisi_sayisi
-            })
-
-df_lokasyon_bazli = pd.DataFrame(rows_lokasyon).sort_values(["tarih", "lokasyon", "saatler"])
-
-# TOPLAM (Lokasyon olmadan)
-rows_toplam = []
-
-for day in df_tam["working_day"].unique():
-    dfd = df_tam[df_tam["working_day"] == day]
+        # Gece vardiyası kontrolü (00:00 - 08:00 gibi)
+        if end_time < start_time:  # Gece yarısını geçiyor
+            if check_time >= start_time or check_time < end_time:
+                active_shifts.append(start)
+        else:  # Normal vardiya
+            if start_time <= check_time < end_time:
+                active_shifts.append(start)
     
-    for out_hour, start_list in saat_map.items():
-        calisanlar = dfd[dfd["shift_key"].isin(start_list)]
-        kisi_sayisi = len(calisanlar)
-        
-        rows_toplam.append({
-            "tarih": day,
-            "saatler": out_hour,
-            "calisan_kisi_sayisi": kisi_sayisi
-        })
+    return active_shifts
 
-df_toplam = pd.DataFrame(rows_toplam).sort_values(["tarih", "saatler"])
+# Tüm saatleri oluştur (30 dakikalık)
+def generate_hours():
+    hours = []
+    for h in range(24):
+        hours.append(f"{h:02d}:00")
+        hours.append(f"{h:02d}:30")
+    return hours
 
-# Sonuçları göster
-print("LOKASYON BAZLI:")
-print(df_lokasyon_bazli.head(20))
-print("\nTOPLAM:")
-print(df_toplam.head(20))
+# Otomatik saat_map oluştur
+all_hours = generate_hours()
+saat_map = {}
+
+for hour in all_hours:
+    saat_map[hour] = get_active_shifts(hour, shift_definitions)
+
+print("Otomatik oluşturulan saat_map:")
+for hour, shifts in sorted(saat_map.items()):
+    if shifts:  # Boş olmayanları göster
+        print(f"{hour}: {shifts}")
