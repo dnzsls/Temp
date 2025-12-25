@@ -1,32 +1,50 @@
 from datetime import datetime, timedelta
 import pandas as pd
 
-# 1. Time formatına çevirme (önceki fonksiyon)
+# DÜZELTILMIŞ time_from_str
 def time_from_str(time_str):
-    """String saat değerini time objesine çevirir"""
+    """String saat değerini time objesine çevirir - 00:00 geçerlidir"""
     if pd.isna(time_str):
         return None
     
     time_str = str(time_str).strip()
     
-    # Eğer saniye yoksa ekle
+    if time_str == '' or time_str.lower() == 'none':
+        return None
+    
+    # Saniye yoksa ekle
     if time_str.count(':') == 1:
         time_str = time_str + ':00'
     
-    return datetime.strptime(time_str, '%H:%M:%S').time()
+    try:
+        return datetime.strptime(time_str, '%H:%M:%S').time()
+    except:
+        print(f"⚠️ Dönüştürülemeyen değer: '{time_str}'")
+        return None
 
-# 2. Time objesine 30 dakika ekleme
+# add_30min_to_time
 def add_30min_to_time(time_obj):
     """Time objesine 30 dakika ekler"""
+    if time_obj is None:
+        return None
+    
     dt = datetime.combine(datetime.today(), time_obj)
     dt_new = dt + timedelta(minutes=30)
     return dt_new.time()
 
-# 3. Önce time formatına çevir
+# Şimdi çalıştır
 df_tam["shift_start"] = df_tam["shifts_start_hour"].apply(time_from_str)
 df_tam["shift_end_original"] = df_tam["shifts_end_hour"].apply(time_from_str)
 
-# 4. Sadece N2T ile başlayanlar için bitiş saatine 30 dk ekle
+# Kontrol: Hala None var mı?
+print("shift_start'ta None sayısı:", df_tam["shift_start"].isna().sum())
+print("shift_end_original'da None sayısı:", df_tam["shift_end_original"].isna().sum())
+
+# 00:00 olanlar düzgün çevrildi mi?
+print("\n00:00 kontrol:")
+print(df_tam[df_tam["shifts_start_hour"].astype(str).str.contains("00:00")][["shifts_start_hour", "shift_start"]].head())
+
+# N2T için bitiş saatini güncelle
 df_tam["shift_end"] = df_tam.apply(
     lambda row: add_30min_to_time(row["shift_end_original"]) 
                 if str(row["user_code"]).startswith("N2T") 
@@ -34,19 +52,7 @@ df_tam["shift_end"] = df_tam.apply(
     axis=1
 )
 
-# 5. KONTROL - Sadece N2T'leri göster
-print("=== SADECE N2T KODLAR (İlk 10) ===")
-n2t_rows = df_tam[df_tam["user_code"].str.startswith("N2T", na=False)]
-print(n2t_rows[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]].head(10))
-print(f"\nToplam N2T sayısı: {len(n2t_rows)}")
-
-# 6. KONTROL - N2T olmayanları göster (karşılaştırma için)
-print("\n=== N2T OLMAYAN KODLAR (İlk 10) ===")
-non_n2t_rows = df_tam[~df_tam["user_code"].str.startswith("N2T", na=False)]
-print(non_n2t_rows[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]].head(10))
-print(f"\nToplam N2T olmayan sayısı: {len(non_n2t_rows)}")
-
-# 7. Değişiklik kontrolü
-print("\n=== DEĞİŞİKLİK KONTROLÜ ===")
-print(f"Bitiş saati değişen satır sayısı: {(df_tam['shift_end'] != df_tam['shift_end_original']).sum()}")
-print(f"N2T satır sayısı: {df_tam['user_code'].str.startswith('N2T', na=False).sum()}")
+# N2T kontrol
+print("\n=== N2T KONTROL ===")
+n2t_sample = df_tam[df_tam["user_code"].str.startswith("N2T", na=False)].head()
+print(n2t_sample[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]])
