@@ -1,60 +1,52 @@
 from datetime import datetime, timedelta
 import pandas as pd
 
-# 1. N2T kontrolü ve bitiş saatine 30 dk ekleme
+# 1. Time formatına çevirme (önceki fonksiyon)
+def time_from_str(time_str):
+    """String saat değerini time objesine çevirir"""
+    if pd.isna(time_str):
+        return None
+    
+    time_str = str(time_str).strip()
+    
+    # Eğer saniye yoksa ekle
+    if time_str.count(':') == 1:
+        time_str = time_str + ':00'
+    
+    return datetime.strptime(time_str, '%H:%M:%S').time()
+
+# 2. Time objesine 30 dakika ekleme
 def add_30min_to_time(time_obj):
     """Time objesine 30 dakika ekler"""
-    # Time'ı datetime'a çevir (bugünün tarihiyle)
     dt = datetime.combine(datetime.today(), time_obj)
-    # 30 dakika ekle
     dt_new = dt + timedelta(minutes=30)
-    # Tekrar time objesine çevir
     return dt_new.time()
 
-# 2. User_code'a göre bitiş saatini güncelle
-# Önce time formatına çevir
+# 3. Önce time formatına çevir
 df_tam["shift_start"] = df_tam["shifts_start_hour"].apply(time_from_str)
-df_tam["shift_end"] = df_tam["shifts_end_hour"].apply(time_from_str)
+df_tam["shift_end_original"] = df_tam["shifts_end_hour"].apply(time_from_str)
 
-# N2T ile başlayanlar için bitiş saatine 30 dk ekle
-df_tam["shift_end_adjusted"] = df_tam.apply(
-    lambda row: add_30min_to_time(row["shift_end"]) if str(row["user_code"]).startswith("N2T") else row["shift_end"],
+# 4. Sadece N2T ile başlayanlar için bitiş saatine 30 dk ekle
+df_tam["shift_end"] = df_tam.apply(
+    lambda row: add_30min_to_time(row["shift_end_original"]) 
+                if str(row["user_code"]).startswith("N2T") 
+                else row["shift_end_original"],
     axis=1
 )
 
-# Kontrol edelim
-print("=== N2T KONTROL ===")
-n2t_sample = df_tam[df_tam["user_code"].str.startswith("N2T", na=False)].head()
-print(n2t_sample[["user_code", "shifts_end_hour", "shift_end", "shift_end_adjusted"]])
+# 5. KONTROL - Sadece N2T'leri göster
+print("=== SADECE N2T KODLAR (İlk 10) ===")
+n2t_rows = df_tam[df_tam["user_code"].str.startswith("N2T", na=False)]
+print(n2t_rows[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]].head(10))
+print(f"\nToplam N2T sayısı: {len(n2t_rows)}")
 
-print("\n=== N KONTROL ===")
-n_sample = df_tam[df_tam["user_code"].str.startswith("N", na=False) & 
-                  ~df_tam["user_code"].str.startswith("N2T", na=False)].head()
-print(n_sample[["user_code", "shifts_end_hour", "shift_end", "shift_end_adjusted"]])
+# 6. KONTROL - N2T olmayanları göster (karşılaştırma için)
+print("\n=== N2T OLMAYAN KODLAR (İlk 10) ===")
+non_n2t_rows = df_tam[~df_tam["user_code"].str.startswith("N2T", na=False)]
+print(non_n2t_rows[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]].head(10))
+print(f"\nToplam N2T olmayan sayısı: {len(non_n2t_rows)}")
 
-# 3. Şimdi shift_id'yi düzeltilmiş bitiş saatine göre oluştur
-df_tam["shift_id"] = (
-    df_tam["shift_start"].astype(str).str[:5] + 
-    "-" + 
-    df_tam["shift_end_adjusted"].astype(str).str[:5]
-)
-
-# 4. Unique shift'leri bul (düzeltilmiş bitiş saatiyle)
-unique_shifts = df_tam[['shift_id', 'shift_start', 'shift_end_adjusted']].drop_duplicates()
-unique_shifts = unique_shifts.rename(columns={'shift_end_adjusted': 'shift_end'})
-
-print("\n=== UNIQUE SHIFTLER ===")
-print(unique_shifts.sort_values('shift_id'))
-
-# 5. Otomatik saat_map oluştur
-all_hours = generate_hours(interval_minutes=30)
-saat_map = {}
-
-for hour in all_hours:
-    saat_map[hour] = get_active_shifts_from_df(hour, unique_shifts)
-
-# 6. Mapping sonuçlarını kontrol et
-print("\n=== SAAT MAP ÖRNEKLER ===")
-for hour in ["08:00", "09:00", "17:00", "17:30", "18:00"]:
-    if saat_map[hour]:
-        print(f"{hour}: {saat_map[hour]}")
+# 7. Değişiklik kontrolü
+print("\n=== DEĞİŞİKLİK KONTROLÜ ===")
+print(f"Bitiş saati değişen satır sayısı: {(df_tam['shift_end'] != df_tam['shift_end_original']).sum()}")
+print(f"N2T satır sayısı: {df_tam['user_code'].str.startswith('N2T', na=False).sum()}")
