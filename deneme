@@ -1,58 +1,146 @@
 from datetime import datetime, timedelta
 import pandas as pd
 
-# DÜZELTILMIŞ time_from_str
-def time_from_str(time_str):
-    """String saat değerini time objesine çevirir - 00:00 geçerlidir"""
-    if pd.isna(time_str):
-        return None
+# 1. Aktif shift'leri bulma fonksiyonu
+def get_active_shifts_from_df(check_hour, df_shifts):
+    """
+    Belirli bir saatte hangi shift'ler aktif?
     
-    time_str = str(time_str).strip()
+    Parametreler:
+    - check_hour: Kontrol edilecek saat (string, örn: "10:00")
+    - df_shifts: Unique shift'lerin DataFrame'i (shift_id, shift_start, shift_end)
     
-    if time_str == '' or time_str.lower() == 'none':
-        return None
+    Döndürür:
+    - O saatte aktif olan shift_id'lerin listesi
+    """
+    check_time = time_from_str(check_hour)
+    active_shift_ids = []
     
-    # Saniye yoksa ekle
-    if time_str.count(':') == 1:
-        time_str = time_str + ':00'
+    for idx, row in df_shifts.iterrows():
+        start_time = row['shift_start']
+        end_time = row['shift_end']
+        shift_id = row['shift_id']
+        
+        # Gece vardiyası kontrolü (bitiş < başlangıç)
+        if end_time < start_time:
+            # Gece yarısını geçen vardiya
+            if check_time >= start_time or check_time < end_time:
+                active_shift_ids.append(shift_id)
+        else:
+            # Normal vardiya
+            if start_time <= check_time < end_time:
+                active_shift_ids.append(shift_id)
     
-    try:
-        return datetime.strptime(time_str, '%H:%M:%S').time()
-    except:
-        print(f"⚠️ Dönüştürülemeyen değer: '{time_str}'")
-        return None
+    return active_shift_ids
 
-# add_30min_to_time
-def add_30min_to_time(time_obj):
-    """Time objesine 30 dakika ekler"""
-    if time_obj is None:
-        return None
+# 2. Tüm saatleri oluşturma fonksiyonu
+def generate_hours(interval_minutes=30):
+    """
+    Tüm saatleri oluşturur (00:00'dan 23:30'a kadar)
     
-    dt = datetime.combine(datetime.today(), time_obj)
-    dt_new = dt + timedelta(minutes=30)
-    return dt_new.time()
+    Parametreler:
+    - interval_minutes: Dakika aralığı (30 = yarım saatlik, 60 = saatlik)
+    
+    Döndürür:
+    - Saat string'lerinin listesi (örn: ["00:00", "00:30", ...])
+    """
+    hours = []
+    for h in range(24):
+        for m in range(0, 60, interval_minutes):
+            hours.append(f"{h:02d}:{m:02d}")
+    return hours
 
-# Şimdi çalıştır
-df_tam["shift_start"] = df_tam["shifts_start_hour"].apply(time_from_str)
-df_tam["shift_end_original"] = df_tam["shifts_end_hour"].apply(time_from_str)
-
-# Kontrol: Hala None var mı?
-print("shift_start'ta None sayısı:", df_tam["shift_start"].isna().sum())
-print("shift_end_original'da None sayısı:", df_tam["shift_end_original"].isna().sum())
-
-# 00:00 olanlar düzgün çevrildi mi?
-print("\n00:00 kontrol:")
-print(df_tam[df_tam["shifts_start_hour"].astype(str).str.contains("00:00")][["shifts_start_hour", "shift_start"]].head())
-
-# N2T için bitiş saatini güncelle
-df_tam["shift_end"] = df_tam.apply(
-    lambda row: add_30min_to_time(row["shift_end_original"]) 
-                if str(row["user_code"]).startswith("N2T") 
-                else row["shift_end_original"],
-    axis=1
+# 3. shift_id oluştur (güncellendi - shift_end kullanıyor artık)
+df_tam["shift_id"] = (
+    df_tam["shift_start"].astype(str).str[:5] + 
+    "-" + 
+    df_tam["shift_end"].astype(str).str[:5]  # shift_end_original DEĞİL, shift_end (N2T için +30dk eklenmiş)
 )
 
-# N2T kontrol
-print("\n=== N2T KONTROL ===")
-n2t_sample = df_tam[df_tam["user_code"].str.startswith("N2T", na=False)].head()
-print(n2t_sample[["user_code", "shifts_end_hour", "shift_end_original", "shift_end"]])
+# 4. Unique shift'leri bul
+unique_shifts = df_tam[['shift_id', 'shift_start', 'shift_end']].drop_duplicates()
+
+print("=== UNIQUE SHIFTLER ===")
+print(unique_shifts.sort_values('shift_id'))
+print(f"\nToplam {len(unique_shifts)} farklı shift var")
+
+# 5. Otomatik saat_map oluştur
+all_hours = generate_hours(interval_minutes=30)  # 30 dakikalık aralıklar
+saat_map = {}
+
+print("\n=== SAAT MAP OLUŞTURULUYOR ===")
+for hour in all_hours:
+    saat_map[hour] = get_active_shifts_from_df(hour, unique_shifts)
+
+# 6. Mapping sonuçlarını kontrol et
+print("\n=== ÖRNEK SAAT MAP ===")
+example_hours = ["00:00", "07:00", "08:00", "09:00", "17:00", "17:30", "18:00", "23:00"]
+for hour in example_hours:
+    if hour in saat_map:
+        if saat_map[hour]:  # Boş olmayanları göster
+            print(f"{hour}: {saat_map[hour]}")
+        else:
+            print(f"{hour}: (aktif shift yok)")
+
+
+
+
+
+
+
+### ana hesaplama
+# 7. LOKASYON BAZLI hesaplama
+rows_lokasyon = []
+
+print("\n=== LOKASYON BAZLI HESAPLAMA BAŞLIYOR ===")
+for day in df_tam["working_day"].unique():
+    dfd = df_tam[df_tam["working_day"] == day]
+    
+    for lokasyon in dfd["lokasyon"].unique():
+        subset_lokasyon = dfd[dfd["lokasyon"] == lokasyon]
+        
+        for out_hour, active_shift_ids in saat_map.items():
+            # Bu saatte çalışan shift_id'leri bul
+            calisanlar = subset_lokasyon[subset_lokasyon["shift_id"].isin(active_shift_ids)]
+            kisi_sayisi = len(calisanlar)
+            
+            rows_lokasyon.append({
+                "tarih": day,
+                "lokasyon": lokasyon,
+                "saatler": out_hour,
+                "calisan_kisi_sayisi": kisi_sayisi
+            })
+
+df_lokasyon_bazli = pd.DataFrame(rows_lokasyon).sort_values(["tarih", "lokasyon", "saatler"])
+
+# 8. TOPLAM (Lokasyon olmadan)
+rows_toplam = []
+
+print("=== TOPLAM HESAPLAMA BAŞLIYOR ===")
+for day in df_tam["working_day"].unique():
+    dfd = df_tam[df_tam["working_day"] == day]
+    
+    for out_hour, active_shift_ids in saat_map.items():
+        calisanlar = dfd[dfd["shift_id"].isin(active_shift_ids)]
+        kisi_sayisi = len(calisanlar)
+        
+        rows_toplam.append({
+            "tarih": day,
+            "saatler": out_hour,
+            "calisan_kisi_sayisi": kisi_sayisi
+        })
+
+df_toplam = pd.DataFrame(rows_toplam).sort_values(["tarih", "saatler"])
+
+# 9. Sonuçları göster
+print("\n=== LOKASYON BAZLI SONUÇLAR (İlk 20) ===")
+print(df_lokasyon_bazli.head(20))
+
+print("\n=== TOPLAM SONUÇLAR (İlk 20) ===")
+print(df_toplam.head(20))
+
+# 10. Excel'e kaydet
+df_lokasyon_bazli.to_excel("lokasyon_bazli_calisan_sayisi.xlsx", index=False)
+df_toplam.to_excel("toplam_calisan_sayisi.xlsx", index=False)
+
+print("\n✅ Excel dosyaları kaydedildi!")
