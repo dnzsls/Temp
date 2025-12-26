@@ -200,9 +200,16 @@ def prepare_staffing_data(df_staff):
         df['slot_30'] = df['slot_30'].astype(str)
     df['slot_30'] = df['slot_30'].str[:5]  # İlk 5 karakter (HH:MM)
     
-    # line_based_main_group değerlerini standartlaştır
-    # a_cagrilari, b_cagrilar, c_cagrilar gibi değerleri A, B, C'ye çevir
-    df['queue'] = df['line_based_main_group'].str.lower().str[0].str.upper()  # İlk harf: A, B veya C
+    # Explicit mapping - line_based_main_group değerlerini A, B, C'ye çevir
+    queue_map = {
+        'a_cagrilari': 'A',
+        'b_cagrilar': 'B',
+        'c_cagrilar': 'C'
+    }
+    df['queue'] = df['line_based_main_group'].map(queue_map)
+    
+    # Mapping yapılamayan satırları filtrele
+    df = df[df['queue'].notna()]
     
     # Pivot: Her satırda tarih + saat, kolonlarda A, B, C agent sayıları
     df_pivot = df.pivot_table(
@@ -310,18 +317,16 @@ display(df_staffing.head()) if 'display' in dir() else print(df_staffing.head())
 df_calls_weekend['data_date'] = pd.to_datetime(df_calls_weekend['data_date']).dt.strftime('%Y-%m-%d')
 df_staffing['data_date'] = pd.to_datetime(df_staffing['data_date']).dt.strftime('%Y-%m-%d')
 
-# Birleştir
+# Birleştir - INNER JOIN (sadece kesişen tarih+slot)
 df_merged = pd.merge(
     df_calls_weekend,
     df_staffing[['data_date', 'slot_30', 'a_agents', 'b_agents', 'c_agents']],
     on=['data_date', 'slot_30'],
-    how='left'
+    how='inner'
 )
 
-# Eksik staffing değerlerini 0 yap
-df_merged[['a_agents', 'b_agents', 'c_agents']] = df_merged[['a_agents', 'b_agents', 'c_agents']].fillna(0).astype(int)
-
 print(f"Birleştirilmiş veri: {len(df_merged)} satır")
+print(f"Tarih sayısı: {df_merged['data_date'].nunique()}")
 df_merged.head(10)
 
 
