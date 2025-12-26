@@ -1,41 +1,31 @@
-"""
-KAPASİTE PLANLAMA SİSTEMİ - V4 (SADELEŞTIRILMIŞ)
-Sadece Base Interval + Fazlalık Hesaplama
-
-Özellikler:
-- 3 kuyruk desteği (A, B, C)
-- Hafta içi/sonu ayrımı (weekday_flg)
-- Base ihtiyaç hesaplama (Erlang C)
-- Fazlalık hesaplama (Mevcut kadro - Base)
-- Yardımlaşma hesaplama (B ve C → A)
-
-Kurulum:
-    pip install pandas openpyxl
-"""
+# =============================================================================
+# HÜCRE 1: Kütüphaneler
+# =============================================================================
 
 import pandas as pd
+import numpy as np
 import math
 from datetime import datetime
 
-# ============================================================================
-# KONFİGURASYON
-# ============================================================================
+print("Kütüphaneler yüklendi ✓")
+
+
+# =============================================================================
+# HÜCRE 2: KONFİGÜRASYON (BURAYI GÜNCELLE)
+# =============================================================================
 
 CONFIG = {
     # Erlang C parametreleri
-    'aht': 188,                  # Average Handle Time - saniye
+    'aht': {
+        'A': 188,    # TODO: Kuyruk A için gerçek AHT (saniye)
+        'B': 188,    # TODO: Kuyruk B için gerçek AHT (saniye)
+        'C': 188     # TODO: Kuyruk C için gerçek AHT (saniye)
+    },
     'target_asa': 30,            # Hedef ASA - saniye
     'target_sl': 0.80,           # Hedef Service Level - %80
     'target_seconds': 30,        # SL için hedef süre
     'shrinkage': 0.10,           # Mola/izin payı - %10
-    'interval_minutes': 60,      # İnterval - dakika
-    
-    # Mevcut kadro
-    'staff': {
-        'queue_a': 800,
-        'queue_b': 50,
-        'queue_c': 100
-    },
+    'interval_minutes': 30,      # İnterval - 30 dakika
     
     # Yardımlaşma kuralları
     'help_rules': {
@@ -45,10 +35,19 @@ CONFIG = {
     }
 }
 
+print("Konfigürasyon:")
+print(f"  AHT A: {CONFIG['aht']['A']} sn ({CONFIG['aht']['A']/60:.1f} dk)")
+print(f"  AHT B: {CONFIG['aht']['B']} sn ({CONFIG['aht']['B']/60:.1f} dk)")
+print(f"  AHT C: {CONFIG['aht']['C']} sn ({CONFIG['aht']['C']/60:.1f} dk)")
+print(f"  Hedef ASA: ≤ {CONFIG['target_asa']} saniye")
+print(f"  Hedef SL: %{CONFIG['target_sl']*100:.0f} / {CONFIG['target_seconds']} saniye")
+print(f"  Shrinkage: %{CONFIG['shrinkage']*100:.0f}")
+print(f"  İnterval: {CONFIG['interval_minutes']} dakika")
 
-# ============================================================================
-# BÖLÜM 1: ERLANG C TEMELLERİ
-# ============================================================================
+
+# =============================================================================
+# HÜCRE 3: ERLANG C FONKSİYONLARI
+# =============================================================================
 
 def erlang_c(agents, traffic):
     """Erlang C: Kuyrukta bekleme olasılığı"""
@@ -101,7 +100,7 @@ def find_agents_for_asa(calls, interval_min, aht, target_asa):
         return 0
     
     min_agents = math.ceil(traffic)
-    max_agents = math.ceil(traffic * 2) + 5
+    max_agents = math.ceil(traffic * 3) + 10
     
     for agents in range(min_agents, max_agents + 1):
         asa = calculate_asa(agents, traffic, aht)
@@ -111,7 +110,7 @@ def find_agents_for_asa(calls, interval_min, aht, target_asa):
     return max_agents
 
 
-def find_optimal_agents(calls, config):
+def find_optimal_agents(calls, aht, config):
     """Tek kuyruk için optimal agent (shrinkage dahil)"""
     if calls == 0:
         return 0, 0, 0
@@ -119,383 +118,441 @@ def find_optimal_agents(calls, config):
     agents_raw = find_agents_for_asa(
         calls,
         config['interval_minutes'],
-        config['aht'],
+        aht,
         config['target_asa']
     )
     
     agents_final = math.ceil(agents_raw / (1 - config['shrinkage']))
     
-    traffic = calculate_traffic(calls, config['interval_minutes'], config['aht'])
-    final_asa = calculate_asa(agents_raw, traffic, config['aht']) if agents_raw > 0 else 0
-    final_sl = calculate_service_level(agents_raw, traffic, config['aht'], config['target_seconds']) if agents_raw > 0 else 0
+    traffic = calculate_traffic(calls, config['interval_minutes'], aht)
+    final_asa = calculate_asa(agents_raw, traffic, aht) if agents_raw > 0 else 0
+    final_sl = calculate_service_level(agents_raw, traffic, aht, config['target_seconds']) if agents_raw > 0 else 0
     
     return agents_final, final_asa, final_sl
 
+print("Erlang C fonksiyonları tanımlandı ✓")
 
-# ============================================================================
-# BÖLÜM 2: BASE SENARYO - HER KUYRUK İÇİN MİNİMUM İHTİYAÇ
-# ============================================================================
 
-def calculate_base_requirements(df, config):
-    """
-    Her kuyruk için ayrı ayrı minimum agent ihtiyacı
-    Yardımlaşma YOK - saf ihtiyaç
-    """
+# =============================================================================
+# HÜCRE 4: VERİ HAZIRLAMA FONKSİYONLARI
+# =============================================================================
+
+def convert_15_to_30_calls(df_15):
+    """15 dakikalık çağrı verisini 30 dakikalığa çevirir"""
+    
+    df = df_15.copy()
+    
+    # Tarih ve saat işleme
+    df['data_date'] = pd.to_datetime(df['data_date'])
+    
+    # time_period'dan saat ve dakika çıkar
+    if df['time_period'].dtype == 'object':
+        df['hour'] = df['time_period'].str.split(':').str[0].astype(int)
+        df['minute'] = df['time_period'].str.split(':').str[1].astype(int)
+    else:
+        # datetime formatında ise
+        df['hour'] = pd.to_datetime(df['time_period'].astype(str)).dt.hour
+        df['minute'] = pd.to_datetime(df['time_period'].astype(str)).dt.minute
+    
+    # 30 dakikalık slot oluştur (00-29 → 00, 30-59 → 30)
+    df['slot_30'] = df['hour'].astype(str).str.zfill(2) + ':' + \
+                    ((df['minute'] // 30) * 30).astype(str).str.zfill(2)
+    
+    # Haftanın günü (5=Cumartesi, 6=Pazar)
+    df['day_of_week'] = df['data_date'].dt.dayofweek
+    df['weekday_flg'] = (df['day_of_week'] < 5).astype(int)  # 1=Haftaiçi, 0=Haftasonu
+    
+    # 30 dakikalık aggregate (çağrıları topla)
+    df_30 = df.groupby(['data_date', 'slot_30', 'weekday_flg']).agg({
+        'a_nof_call': 'sum',
+        'b_nof_call': 'sum',
+        'c_nof_call': 'sum'
+    }).reset_index()
+    
+    # Kolon isimlerini düzenle
+    df_30.columns = ['data_date', 'slot_30', 'weekday_flg', 'calls_a', 'calls_b', 'calls_c']
+    
+    return df_30.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+
+
+def calculate_staffing_by_slot(df_staff):
+    """Her 30 dakikalık slot için kuyruk bazında aktif agent sayısını hesapla"""
+    
+    df = df_staff.copy()
+    
+    # Tarih formatını düzenle
+    df['work_date'] = pd.to_datetime(df['work_date'])
+    
+    # shift_start ve shift_end'i string'e çevir (eğer değilse)
+    if df['shift_start'].dtype != 'object':
+        df['shift_start'] = df['shift_start'].astype(str)
+    if df['shift_end'].dtype != 'object':
+        df['shift_end'] = df['shift_end'].astype(str)
+    
+    # HH:MM formatına getir (eğer HH:MM:SS ise)
+    df['shift_start'] = df['shift_start'].str[:5]
+    df['shift_end'] = df['shift_end'].str[:5]
+    
+    # Tüm 30 dakikalık slotları oluştur
+    slots = []
+    for hour in range(0, 24):  # 00:00 - 23:30
+        for minute in ['00', '30']:
+            slots.append(f"{hour:02d}:{minute}")
+    
     results = []
     
-    for idx, row in df.iterrows():
-        date = row['date']
-        time = row['time']
-        weekday_flg = row.get('weekday_flg', 1)
+    # Her tarih için
+    for work_date in df['work_date'].unique():
+        df_day = df[df['work_date'] == work_date]
         
-        # Time formatını düzelt
-        if hasattr(time, 'strftime'):
-            time = time.strftime('%H:%M')
-        elif not isinstance(time, str):
-            time = str(time)
+        for slot in slots:
+            slot_counts = {'a_agents': 0, 'b_agents': 0, 'c_agents': 0}
+            
+            for _, row in df_day.iterrows():
+                shift_start = row['shift_start']
+                shift_end = row['shift_end']
+                
+                # Bu slotta aktif mi? (slot >= start AND slot < end)
+                if shift_start <= slot < shift_end:
+                    if row['a_cagrilar'] == 1:
+                        slot_counts['a_agents'] += 1
+                    if row['b_cagrilar'] == 1:
+                        slot_counts['b_agents'] += 1
+                    if row['c_cagrilar'] == 1:
+                        slot_counts['c_agents'] += 1
+            
+            results.append({
+                'data_date': work_date,
+                'slot_30': slot,
+                **slot_counts
+            })
+    
+    return pd.DataFrame(results)
+
+print("Veri hazırlama fonksiyonları tanımlandı ✓")
+
+
+# =============================================================================
+# HÜCRE 5: ÇAĞRI VERİSİNİ YÜKLE (15 DAKİKALIK HAM VERİ)
+# =============================================================================
+
+# SQL'den gelen 15 dakikalık çağrı verisi
+# Kolonlar: data_date, time_period, a_nof_call, b_nof_call, c_nof_call
+
+# SEÇENEK A: CSV'den oku
+# df_calls_15 = pd.read_csv('cagri_verisi.csv')
+
+# SEÇENEK B: Direkt DataFrame oluştur (test için örnek veri - SİL VE KENDİ VERİNİ YAZ)
+df_calls_15 = pd.DataFrame({
+    'data_date': ['2024-01-06']*8,  # Cumartesi
+    'time_period': ['09:00', '09:15', '09:30', '09:45', '10:00', '10:15', '10:30', '10:45'],
+    'a_nof_call': [22, 23, 25, 27, 24, 24, 26, 22],
+    'b_nof_call': [14, 14, 15, 16, 14, 15, 14, 15],
+    'c_nof_call': [7, 8, 9, 9, 8, 8, 7, 9]
+})
+
+print(f"15dk'lık çağrı verisi yüklendi: {len(df_calls_15)} satır")
+print(f"Tarih aralığı: {df_calls_15['data_date'].min()} - {df_calls_15['data_date'].max()}")
+df_calls_15.head()
+
+
+# =============================================================================
+# HÜCRE 6: STAFFING VERİSİNİ YÜKLE (ÇALIŞAN VERİSİ)
+# =============================================================================
+
+# SQL'den gelen çalışan verisi
+# Kolonlar: work_date, employee_name, team_id, a_cagrilar, b_cagrilar, c_cagrilar, shift_start, shift_end
+
+# SEÇENEK A: CSV'den oku
+# df_staff = pd.read_csv('calisan_verisi.csv')
+
+# SEÇENEK B: Direkt DataFrame oluştur (test için örnek veri - SİL VE KENDİ VERİNİ YAZ)
+df_staff = pd.DataFrame({
+    'work_date': ['2024-01-06']*10,
+    'employee_name': ['Ali', 'Veli', 'Ayse', 'Fatma', 'Mehmet', 'Zeynep', 'Can', 'Ece', 'Burak', 'Selin'],
+    'team_id': ['A1', 'A1', 'A1', 'A1', 'B1', 'B1', 'B1', 'C1', 'C1', 'C1'],
+    'a_cagrilar': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+    'b_cagrilar': [0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
+    'c_cagrilar': [0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+    'shift_start': ['09:00', '09:00', '10:00', '10:00', '09:00', '09:30', '10:00', '09:00', '09:30', '10:00'],
+    'shift_end': ['17:00', '17:00', '18:00', '18:00', '17:00', '17:30', '18:00', '17:00', '17:30', '18:00']
+})
+
+print(f"Çalışan verisi yüklendi: {len(df_staff)} satır")
+print(f"Tarih aralığı: {df_staff['work_date'].min()} - {df_staff['work_date'].max()}")
+df_staff.head()
+
+
+# =============================================================================
+# HÜCRE 7: VERİ DÖNÜŞÜMÜ - 15dk → 30dk ve STAFFING HESAPLA
+# =============================================================================
+
+# Çağrı verisini 30dk'ya çevir
+df_calls_30 = convert_15_to_30_calls(df_calls_15)
+print(f"30dk'lık çağrı verisi: {len(df_calls_30)} satır")
+
+# Sadece haftasonu filtrele (validasyon için)
+df_calls_weekend = df_calls_30[df_calls_30['weekday_flg'] == 0].copy()
+print(f"Haftasonu çağrı verisi: {len(df_calls_weekend)} satır")
+
+# Staffing hesapla
+df_staffing = calculate_staffing_by_slot(df_staff)
+print(f"Staffing verisi hesaplandı: {len(df_staffing)} satır")
+
+# Sadece çağrı olan slotlara göre staffing'i filtrele
+df_staffing_filtered = df_staffing[df_staffing['a_agents'] + df_staffing['b_agents'] + df_staffing['c_agents'] > 0]
+print(f"Aktif slot sayısı: {len(df_staffing_filtered)}")
+
+df_calls_weekend.head()
+
+
+# =============================================================================
+# HÜCRE 8: VERİLERİ BİRLEŞTİR
+# =============================================================================
+
+# Tarih formatını eşitle
+df_calls_weekend['data_date'] = pd.to_datetime(df_calls_weekend['data_date']).dt.strftime('%Y-%m-%d')
+df_staffing['data_date'] = pd.to_datetime(df_staffing['data_date']).dt.strftime('%Y-%m-%d')
+
+# Birleştir
+df_merged = pd.merge(
+    df_calls_weekend,
+    df_staffing[['data_date', 'slot_30', 'a_agents', 'b_agents', 'c_agents']],
+    on=['data_date', 'slot_30'],
+    how='left'
+)
+
+# Eksik staffing değerlerini 0 yap
+df_merged[['a_agents', 'b_agents', 'c_agents']] = df_merged[['a_agents', 'b_agents', 'c_agents']].fillna(0).astype(int)
+
+print(f"Birleştirilmiş veri: {len(df_merged)} satır")
+df_merged.head(10)
+
+
+# =============================================================================
+# HÜCRE 9: ERLANG C HESAPLA VE KARŞILAŞTIR
+# =============================================================================
+
+results = []
+
+for idx, row in df_merged.iterrows():
+    for queue in ['A', 'B', 'C']:
+        calls_col = f'calls_{queue.lower()}'
+        agents_col = f'{queue.lower()}_agents'
         
-        # Her kuyruk için çağrı sayısı
-        calls_a = row.get('queue_a', 0)
-        calls_b = row.get('queue_b', 0)
-        calls_c = row.get('queue_c', 0)
+        calls = row[calls_col]
+        actual_agents = row[agents_col]
+        aht = CONFIG['aht'][queue]
         
-        # Her kuyruk için base ihtiyaç hesapla
-        agents_a, asa_a, sl_a = find_optimal_agents(calls_a, config)
-        agents_b, asa_b, sl_b = find_optimal_agents(calls_b, config)
-        agents_c, asa_c, sl_c = find_optimal_agents(calls_c, config)
+        # Erlang C tahmini (shrinkage dahil)
+        erlang_need, expected_asa, expected_sl = find_optimal_agents(calls, aht, CONFIG)
+        
+        # Shrinkage'sız ham ihtiyaç (karşılaştırma için)
+        erlang_raw = find_agents_for_asa(calls, CONFIG['interval_minutes'], aht, CONFIG['target_asa'])
+        
+        # Fark hesapla
+        diff = actual_agents - erlang_need
+        diff_raw = actual_agents - erlang_raw
+        
+        # Gerçek SL tahmini (mevcut agent sayısıyla)
+        if calls > 0 and actual_agents > 0:
+            traffic = calculate_traffic(calls, CONFIG['interval_minutes'], aht)
+            achieved_sl = calculate_service_level(actual_agents, traffic, aht, CONFIG['target_seconds'])
+            achieved_asa = calculate_asa(actual_agents, traffic, aht)
+        else:
+            achieved_sl = 1.0
+            achieved_asa = 0
         
         results.append({
-            'date': date,
-            'time': time,
-            'weekday_flg': weekday_flg,
-            # Çağrı sayıları
-            'calls_a': calls_a,
-            'calls_b': calls_b,
-            'calls_c': calls_c,
-            # Base agent ihtiyaçları
-            'base_agents_a': agents_a,
-            'base_agents_b': agents_b,
-            'base_agents_c': agents_c,
-            'base_total': agents_a + agents_b + agents_c,
-            # ASA değerleri
-            'asa_a': round(asa_a, 1),
-            'asa_b': round(asa_b, 1),
-            'asa_c': round(asa_c, 1),
-            # SL değerleri
-            'sl_a': round(sl_a * 100, 1),
-            'sl_b': round(sl_b * 100, 1),
-            'sl_c': round(sl_c * 100, 1)
+            'date': row['data_date'],
+            'slot_30': row['slot_30'],
+            'queue': queue,
+            'calls': calls,
+            'aht_sec': aht,
+            # Erlang sonuçları
+            'erlang_raw': erlang_raw,           # Shrinkage'sız
+            'erlang_need': erlang_need,         # Shrinkage dahil
+            # Gerçek değerler
+            'actual_agents': actual_agents,
+            # Farklar
+            'diff_vs_raw': diff_raw,            # Gerçek - Raw
+            'diff_vs_need': diff,               # Gerçek - Shrinkage dahil
+            # Metrikler
+            'expected_sl': round(expected_sl * 100, 1),
+            'achieved_sl': round(achieved_sl * 100, 1),
+            'expected_asa': round(expected_asa, 1),
+            'achieved_asa': round(achieved_asa, 1) if achieved_asa < 999 else 999
         })
-    
-    return pd.DataFrame(results)
+
+df_comparison = pd.DataFrame(results)
+print(f"Karşılaştırma tamamlandı: {len(df_comparison)} satır")
+df_comparison.head(10)
 
 
-# ============================================================================
-# BÖLÜM 3: FAZLALIK HESAPLAMA
-# ============================================================================
+# =============================================================================
+# HÜCRE 10: GENEL ÖZET RAPOR
+# =============================================================================
 
-def calculate_surplus(base_df, config):
-    """
-    Mevcut kadro vs Base ihtiyaç karşılaştırması
-    Fazla kapasiteyi bul
-    """
-    staff = config['staff']
-    
-    # Hafta içi ve hafta sonu ayrı
-    weekday_df = base_df[base_df['weekday_flg'] == 1]
-    weekend_df = base_df[base_df['weekday_flg'] == 0]
-    
-    # Her kuyruk için max base ihtiyaç
-    max_base_a = base_df['base_agents_a'].max()
-    max_base_b = base_df['base_agents_b'].max()
-    max_base_c = base_df['base_agents_c'].max()
-    
-    # Hafta içi max
-    weekday_max_a = weekday_df['base_agents_a'].max() if len(weekday_df) > 0 else 0
-    weekday_max_b = weekday_df['base_agents_b'].max() if len(weekday_df) > 0 else 0
-    weekday_max_c = weekday_df['base_agents_c'].max() if len(weekday_df) > 0 else 0
-    
-    # Hafta sonu max
-    weekend_max_a = weekend_df['base_agents_a'].max() if len(weekend_df) > 0 else 0
-    weekend_max_b = weekend_df['base_agents_b'].max() if len(weekend_df) > 0 else 0
-    weekend_max_c = weekend_df['base_agents_c'].max() if len(weekend_df) > 0 else 0
-    
-    # Fazla kapasite (hafta içi yardıma gidebilecek)
-    surplus_b_weekday = max(0, staff['queue_b'] - weekday_max_b)
-    surplus_c_weekday = max(0, staff['queue_c'] - weekday_max_c)
-    
-    surplus = {
-        'staff': staff,
-        'max_base': {
-            'queue_a': max_base_a,
-            'queue_b': max_base_b,
-            'queue_c': max_base_c
-        },
-        'weekday_max': {
-            'queue_a': weekday_max_a,
-            'queue_b': weekday_max_b,
-            'queue_c': weekday_max_c
-        },
-        'weekend_max': {
-            'queue_a': weekend_max_a,
-            'queue_b': weekend_max_b,
-            'queue_c': weekend_max_c
-        },
-        'surplus_weekday': {
-            'queue_b': surplus_b_weekday,
-            'queue_c': surplus_c_weekday,
-            'total': surplus_b_weekday + surplus_c_weekday
-        }
-    }
-    
-    return surplus
+print("=" * 70)
+print("ERLANG C VALİDASYON RAPORU - GENEL ÖZET")
+print("=" * 70)
+
+# Sadece çağrı olan slotları filtrele
+df_with_calls = df_comparison[df_comparison['calls'] > 0]
+
+print(f"\n📊 VERİ ÖZETİ:")
+print(f"   Toplam slot: {len(df_comparison)}")
+print(f"   Çağrı olan slot: {len(df_with_calls)}")
+print(f"   Toplam çağrı: {df_with_calls['calls'].sum():.0f}")
+
+print(f"\n📈 ERLANG vs GERÇEK KARŞILAŞTIRMA (Shrinkage dahil):")
+print(f"   Ortalama fark (actual - erlang_need): {df_with_calls['diff_vs_need'].mean():.2f}")
+print(f"   Understaffed slot: {len(df_with_calls[df_with_calls['diff_vs_need'] < 0])} ({len(df_with_calls[df_with_calls['diff_vs_need'] < 0])/len(df_with_calls)*100:.1f}%)")
+print(f"   Overstaffed slot: {len(df_with_calls[df_with_calls['diff_vs_need'] > 0])} ({len(df_with_calls[df_with_calls['diff_vs_need'] > 0])/len(df_with_calls)*100:.1f}%)")
+print(f"   Tam eşleşme: {len(df_with_calls[df_with_calls['diff_vs_need'] == 0])}")
+
+print(f"\n📈 ERLANG vs GERÇEK KARŞILAŞTIRMA (Shrinkage'sız - Raw):")
+print(f"   Ortalama fark (actual - erlang_raw): {df_with_calls['diff_vs_raw'].mean():.2f}")
+print(f"   Understaffed slot: {len(df_with_calls[df_with_calls['diff_vs_raw'] < 0])}")
+print(f"   Overstaffed slot: {len(df_with_calls[df_with_calls['diff_vs_raw'] > 0])}")
+
+print(f"\n🎯 SERVİS SEVİYESİ:")
+print(f"   Ortalama beklenen SL: %{df_with_calls['expected_sl'].mean():.1f}")
+print(f"   Ortalama gerçekleşen SL (tahmini): %{df_with_calls['achieved_sl'].mean():.1f}")
 
 
-# ============================================================================
-# BÖLÜM 4: YARDIMLAŞMA UYGULA - FİNAL İHTİYAÇ
-# ============================================================================
+# =============================================================================
+# HÜCRE 11: KUYRUK BAZINDA ÖZET
+# =============================================================================
 
-def apply_help_rules(base_df, surplus, config):
-    """
-    Hafta içi yardımlaşmayı uygula
-    B ve C fazlası A'ya yardım eder
-    """
-    results = []
+print("\n" + "=" * 70)
+print("KUYRUK BAZINDA ÖZET")
+print("=" * 70)
+
+for queue in ['A', 'B', 'C']:
+    q_data = df_with_calls[df_with_calls['queue'] == queue]
+    if len(q_data) > 0:
+        print(f"\n📌 KUYRUK {queue}:")
+        print(f"   Ort. Çağrı: {q_data['calls'].mean():.1f}")
+        print(f"   Ort. Erlang (raw): {q_data['erlang_raw'].mean():.1f}")
+        print(f"   Ort. Erlang (shrinkage dahil): {q_data['erlang_need'].mean():.1f}")
+        print(f"   Ort. Gerçek Agent: {q_data['actual_agents'].mean():.1f}")
+        print(f"   Ort. Fark (vs raw): {q_data['diff_vs_raw'].mean():.2f}")
+        print(f"   Ort. Fark (vs need): {q_data['diff_vs_need'].mean():.2f}")
+        print(f"   Ort. Gerçekleşen SL: %{q_data['achieved_sl'].mean():.1f}")
+
+
+# =============================================================================
+# HÜCRE 12: PROBLEMLİ SLOTLAR
+# =============================================================================
+
+print("\n" + "=" * 70)
+print("PROBLEMLİ SLOTLAR")
+print("=" * 70)
+
+# Ciddi understaffing (Erlang raw'dan bile düşük)
+print("\n⚠️ CİDDİ UNDERSTAFFING (actual < erlang_raw):")
+serious_under = df_with_calls[df_with_calls['diff_vs_raw'] < -2].sort_values('diff_vs_raw')
+if len(serious_under) > 0:
+    print(serious_under[['date', 'slot_30', 'queue', 'calls', 'erlang_raw', 'actual_agents', 'diff_vs_raw', 'achieved_sl']].head(10).to_string(index=False))
+else:
+    print("   Ciddi understaffing bulunamadı ✓")
+
+# Düşük SL
+print("\n⚠️ DÜŞÜK SERVİS SEVİYESİ (SL < %70):")
+low_sl = df_with_calls[df_with_calls['achieved_sl'] < 70].sort_values('achieved_sl')
+if len(low_sl) > 0:
+    print(low_sl[['date', 'slot_30', 'queue', 'calls', 'actual_agents', 'achieved_sl', 'achieved_asa']].head(10).to_string(index=False))
+else:
+    print("   Düşük SL bulunamadı ✓")
+
+
+# =============================================================================
+# HÜCRE 13: SAAT BAZINDA ANALİZ
+# =============================================================================
+
+print("\n" + "=" * 70)
+print("SAAT BAZINDA ORTALAMA")
+print("=" * 70)
+
+hourly_analysis = df_with_calls.groupby('slot_30').agg({
+    'calls': 'mean',
+    'erlang_raw': 'mean',
+    'actual_agents': 'mean',
+    'diff_vs_raw': 'mean',
+    'achieved_sl': 'mean'
+}).round(1)
+
+hourly_analysis.columns = ['Ort.Çağrı', 'Erlang', 'Gerçek', 'Fark', 'SL%']
+print(hourly_analysis.to_string())
+
+
+# =============================================================================
+# HÜCRE 14: GÖRSELLEŞTİRME
+# =============================================================================
+
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+# Üst satır: Erlang vs Actual scatter
+for i, queue in enumerate(['A', 'B', 'C']):
+    q_data = df_with_calls[df_with_calls['queue'] == queue]
     
-    help_rules = config['help_rules']
-    
-    for idx, row in base_df.iterrows():
-        weekday_flg = row['weekday_flg']
+    if len(q_data) > 0:
+        axes[0, i].scatter(q_data['erlang_raw'], q_data['actual_agents'], alpha=0.5, label='Raw')
         
-        # Base değerleri kopyala
-        result = {
-            'date': row['date'],
-            'time': row['time'],
-            'weekday_flg': weekday_flg,
-            'calls_a': row['calls_a'],
-            'calls_b': row['calls_b'],
-            'calls_c': row['calls_c'],
-            'base_agents_a': row['base_agents_a'],
-            'base_agents_b': row['base_agents_b'],
-            'base_agents_c': row['base_agents_c'],
-            'base_total': row['base_total']
-        }
+        # 45 derece çizgisi (mükemmel eşleşme)
+        max_val = max(q_data['erlang_raw'].max(), q_data['actual_agents'].max())
+        axes[0, i].plot([0, max_val], [0, max_val], 'r--', label='Mükemmel eşleşme')
         
-        if weekday_flg == 1 and help_rules['weekday_only']:
-            # Hafta içi: Yardımlaşma VAR
-            
-            # B'nin bu saatteki fazlası
-            b_surplus_now = max(0, config['staff']['queue_b'] - row['base_agents_b'])
-            # C'nin bu saatteki fazlası
-            c_surplus_now = max(0, config['staff']['queue_c'] - row['base_agents_c'])
-            
-            # Toplam yardım kapasitesi
-            help_available = 0
-            if help_rules['b_helps_a']:
-                help_available += b_surplus_now
-            if help_rules['c_helps_a']:
-                help_available += c_surplus_now
-            
-            # A'nın ihtiyacından yardımı düş
-            help_used = min(help_available, row['base_agents_a'])
-            final_agents_a = max(0, row['base_agents_a'] - help_used)
-            
-            result['help_from_b'] = min(b_surplus_now, help_used) if help_rules['b_helps_a'] else 0
-            result['help_from_c'] = min(c_surplus_now, max(0, help_used - result['help_from_b'])) if help_rules['c_helps_a'] else 0
-            result['total_help'] = result['help_from_b'] + result['help_from_c']
-            
-            result['final_agents_a'] = final_agents_a
-            result['final_agents_b'] = row['base_agents_b']
-            result['final_agents_c'] = row['base_agents_c']
-            result['final_total'] = final_agents_a + row['base_agents_b'] + row['base_agents_c']
-            
-        else:
-            # Hafta sonu: Yardımlaşma YOK
-            result['help_from_b'] = 0
-            result['help_from_c'] = 0
-            result['total_help'] = 0
-            result['final_agents_a'] = row['base_agents_a']
-            result['final_agents_b'] = row['base_agents_b']
-            result['final_agents_c'] = row['base_agents_c']
-            result['final_total'] = row['base_total']
-        
-        results.append(result)
+        axes[0, i].set_xlabel('Erlang Tahmini (Raw)')
+        axes[0, i].set_ylabel('Gerçek Agent')
+        axes[0, i].set_title(f'Kuyruk {queue}')
+        axes[0, i].legend()
+        axes[0, i].grid(True, alpha=0.3)
+
+# Alt satır: Fark histogramı
+for i, queue in enumerate(['A', 'B', 'C']):
+    q_data = df_with_calls[df_with_calls['queue'] == queue]
     
-    return pd.DataFrame(results)
+    if len(q_data) > 0:
+        axes[1, i].hist(q_data['diff_vs_raw'], bins=20, edgecolor='black', alpha=0.7)
+        axes[1, i].axvline(x=0, color='r', linestyle='--', label='Sıfır fark')
+        axes[1, i].axvline(x=q_data['diff_vs_raw'].mean(), color='g', linestyle='-', label=f'Ortalama: {q_data["diff_vs_raw"].mean():.1f}')
+        axes[1, i].set_xlabel('Fark (Gerçek - Erlang)')
+        axes[1, i].set_ylabel('Slot Sayısı')
+        axes[1, i].set_title(f'Kuyruk {queue} - Fark Dağılımı')
+        axes[1, i].legend()
+        axes[1, i].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
 
 
-# ============================================================================
-# BÖLÜM 5: RAPORLAMA
-# ============================================================================
+# =============================================================================
+# HÜCRE 15: SONUÇLARI KAYDET (OPSİYONEL)
+# =============================================================================
 
-def print_surplus_report(surplus):
-    """Fazlalık raporu"""
-    print("\n" + "=" * 60)
-    print("📊 FAZLALIK RAPORU")
-    print("=" * 60)
-    
-    print("\n🏢 MEVCUT KADRO:")
-    for q, count in surplus['staff'].items():
-        print(f"   {q}: {count} agent")
-    
-    print("\n📈 MAX BASE İHTİYAÇ (Tüm Dönem):")
-    for q, count in surplus['max_base'].items():
-        print(f"   {q}: {count} agent")
-    
-    print("\n📅 HAFTA İÇİ MAX İHTİYAÇ:")
-    print(f"   Queue A: {surplus['weekday_max']['queue_a']} agent")
-    print(f"   Queue B: {surplus['weekday_max']['queue_b']} agent")
-    print(f"   Queue C: {surplus['weekday_max']['queue_c']} agent")
-    
-    print("\n📅 HAFTA SONU MAX İHTİYAÇ:")
-    print(f"   Queue A: {surplus['weekend_max']['queue_a']} agent")
-    print(f"   Queue B: {surplus['weekend_max']['queue_b']} agent")
-    print(f"   Queue C: {surplus['weekend_max']['queue_c']} agent")
-    
-    print("\n🎁 FAZLA KAPASİTE (Hafta İçi A'ya Yardım):")
-    print(f"   Queue B fazlası: {surplus['surplus_weekday']['queue_b']} agent")
-    print(f"   Queue C fazlası: {surplus['surplus_weekday']['queue_c']} agent")
-    print(f"   TOPLAM YARDIM: {surplus['surplus_weekday']['total']} agent")
+# Excel'e kaydet
+# df_comparison.to_excel('erlang_validation_results.xlsx', index=False)
+# print("Sonuçlar 'erlang_validation_results.xlsx' dosyasına kaydedildi")
 
+# Özet istatistikler
+print("\n" + "=" * 70)
+print("VALİDASYON SONUCU")
+print("=" * 70)
 
-def print_interval_summary(base_df, final_df):
-    """Interval özet raporu"""
-    print("\n" + "=" * 60)
-    print("📋 INTERVAL ÖZET")
-    print("=" * 60)
-    
-    print("\n📊 BASE SENARYO (Yardımlaşma Öncesi):")
-    print(f"   Queue A - Ort: {base_df['base_agents_a'].mean():.0f}, Max: {base_df['base_agents_a'].max()}")
-    print(f"   Queue B - Ort: {base_df['base_agents_b'].mean():.0f}, Max: {base_df['base_agents_b'].max()}")
-    print(f"   Queue C - Ort: {base_df['base_agents_c'].mean():.0f}, Max: {base_df['base_agents_c'].max()}")
-    print(f"   TOPLAM  - Ort: {base_df['base_total'].mean():.0f}, Max: {base_df['base_total'].max()}")
-    
-    print("\n📊 FİNAL SENARYO (Yardımlaşma Sonrası):")
-    print(f"   Queue A - Ort: {final_df['final_agents_a'].mean():.0f}, Max: {final_df['final_agents_a'].max()}")
-    print(f"   Queue B - Ort: {final_df['final_agents_b'].mean():.0f}, Max: {final_df['final_agents_b'].max()}")
-    print(f"   Queue C - Ort: {final_df['final_agents_c'].mean():.0f}, Max: {final_df['final_agents_c'].max()}")
-    print(f"   TOPLAM  - Ort: {final_df['final_total'].mean():.0f}, Max: {final_df['final_total'].max()}")
-    
-    # Hafta içi / hafta sonu ayrımı
-    weekday_base = base_df[base_df['weekday_flg'] == 1]
-    weekend_base = base_df[base_df['weekday_flg'] == 0]
-    weekday_final = final_df[final_df['weekday_flg'] == 1]
-    weekend_final = final_df[final_df['weekday_flg'] == 0]
-    
-    print("\n📅 HAFTA İÇİ:")
-    print(f"   Base toplam ort: {weekday_base['base_total'].mean():.0f}")
-    print(f"   Final toplam ort: {weekday_final['final_total'].mean():.0f}")
-    print(f"   Yardım ort: {weekday_final['total_help'].mean():.0f}")
-    
-    if len(weekend_base) > 0:
-        print("\n📅 HAFTA SONU:")
-        print(f"   Base toplam ort: {weekend_base['base_total'].mean():.0f}")
-        print(f"   Final toplam ort: {weekend_final['final_total'].mean():.0f}")
+avg_diff = df_with_calls['diff_vs_raw'].mean()
 
+if abs(avg_diff) < 1:
+    print("✅ MÜKEMMEL: Erlang tahminleri gerçek değerlerle çok uyumlu!")
+elif abs(avg_diff) < 3:
+    print("👍 İYİ: Erlang tahminleri kabul edilebilir seviyede.")
+elif avg_diff > 3:
+    print("⚠️ OVERSTAFFING: Gerçekte Erlang'ın önerdiğinden fazla kişi çalışıyor.")
+else:
+    print("⚠️ UNDERSTAFFING: Gerçekte Erlang'ın önerdiğinden az kişi çalışıyor.")
 
-def export_results(base_df, final_df, surplus):
-    """Sonuçları Excel'e kaydet"""
-    today = datetime.now().strftime('%Y%m%d')
-    
-    # Base senaryo
-    base_df.to_excel(f'{today}_base_interval.xlsx', index=False)
-    
-    # Final (yardımlaşma sonrası)
-    final_df.to_excel(f'{today}_final_interval.xlsx', index=False)
-    
-    # Fazlalık raporu
-    surplus_df = pd.DataFrame([
-        {'Metrik': 'Mevcut A', 'Değer': surplus['staff']['queue_a']},
-        {'Metrik': 'Mevcut B', 'Değer': surplus['staff']['queue_b']},
-        {'Metrik': 'Mevcut C', 'Değer': surplus['staff']['queue_c']},
-        {'Metrik': 'Max Base A', 'Değer': surplus['max_base']['queue_a']},
-        {'Metrik': 'Max Base B', 'Değer': surplus['max_base']['queue_b']},
-        {'Metrik': 'Max Base C', 'Değer': surplus['max_base']['queue_c']},
-        {'Metrik': 'Hafta İçi Max A', 'Değer': surplus['weekday_max']['queue_a']},
-        {'Metrik': 'Hafta İçi Max B', 'Değer': surplus['weekday_max']['queue_b']},
-        {'Metrik': 'Hafta İçi Max C', 'Değer': surplus['weekday_max']['queue_c']},
-        {'Metrik': 'Hafta Sonu Max A', 'Değer': surplus['weekend_max']['queue_a']},
-        {'Metrik': 'Hafta Sonu Max B', 'Değer': surplus['weekend_max']['queue_b']},
-        {'Metrik': 'Hafta Sonu Max C', 'Değer': surplus['weekend_max']['queue_c']},
-        {'Metrik': 'B Fazlası (Hafta içi)', 'Değer': surplus['surplus_weekday']['queue_b']},
-        {'Metrik': 'C Fazlası (Hafta içi)', 'Değer': surplus['surplus_weekday']['queue_c']},
-        {'Metrik': 'Toplam Yardım Kapasitesi', 'Değer': surplus['surplus_weekday']['total']}
-    ])
-    surplus_df.to_excel(f'{today}_fazlalik.xlsx', index=False)
-    
-    print(f"\n✅ Dosyalar kaydedildi:")
-    print(f"   - {today}_base_interval.xlsx")
-    print(f"   - {today}_final_interval.xlsx")
-    print(f"   - {today}_fazlalik.xlsx")
-
-
-# ============================================================================
-# ANA FONKSİYON
-# ============================================================================
-
-def calculate_base_planning(df):
-    """
-    Base kapasite planlaması
-    Sadece interval ihtiyaçları + fazlalık hesaplama
-    """
-    
-    print("=" * 60)
-    print("KAPASİTE PLANLAMA - BASE + FAZLALIK")
-    print("=" * 60)
-    
-    print(f"\n⚙️ Konfigürasyon:")
-    print(f"   AHT: {CONFIG['aht']} saniye")
-    print(f"   Hedef ASA: ≤ {CONFIG['target_asa']} saniye")
-    print(f"   Shrinkage: %{CONFIG['shrinkage']*100}")
-    print(f"   Mevcut Kadro: A={CONFIG['staff']['queue_a']}, B={CONFIG['staff']['queue_b']}, C={CONFIG['staff']['queue_c']}")
-    
-    # ADIM 1: Base senaryo
-    print(f"\n📊 ADIM 1: Base senaryo hesaplanıyor...")
-    base_df = calculate_base_requirements(df, CONFIG)
-    print(f"   ✅ {len(base_df)} interval hesaplandı")
-    
-    # ADIM 2: Fazlalık hesapla
-    print(f"\n📈 ADIM 2: Fazlalık hesaplanıyor...")
-    surplus = calculate_surplus(base_df, CONFIG)
-    
-    # ADIM 3: Yardımlaşma uygula
-    print(f"\n🤝 ADIM 3: Yardımlaşma uygulanıyor...")
-    final_df = apply_help_rules(base_df, surplus, CONFIG)
-    
-    # Raporlar
-    print_surplus_report(surplus)
-    print_interval_summary(base_df, final_df)
-    
-    print("\n" + "=" * 60)
-    print("✅ TAMAMLANDI!")
-    print("=" * 60)
-    
-    return base_df, final_df, surplus
-
-
-# ============================================================================
-# KULLANIM
-# ============================================================================
-
-if __name__ == '__main__':
-    print("""
-╔════════════════════════════════════════════════════════════════════╗
-║  KAPASİTE PLANLAMA - BASE + FAZLALIK                              ║
-╚════════════════════════════════════════════════════════════════════╝
-
-VERİ FORMATI:
-    Kolonlar: date, time, queue_a, queue_b, queue_c, weekday_flg
-    
-    weekday_flg: 1 = Hafta içi, 0 = Hafta sonu
-
-KULLANIM:
-
-# Veriyi oku
-df = pd.read_excel('cagri_tahminleri.xlsx')
-
-# Hesapla
-base_df, final_df, surplus = calculate_base_planning(df)
-
-# Kaydet
-export_results(base_df, final_df, surplus)
-""")
+print(f"\n   Ortalama fark: {avg_diff:.2f} agent")
+print(f"   Yorum: {'Fazla' if avg_diff > 0 else 'Eksik'} çalışan eğilimi var.")
