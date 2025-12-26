@@ -175,59 +175,58 @@ def convert_15_to_30_calls(df_15):
     return df_30.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
 
 
-def calculate_staffing_by_slot(df_staff):
-    """Her 30 dakikalık slot için kuyruk bazında aktif agent sayısını hesapla"""
+def prepare_staffing_data(df_staff):
+    """
+    Staffing verisini pivot yaparak kuyruk bazlı agent sayılarına çevirir
+    
+    Input kolonları: working_date, line_based_main_group, saatler, calisan_kisi_sayisi
+    Output kolonları: data_date, slot_30, a_agents, b_agents, c_agents
+    """
     
     df = df_staff.copy()
     
+    # Kolon isimlerini standartlaştır
+    df = df.rename(columns={
+        'working_date': 'data_date',
+        'saatler': 'slot_30',
+        'calisan_kisi_sayisi': 'agent_count'
+    })
+    
     # Tarih formatını düzenle
-    df['work_date'] = pd.to_datetime(df['work_date'])
+    df['data_date'] = pd.to_datetime(df['data_date'])
     
-    # shift_start ve shift_end'i string'e çevir (eğer değilse)
-    if df['shift_start'].dtype != 'object':
-        df['shift_start'] = df['shift_start'].astype(str)
-    if df['shift_end'].dtype != 'object':
-        df['shift_end'] = df['shift_end'].astype(str)
+    # Saat formatını düzenle (HH:MM olmalı)
+    if df['slot_30'].dtype != 'object':
+        df['slot_30'] = df['slot_30'].astype(str)
+    df['slot_30'] = df['slot_30'].str[:5]  # İlk 5 karakter (HH:MM)
     
-    # HH:MM formatına getir (eğer HH:MM:SS ise)
-    df['shift_start'] = df['shift_start'].str[:5]
-    df['shift_end'] = df['shift_end'].str[:5]
+    # line_based_main_group değerlerini standartlaştır
+    # a_cagrilari, b_cagrilar, c_cagrilar gibi değerleri A, B, C'ye çevir
+    df['queue'] = df['line_based_main_group'].str.lower().str[0].str.upper()  # İlk harf: A, B veya C
     
-    # Tüm 30 dakikalık slotları oluştur
-    slots = []
-    for hour in range(0, 24):  # 00:00 - 23:30
-        for minute in ['00', '30']:
-            slots.append(f"{hour:02d}:{minute}")
+    # Pivot: Her satırda tarih + saat, kolonlarda A, B, C agent sayıları
+    df_pivot = df.pivot_table(
+        index=['data_date', 'slot_30'],
+        columns='queue',
+        values='agent_count',
+        aggfunc='sum',
+        fill_value=0
+    ).reset_index()
     
-    results = []
+    # Kolon isimlerini düzenle
+    df_pivot.columns.name = None
+    df_pivot = df_pivot.rename(columns={
+        'A': 'a_agents',
+        'B': 'b_agents',
+        'C': 'c_agents'
+    })
     
-    # Her tarih için
-    for work_date in df['work_date'].unique():
-        df_day = df[df['work_date'] == work_date]
-        
-        for slot in slots:
-            slot_counts = {'a_agents': 0, 'b_agents': 0, 'c_agents': 0}
-            
-            for _, row in df_day.iterrows():
-                shift_start = row['shift_start']
-                shift_end = row['shift_end']
-                
-                # Bu slotta aktif mi? (slot >= start AND slot < end)
-                if shift_start <= slot < shift_end:
-                    if row['a_cagrilar'] == 1:
-                        slot_counts['a_agents'] += 1
-                    if row['b_cagrilar'] == 1:
-                        slot_counts['b_agents'] += 1
-                    if row['c_cagrilar'] == 1:
-                        slot_counts['c_agents'] += 1
-            
-            results.append({
-                'data_date': work_date,
-                'slot_30': slot,
-                **slot_counts
-            })
+    # Eksik kuyruk kolonlarını ekle (eğer yoksa)
+    for col in ['a_agents', 'b_agents', 'c_agents']:
+        if col not in df_pivot.columns:
+            df_pivot[col] = 0
     
-    return pd.DataFrame(results)
+    return df_pivot.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
 
 print("Veri hazırlama fonksiyonları tanımlandı ✓")
 
@@ -257,34 +256,31 @@ df_calls_15.head()
 
 
 # =============================================================================
-# HÜCRE 6: STAFFING VERİSİNİ YÜKLE (ÇALIŞAN VERİSİ)
+# HÜCRE 6: STAFFING VERİSİNİ YÜKLE (ÇALIŞAN SAYISI VERİSİ)
 # =============================================================================
 
-# SQL'den gelen çalışan verisi
-# Kolonlar: work_date, employee_name, team_id, a_cagrilar, b_cagrilar, c_cagrilar, shift_start, shift_end
+# SQL'den gelen staffing verisi
+# Kolonlar: working_date, line_based_main_group, saatler, calisan_kisi_sayisi
 
 # SEÇENEK A: CSV'den oku
-# df_staff = pd.read_csv('calisan_verisi.csv')
+# df_staff_raw = pd.read_csv('staffing_verisi.csv')
 
 # SEÇENEK B: Direkt DataFrame oluştur (test için örnek veri - SİL VE KENDİ VERİNİ YAZ)
-df_staff = pd.DataFrame({
-    'work_date': ['2024-01-06']*10,
-    'employee_name': ['Ali', 'Veli', 'Ayse', 'Fatma', 'Mehmet', 'Zeynep', 'Can', 'Ece', 'Burak', 'Selin'],
-    'team_id': ['A1', 'A1', 'A1', 'A1', 'B1', 'B1', 'B1', 'C1', 'C1', 'C1'],
-    'a_cagrilar': [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-    'b_cagrilar': [0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
-    'c_cagrilar': [0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
-    'shift_start': ['09:00', '09:00', '10:00', '10:00', '09:00', '09:30', '10:00', '09:00', '09:30', '10:00'],
-    'shift_end': ['17:00', '17:00', '18:00', '18:00', '17:00', '17:30', '18:00', '17:00', '17:30', '18:00']
+df_staff_raw = pd.DataFrame({
+    'working_date': ['2024-01-06']*6,  # Cumartesi
+    'line_based_main_group': ['a_cagrilari', 'a_cagrilari', 'b_cagrilar', 'b_cagrilar', 'c_cagrilar', 'c_cagrilar'],
+    'saatler': ['09:00', '09:30', '09:00', '09:30', '09:00', '09:30'],
+    'calisan_kisi_sayisi': [12, 14, 8, 8, 5, 6]
 })
 
-print(f"Çalışan verisi yüklendi: {len(df_staff)} satır")
-print(f"Tarih aralığı: {df_staff['work_date'].min()} - {df_staff['work_date'].max()}")
-df_staff.head()
+print(f"Staffing ham verisi yüklendi: {len(df_staff_raw)} satır")
+print(f"Tarih aralığı: {df_staff_raw['working_date'].min()} - {df_staff_raw['working_date'].max()}")
+print(f"Kuyruklar: {df_staff_raw['line_based_main_group'].unique()}")
+df_staff_raw.head()
 
 
 # =============================================================================
-# HÜCRE 7: VERİ DÖNÜŞÜMÜ - 15dk → 30dk ve STAFFING HESAPLA
+# HÜCRE 7: VERİ DÖNÜŞÜMÜ
 # =============================================================================
 
 # Çağrı verisini 30dk'ya çevir
@@ -295,15 +291,15 @@ print(f"30dk'lık çağrı verisi: {len(df_calls_30)} satır")
 df_calls_weekend = df_calls_30[df_calls_30['weekday_flg'] == 0].copy()
 print(f"Haftasonu çağrı verisi: {len(df_calls_weekend)} satır")
 
-# Staffing hesapla
-df_staffing = calculate_staffing_by_slot(df_staff)
-print(f"Staffing verisi hesaplandı: {len(df_staffing)} satır")
+# Staffing verisini pivot yap
+df_staffing = prepare_staffing_data(df_staff_raw)
+print(f"Staffing verisi hazırlandı: {len(df_staffing)} satır")
 
-# Sadece çağrı olan slotlara göre staffing'i filtrele
-df_staffing_filtered = df_staffing[df_staffing['a_agents'] + df_staffing['b_agents'] + df_staffing['c_agents'] > 0]
-print(f"Aktif slot sayısı: {len(df_staffing_filtered)}")
+print("\n📋 Çağrı verisi örnek:")
+display(df_calls_weekend.head()) if 'display' in dir() else print(df_calls_weekend.head())
 
-df_calls_weekend.head()
+print("\n📋 Staffing verisi örnek:")
+display(df_staffing.head()) if 'display' in dir() else print(df_staffing.head())
 
 
 # =============================================================================
