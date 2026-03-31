@@ -11,9 +11,22 @@
 
 ```
 Günlük hayat örnekleri:
-- "En kısa yoldan işe nasıl giderim?" → Route optimization
-- "Bütçemi nasıl dağıtayım?" → Resource allocation
-- "Hangi ürünleri ne kadar üreteyim?" → Production planning
+
+"En kısa yoldan işe nasıl giderim?"
+→ Shortest Path / VRP problemi
+→ Çözüm: Graph algoritmaları, MIP
+
+"Bütçemi nasıl dağıtayım?"
+→ Resource Allocation problemi  
+→ Çözüm: LP (lineer ise), MIP (tam sayı kararlar varsa)
+
+"Hangi ürünleri ne kadar üreteyim?"
+→ Production Planning problemi
+→ Çözüm: LP (miktarlar kesirli olabilir), MIP (parti büyüklükleri)
+
+"Çalışanları vardiyalara nasıl atayayım?"
+→ Scheduling problemi
+→ Çözüm: MIP veya CP (Constraint Programming)
 ```
 
 ## 1.2 Matematiksel Formülasyon
@@ -77,19 +90,20 @@ LP, hem amaç fonksiyonunun hem kısıtların **lineer** (doğrusal) olduğu opt
 ## 2.2 Standart Form
 
 ```
-maximize   z = c₁x₁ + c₂x₂ + ... + cₙxₙ
-subject to:
-           a₁₁x₁ + a₁₂x₂ + ... ≤ b₁
-           a₂₁x₁ + a₂₂x₂ + ... ≤ b₂
-           ...
-           x₁, x₂, ... ≥ 0
+maksimize   z = c₁x₁ + c₂x₂ + ... + cₙxₙ
+
+kısıtlar:
+            a₁₁x₁ + a₁₂x₂ + ... ≤ b₁
+            a₂₁x₁ + a₂₂x₂ + ... ≤ b₂
+            ...
+            x₁, x₂, ... ≥ 0
 ```
 
 **Matris formunda:**
 ```
 max  z = cᵀx
-s.t. Ax ≤ b
-     x ≥ 0
+kısıtlar:  Ax ≤ b
+           x ≥ 0
 ```
 
 ## 2.3 Simplex Algoritması
@@ -98,7 +112,7 @@ LP'nin çözüm yöntemi. 1947'de George Dantzig tarafından geliştirildi.
 
 ### Geometrik Anlam
 
-Her kısıt, n-boyutlu uzayda bir **yarı-düzlem** tanımlar. Tüm kısıtların kesişimi bir **convex polytope** (dışbükey çokgen) oluşturur. Buna **feasible region** denir.
+Her kısıt, n-boyutlu uzayda bir **yarı-düzlem** tanımlar. Tüm kısıtların kesişimi bir **convex polytope** (dışbükey çokgen) oluşturur. Buna **feasible region** (uygun bölge) denir.
 
 ```
         x₂
@@ -110,10 +124,12 @@ Her kısıt, n-boyutlu uzayda bir **yarı-düzlem** tanımlar. Tüm kısıtları
       4 ─┤  / │
          │ /  │    Feasible
       2 ─┤/   │    Region
-         │    │    (yeşil alan)
+         │    │    
       0 ─┼────┼────── x₁
          0    4    8
 ```
+
+**Feasible region:** Tüm kısıtları sağlayan noktaların kümesi. Yukarıdaki şekilde çizgilerle sınırlanan alan.
 
 ### Algoritma Adımları
 
@@ -216,6 +232,17 @@ MIP, aynı modelde hem **continuous** hem **integer** değişkenlerin bulunduğu
 
 MIP'in ana çözüm algoritması.
 
+### Temel Kavramlar
+
+```
+Incumbent (mevcut en iyi): Şu ana kadar bulunan en iyi tam sayı çözüm.
+                           Başta yok, ilk integer çözüm bulununca güncellenir.
+
+Bound (sınır): LP relaxation sonucu. Gerçek optimal bundan iyi olamaz.
+
+Prune (budama): Bir dalı atmak. O dalda daha iyi çözüm olmayacağı kesin.
+```
+
 ### Fikir
 
 LP relaxation çöz. Sonuç kesirli mi? Değişkeni ikiye böl ve iki alt problem oluştur.
@@ -232,33 +259,44 @@ LP relaxation çöz. Sonuç kesirli mi? Değişkeni ikiye böl ve iki alt proble
 
 3. SOLVE: Her dalda yeni LP çöz
 
-4. BOUND: 
-   - Çözüm integer → kaydet (incumbent)
-   - LP sonucu incumbent'tan kötü → budala (prune)
-   - Çözüm kesirli → tekrar branch
+4. BOUND & PRUNE: 
+   - Çözüm tam sayı → incumbent olarak kaydet
+   - LP sonucu incumbent'tan kötü → bu dalı buda (daha iyi çözüm çıkamaz)
+   - Çözüm kesirli ve umut var → tekrar branch
 
-5. OPTIMAL: Tüm dallar işlendi → en iyi incumbent optimal
+5. OPTIMAL: Tüm dallar işlendi → incumbent kesin optimal
 ```
 
-### Görsel
+### Görsel Örnek
 
 ```
                     LP Relaxation
-                    x=3.7, z=42.8
+                    x=3.7, z=42.8  (kesirli, bound=42.8)
                          │
             ┌────────────┴────────────┐
             │                         │
         x ≤ 3                     x ≥ 4
         z=40.2                    z=41.5
+        (tam sayı!)               (tam sayı!)
+        incumbent=40.2            incumbent=41.5 (daha iyi!)
             │                         │
-        (integer!)              ┌─────┴─────┐
-        Incumbent=40.2          │           │
-                            x ≤ 4       x ≥ 5
-                            z=41.5      z=39.1
-                            (integer!)  (< 41.5, prune!)
-                            
-        Optimal: x=4, z=41.5
+            │                    ┌────┴────┐
+        Budandı                  │         │
+        (40.2 < 41.5,        x ≤ 4     x ≥ 5
+        daha iyi olamaz)     z=41.5    z=39.1
+                             Optimal!   Budandı
+                                       (39.1 < 41.5)
+        
+Final: x=4, z=41.5 (incumbent = optimal)
 ```
+
+**Akış:**
+1. Root LP: z=42.8 (kesirli) → branch
+2. Sol dal: z=40.2 (tam sayı) → incumbent=40.2
+3. Sağ dal: z=41.5 (tam sayı, 40.2'den iyi) → incumbent=41.5
+4. Sol dal budandı (40.2 < 41.5, o daldan daha iyi çıkamaz)
+5. Sağ dalda devam, ama alt dallar da kötü → budandı
+6. Bitti → incumbent=41.5 optimal
 
 ### Gap Kavramı
 
@@ -296,96 +334,200 @@ Exact yöntemler (LP/MIP) her zaman çalışmaz:
 
 ## 5.2 Heuristic (Sezgisel)
 
-Probleme özel, elle tasarlanmış kural.
+Probleme özel, elle tasarlanmış kural. Optimal garanti etmez ama hızlı çözüm verir.
 
-**Greedy (Açgözlü):**
+### Greedy (Açgözlü)
+
+Her adımda o an en iyi görüneni seç. Geleceği düşünme.
+
+**Örnek — Sırt Çantası Problemi:**
+
 ```
-Her adımda lokal en iyiyi seç.
+Çanta kapasitesi: 10 kg
+Eşyalar:
+  A: 6 kg, 30₺ değer  → ₺/kg = 5.0
+  B: 4 kg, 24₺ değer  → ₺/kg = 6.0  ← en iyi oran
+  C: 3 kg, 15₺ değer  → ₺/kg = 5.0
+  D: 2 kg, 8₺ değer   → ₺/kg = 4.0
 
-Örnek - Knapsack:
-1. Değer/ağırlık oranına göre sırala
-2. Sığdıkça ekle
-3. Sığmayınca dur
+Greedy çözüm (₺/kg sırasıyla):
+  1. B'yi al (4 kg, 24₺) → kalan kapasite: 6 kg
+  2. A'yı al (6 kg, 30₺) → kalan kapasite: 0 kg
+  Toplam: 54₺
 
-Hızlı ama optimal garanti yok.
+Optimal çözüm:
+  B + C + D = 4+3+2 = 9 kg, 24+15+8 = 47₺
+  veya A + B = 6+4 = 10 kg, 30+24 = 54₺ ✓
+
+Bu örnekte Greedy optimal buldu, ama her zaman bulmaz!
 ```
 
-**Construction Heuristic:**
-```
-Çözümü adım adım inşa et.
+### Construction Heuristic
 
-Örnek - TSP (Nearest Neighbor):
-1. Rastgele şehirden başla
-2. En yakın ziyaret edilmemiş şehre git
-3. Tüm şehirler bitene kadar tekrar
+Boş çözümden başla, adım adım inşa et.
+
+**Örnek — Gezgin Satıcı (TSP) için Nearest Neighbor:**
+
+```
+Şehirler: A, B, C, D
+Mesafeler: A-B=10, A-C=15, A-D=20, B-C=35, B-D=25, C-D=30
+
+Adımlar:
+  1. A'dan başla
+  2. En yakın ziyaret edilmemiş: B (10 km) → A→B
+  3. B'den en yakın ziyaret edilmemiş: D (25 km) → A→B→D
+  4. D'den en yakın ziyaret edilmemiş: C (30 km) → A→B→D→C
+  5. Başa dön: C→A (15 km)
+  
+Toplam: 10+25+30+15 = 80 km
+
+Optimal olabilir de olmayabilir de. Ama çok hızlı!
 ```
 
 ## 5.3 Metaheuristic (Üst-Sezgisel)
 
-Probleme bağımsız, genel arama stratejisi.
+Probleme bağımsız, genel arama stratejisi. Farklı problemlere uygulanabilir.
 
-### Simulated Annealing (SA)
+### Simulated Annealing (SA) — Tavlama Benzetimi
 
-Metal tavlama sürecinden esinlenme.
+Metal tavlama sürecinden esinlenme. Sıcak metal yavaş soğutulunca kristal yapısı düzgün olur.
 
-```
-Fikir:
-- Yüksek sıcaklık → Riskli adımlar kabul (keşif)
-- Düşük sıcaklık → Sadece iyileştirme (sömürü)
-
-Algoritma:
-1. Rastgele başlangıç çözümü
-2. Komşu çözüm üret
-3. Daha iyiyse kabul et
-4. Daha kötüyse olasılıkla kabul et: P = exp(-Δ/T)
-5. Sıcaklığı azalt
-6. Tekrar (2-5)
-
-Avantaj: Lokal optimumdan kaçabilir
-```
-
-### Genetic Algorithm (GA)
-
-Doğal evrimden esinlenme.
+**Problem:** Yerel arama (her adımda daha iyiye git) **lokal optimuma** takılır.
 
 ```
-Terimler:
-- Birey = Bir çözüm
-- Gen = Çözümün bir parçası
-- Popülasyon = Çözümler kümesi
-- Fitness = Çözümün kalitesi
-
-Algoritma:
-1. Rastgele popülasyon oluştur
-2. Fitness'a göre ebeveyn seç
-3. Çaprazlama (crossover): İki ebeveyni birleştir
-4. Mutasyon: Rastgele değişiklik
-5. Yeni nesil oluştur
-6. Tekrar (2-5)
-
-Örnek:
-Ebeveyn A: [1,0,1,1,0]
-Ebeveyn B: [0,1,1,0,1]
-Çocuk:     [1,0,1,0,1]  (A'nın ilk yarısı + B'nin ikinci yarısı)
-Mutasyon:  [1,0,0,0,1]  (3. bit değişti)
+        ^
+Değer   │    /\
+        │   /  \  ← Lokal optimum (takılırsın)
+        │  /    \
+        │ /      \    /\
+        │/        \  /  \ ← Global optimum (asıl hedef)
+        └──────────\/─────────→ Çözüm uzayı
 ```
 
-### Tabu Search
+**SA'nın çözümü:** Bazen kötü adımları da kabul et → lokal optimumdan kaç.
 
-Hafızalı yerel arama.
+**Algoritma:**
 
 ```
-Fikir:
-- Yerel aramada en iyi komşuya git
-- Son N hamleyi "tabu" listesine ekle
-- Tabu hamleler tekrar yapılamaz
-- Döngüye girmez, yeni bölgeler keşfeder
-
-Örnek:
-Mevcut: A → B → C → D
-Tabu listesi: [A↔B, C↔D]
-Bu hamleler yasak, başka komşu dene
+1. Rastgele bir çözüm seç (x)
+2. Sıcaklık T'yi yüksek başlat (örn: T=1000)
+3. Tekrar et:
+   a) Komşu çözüm üret (x')
+   b) Δ = f(x') - f(x)  (yeni - eski)
+   c) Eğer Δ > 0 (daha iyi): kabul et, x = x'
+   d) Eğer Δ < 0 (daha kötü): olasılıkla kabul et
+      - P = exp(Δ/T)
+      - T yüksekken P yüksek (riskli adım)
+      - T düşükken P düşük (temkinli)
+   e) T'yi azalt (soğut): T = T × 0.99
+4. T çok düşünce dur
 ```
+
+**Örnek:**
+
+```
+Mevcut çözüm: x, değer = 100
+Yeni çözüm:   x', değer = 95 (daha kötü, Δ = -5)
+Sıcaklık: T = 100
+
+Kabul olasılığı: P = exp(-5/100) = exp(-0.05) = 0.95 → %95 kabul
+
+Sıcaklık: T = 10
+Kabul olasılığı: P = exp(-5/10) = exp(-0.5) = 0.60 → %60 kabul
+
+Sıcaklık: T = 1
+Kabul olasılığı: P = exp(-5/1) = exp(-5) = 0.007 → %0.7 kabul
+
+→ Başta riskli, sonra temkinli. Lokal optimumdan kaçıp global'e ulaşabilir.
+```
+
+### Genetic Algorithm (GA) — Genetik Algoritma
+
+Doğal evrimden esinlenme. En uygun bireyler hayatta kalır ve çoğalır.
+
+**Terimler:**
+```
+Birey (Chromosome) = Bir çözüm (örn: [1,0,1,1,0])
+Gen = Çözümün bir parçası (örn: ilk eleman = 1)
+Popülasyon = Çözümler kümesi (örn: 100 farklı çözüm)
+Fitness = Çözümün kalitesi (yüksek = iyi)
+```
+
+**Algoritma:**
+
+```
+1. BAŞLAT: Rastgele 100 çözüm oluştur (popülasyon)
+
+2. DEĞERLENDİR: Her çözümün fitness'ını hesapla
+
+3. SEÇ: En iyi çözümleri ebeveyn olarak seç
+   (fitness yüksek olanlar daha çok seçilir)
+
+4. ÇAPRAZLA (Crossover): İki ebeveyni birleştir
+   Ebeveyn A: [1,0,1,1,0]
+   Ebeveyn B: [0,1,1,0,1]
+   Kesim noktası: 3
+   Çocuk:     [1,0,1|0,1]  ← A'nın ilk 3'ü + B'nin son 2'si
+
+5. MUTASYON: Rastgele değişiklik (küçük olasılıkla)
+   Çocuk:     [1,0,1,0,1]
+   Mutasyon:  [1,0,0,0,1]  ← 3. gen değişti
+
+6. YENİ NESİL: Çocuklar yeni popülasyonu oluşturur
+
+7. TEKRAR: Adım 2'ye dön (100 nesil boyunca)
+
+8. BİTİR: En iyi çözümü döndür
+```
+
+**Neden çalışır?**
+- İyi çözümlerin özellikleri bir sonraki nesle aktarılır
+- Çaprazlama: iyi parçaları birleştirir
+- Mutasyon: çeşitlilik sağlar, lokal optimumdan kaçar
+- Doğal seleksiyon: kötüler elenir
+
+### Tabu Search — Tabu Arama
+
+Hafızalı yerel arama. Aynı yere tekrar gitmemeyi garanti eder.
+
+**Problem:** Yerel arama döngüye girebilir: A → B → A → B → ...
+
+**Tabu Search çözümü:** Son N hamleyi "yasaklı" listesine koy.
+
+**Algoritma:**
+
+```
+1. Başlangıç çözümü seç (x)
+2. Tabu listesi = [] (boş)
+3. Tekrar et:
+   a) Tüm komşu çözümleri listele
+   b) Tabu listesindeki hamleleri çıkar
+   c) Kalanlar arasından en iyisini seç
+   d) O hamleyi tabu listesine ekle
+   e) Liste N'den uzunsa en eskiyi sil
+4. Belirli adım sonra dur
+```
+
+**Örnek — TSP:**
+
+```
+Mevcut tur: A → B → C → D → A
+Komşu hamleler (iki şehri değiştir):
+  - A↔B: B → A → C → D → B (maliyet: 120)
+  - B↔C: A → C → B → D → A (maliyet: 115)  ← en iyi
+  - C↔D: A → B → D → C → A (maliyet: 125)
+
+Tabu listesi: [A↔B, D↔C]  (son 2 hamle)
+
+B↔C yasak değil → seç
+Yeni tabu listesi: [D↔C, B↔C]  (A↔B düştü, B↔C eklendi)
+
+→ Döngüye girmez, yeni bölgeler keşfeder
+```
+
+**Ne zaman kullanılır?**
+- Kombinatoryal problemler (TSP, VRP, Scheduling)
+- Komşuluk yapısı net tanımlı problemler
 
 ## 5.4 Karşılaştırma
 
