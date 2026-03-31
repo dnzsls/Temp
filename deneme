@@ -1,0 +1,12 @@
+import math
+
+# Float → str (VARCHAR2 olanlar)
+df['GRUP_SUBE_KOD'] = df['GRUP_SUBE_KOD'].apply(
+    lambda x: None if pd.isna(x) else str(int(x)) if x == int(x) else str(x)
+)
+
+# datetime64 → python date (Oracle DATE olanlar)
+for col in ['IZNE_BASLAMA_TARIHI', 'GOREVE_BASLAMA_TARIHI', 'ISTEN_AYRILIS_TARIHI']:
+    df[col] = df[col].apply(
+        lambda x: None if pd.isna(x) else x.date()
+    )
