@@ -1,3 +1,20 @@
-for col in date_cols:
-    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-    df[col] = df[col].where(pd.notna(df[col]), None)
+def prepare_df_for_oracle(df, date_cols):
+    df = df.copy()
+    
+    # datetime64 → python date
+    for col in date_cols:
+        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+        df[col] = df[col].where(pd.notna(df[col]), None)
+    
+    # Kalan NaN → None
+    df = df.where(pd.notna(df), None)
+    
+    return df
+
+# Kullanım
+date_cols = ['IZNE_BASLAMA_TARIHI', 'GOREVE_BASLAMA_TARIHI', 'ISTEN_AYRILIS_TARIHI']
+
+df_ready = prepare_df_for_oracle(df, date_cols)
+
+rows = [tuple(row) for row in df_ready.itertuples(index=False)]
+cursor.executemany(sql, rows)
