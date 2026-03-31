@@ -659,35 +659,83 @@ solver = SolverFactory('gurobi') # ticari (daha hızlı)
 
 ## 7.1 Vehicle Routing Problem (VRP)
 
-**Problem:** N müşteriye teslimat yap. Araç kapasitesi sınırlı. Toplam mesafeyi minimize et.
+**Problem:** Bir depodan N müşteriye teslimat yap. Araç kapasitesi sınırlı. Toplam mesafeyi minimize et.
 
 ```
-        ○ Müşteri 1
+Senaryo:
+- 1 depo, 5 müşteri, 2 araç
+- Her araç max 100 kg taşıyabilir
+- Müşteri talepleri: 30, 40, 25, 35, 20 kg
+- Amaç: En kısa toplam rota
+
+        ○ M1 (30kg)
        /
-Depo ●─────○ Müşteri 2
-       \
-        ○ Müşteri 3
+Depo ●─────○ M2 (40kg)
+      \
+       ○ M3 (25kg)
 ```
 
 **Değişkenler:**
 ```
-x[i,j,k] ∈ {0,1} = Araç k, i'den j'ye gidiyor mu?
+x[i,j,k] ∈ {0,1} = Araç k, i noktasından j noktasına gidiyor mu?
+
+Örnek:
+x[Depo, M1, Araç1] = 1 → Araç 1, depodan M1'e gidiyor
+x[M1, M3, Araç1] = 1 → Araç 1, M1'den M3'e gidiyor
 ```
 
 **Kısıtlar:**
 ```
-- Her müşteri tam 1 kez ziyaret edilmeli
-- Araç kapasitesi aşılmamalı
-- Her rota depodan başlayıp depoya dönmeli
-- Subtour elimination (alt-tur engelleme)
+1. Her müşteri tam 1 kez ziyaret edilmeli
+   Σ x[i,j,k] = 1, ∀j (her müşteri için)
+
+2. Araç kapasitesi aşılmamalı
+   Σ talep[j] · x[i,j,k] ≤ 100, ∀k (her araç için)
+
+3. Her rota depodan başlayıp depoya dönmeli
+   Araç çıktıysa dönmeli
+
+4. Subtour elimination (alt-tur engelleme)
+   Depoyu içermeyen kapalı tur yasak
+   (M1→M2→M1 gibi, depoya uğramadan döngü olmaz)
 ```
 
-**Varyantlar:**
-- CVRP: Kapasiteli VRP
-- VRPTW: Zaman pencereli VRP
-- PDVRP: Pickup & Delivery
+**Varyantlar (Problem Çeşitleri):**
 
-**Çözüm:** Küçük (< 50 müşteri) → MIP, Büyük → Heuristic (Clarke-Wright, LNS)
+| Varyant | Ek Kısıt | Örnek |
+|---------|----------|-------|
+| **CVRP** | Kapasite | Araç max 100 kg |
+| **VRPTW** | Zaman penceresi | M1'e 09:00-11:00 arası git |
+| **PDVRP** | Al-götür | M1'den al, M3'e bırak |
+| **MDVRP** | Çoklu depo | 3 farklı depo var |
+
+**Çözüm Yöntemi:**
+
+```
+Küçük problem (< 20-30 müşteri):
+→ MIP ile optimal çözüm bulunabilir
+→ Dakikalar içinde çözülür
+
+Orta problem (30-100 müşteri):
+→ MIP çok yavaş kalır (saatler)
+→ MIP + heuristic hybrid: önce heuristic başlangıç çözümü, sonra MIP iyileştir
+
+Büyük problem (> 100 müşteri):
+→ MIP pratik değil
+→ Saf heuristic: Clarke-Wright savings, LNS (Large Neighborhood Search)
+→ Saniyeler-dakikalar içinde "iyi" çözüm (optimal garanti yok)
+```
+
+**Neden MIP büyük problemlerde patlar?**
+```
+20 müşteri, 3 araç:
+  Değişken sayısı ≈ 20 × 20 × 3 = 1,200 binary
+  → MIP çözebilir
+
+100 müşteri, 10 araç:
+  Değişken sayısı ≈ 100 × 100 × 10 = 100,000 binary
+  → Branch & Bound çok dal açar, saatler sürer
+```
 
 ## 7.2 Job Shop Scheduling
 
