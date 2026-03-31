@@ -1,12 +1,40 @@
+import pandas as pd
 import math
 
-# Float → str (VARCHAR2 olanlar)
-df['GRUP_SUBE_KOD'] = df['GRUP_SUBE_KOD'].apply(
-    lambda x: None if pd.isna(x) else str(int(x)) if x == int(x) else str(x)
-)
+def prepare_df_for_oracle(df, varchar_float_cols, date_cols):
+    """
+    varchar_float_cols: Oracle'da VARCHAR2 ama pandas'ta float olan kolonlar
+    date_cols: Oracle'da DATE olan kolonlar
+    """
+    df = df.copy()
+    
+    # Float → str (VARCHAR2 kolonlar)
+    for col in varchar_float_cols:
+        df[col] = df[col].apply(
+            lambda x: None if pd.isna(x) else str(int(x)) if x == int(x) else str(x)
+        )
+    
+    # datetime64 → python date
+    for col in date_cols:
+        df[col] = df[col].apply(
+            lambda x: None if pd.isna(x) else x.date()
+        )
+    
+    # Kalan NaN → None (str kolonlardaki NaN'lar)
+    df = df.where(pd.notna(df), None)
+    
+    return df
 
-# datetime64 → python date (Oracle DATE olanlar)
-for col in ['IZNE_BASLAMA_TARIHI', 'GOREVE_BASLAMA_TARIHI', 'ISTEN_AYRILIS_TARIHI']:
-    df[col] = df[col].apply(
-        lambda x: None if pd.isna(x) else x.date()
-    )
+# Kullanım
+varchar_float_cols = ['GRUP_SUBE_KOD']
+date_cols = ['IZNE_BASLAMA_TARIHI', 'GOREVE_BASLAMA_TARIHI', 'ISTEN_AYRILIS_TARIHI']
+
+df_ready = prepare_df_for_oracle(df, varchar_float_cols, date_cols)
+
+# Kontrol
+print("=== DTYPE KONTROLÜ ===")
+print(df_ready.dtypes)
+print("\n=== NULL SAYILARI ===")
+print(df_ready.isnull().sum())
+print("\n=== İLK 3 SATIR ===")
+print(df_ready.head(3))
