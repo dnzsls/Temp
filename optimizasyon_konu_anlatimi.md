@@ -541,116 +541,229 @@ Yeni tabu listesi: [D↔C, B↔C]  (A↔B düştü, B↔C eklendi)
 
 ---
 
-# 6. SOLVER MİMARİSİ
+# 6. SOLVER VE MODELLEME ARAÇLARI
 
-## 6.1 Solver Nedir?
-
-Solver, matematiksel modeli alıp optimal çözümü bulan yazılımdır.
+## 6.1 İki Farklı Kavram
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Model     │ →   │   Solver    │ →   │   Çözüm     │
-│  (değişken, │     │  (Simplex,  │     │  (x*, z*)   │
-│   amaç,     │     │   Branch &  │     │             │
-│   kısıt)    │     │   Bound)    │     │             │
-└─────────────┘     └─────────────┘     └─────────────┘
+MODELLEME ARACI              SOLVER
+(Modeli yazar)               (Modeli çözer)
+                    
+PuLP, Pyomo, OR-Tools   →    CBC, Gurobi, CPLEX, HiGHS
+                    
+"Ben problemi tanımlıyorum"  "Ben optimal çözümü buluyorum"
 ```
 
-## 6.2 Solver Türleri
+**Analoji:**
+- Modelleme aracı = Word (yazı yazarsın)
+- Solver = Yazıcı (çıktı alırsın)
 
-### Açık Kaynak
+Aynı modeli farklı solver'larla çözebilirsin.
 
-| Solver | Tür | Güç | Kullanım |
-|--------|-----|-----|----------|
-| **CBC** | LP/MIP | Orta | PuLP default, genel amaç |
-| **GLPK** | LP/MIP | Düşük | Akademik, basit problemler |
-| **HiGHS** | LP/MIP | Yüksek | SciPy default, hızlı LP |
-| **SCIP** | MIP | Yüksek | Akademik ücretsiz |
-| **OR-Tools** | CP/MIP | Yüksek | Google, scheduling |
+## 6.2 Python Modelleme Araçları
 
-### Ticari
-
-| Solver | Tür | Güç | Lisans |
-|--------|-----|-----|--------|
-| **Gurobi** | LP/MIP/QP | Çok yüksek | Akademik ücretsiz |
-| **CPLEX** | LP/MIP/QP | Çok yüksek | IBM, pahalı |
-| **Xpress** | LP/MIP | Yüksek | FICO |
-
-**Fark:** Ticari solver'lar büyük problemlerde 10-100x daha hızlı olabilir.
-
-## 6.3 Modelleme Dili vs Solver
+### SciPy (linprog)
 
 ```
-Modelleme Dili          Solver
-(Model yazar)           (Model çözer)
-      │                      │
-    PuLP  ─────────────→   CBC
-    Pyomo ─────────────→   Gurobi
-    OR-Tools ──────────→   SCIP
-      │                      │
-      └──── Aynı model, ─────┘
-           farklı solver
+Ne: Python'un bilimsel kütüphanesinin optimizasyon modülü
+Kurulum: Zaten var (pip install scipy ile gelir)
+Format: Matris formunda (A, b, c)
+LP: ✅   MIP: ❌
 ```
 
-**Avantaj:** Pyomo'da model yaz, solver'ı tek satırda değiştir:
+**Özellikler:**
+- En basit, kurulum gerektirmez
+- Sadece LP çözer (integer yok!)
+- Matris formatı: küçük problemler için tamam, büyüklerde karışık
+
+**Ne zaman kullan:**
+- Hızlı LP denemesi
+- Integer gerekmiyorsa
+- Ekstra kurulum istemiyorsan
+
 ```python
-solver = SolverFactory('cbc')    # açık kaynak
-solver = SolverFactory('gurobi') # ticari (daha hızlı)
+from scipy.optimize import linprog
+
+c = [100, 120]  # maliyet
+A_ub = [[-1, 0], [0, -1]]  # kısıtlar (matris)
+b_ub = [-2, -2]
+result = linprog(c, A_ub=A_ub, b_ub=b_ub)
 ```
 
-## 6.4 Çözüm Süreci
+---
+
+### PuLP
 
 ```
-1. PRESOLVE
-   - Gereksiz kısıtları kaldır
-   - Sabit değişkenleri tespit et
-   - Model küçült
-
-2. LP RELAXATION
-   - Integer kısıtlarını gevşet
-   - Simplex ile çöz
-   - Bound hesapla
-
-3. BRANCH & BOUND
-   - Ağaç oluştur
-   - Node'ları çöz
-   - Prune et
-
-4. HEURISTICS
-   - Erken feasible çözüm bul
-   - Bound'ları sıkılaştır
-
-5. CUTTING PLANES
-   - Ekstra kısıtlar ekle
-   - LP relaxation'ı güçlendir
-
-6. POSTSOLVE
-   - Orijinal forma dön
-   - Çözümü raporla
+Ne: LP/MIP için Python modelleme kütüphanesi
+Kurulum: pip install pulp
+Format: Algebraik (matematiksel yazım)
+LP: ✅   MIP: ✅
+Default Solver: CBC (ücretsiz, birlikte gelir)
 ```
 
-## 6.5 Performans İpuçları
+**Özellikler:**
+- Öğrenmesi çok kolay
+- Kod matematiğe benziyor
+- CBC solver dahil, ekstra kurulum yok
+- Gurobi, CPLEX gibi ticari solver'larla da çalışır
+
+**Ne zaman kullan:**
+- Genel LP/MIP problemleri
+- Hızlı prototip
+- Öğrenme aşaması
+
+```python
+from pulp import *
+
+model = LpProblem("Ornek", LpMinimize)
+x = LpVariable("x", lowBound=0, cat="Integer")
+model += 100 * x  # amaç
+model += x >= 2   # kısıt
+model.solve()
+```
+
+---
+
+### OR-Tools (Google)
 
 ```
-1. TIGHT FORMULATION
-   - Gevşek kısıt yerine sıkı kısıt
-   - LP relaxation güçlü olsun
+Ne: Google'ın açık kaynak optimizasyon paketi
+Kurulum: pip install ortools
+Format: Algebraik
+LP: ✅   MIP: ✅   CP: ✅
+Solver: GLOP (LP), SCIP (MIP), CP-SAT (Constraint Programming)
+```
 
-2. SİMETRİ KIRMA
-   - Eşdeğer çözümleri eleme
-   - x[1] ≤ x[2] ≤ x[3]
+**Özellikler:**
+- CP-SAT: Scheduling için çok güçlü
+- Native kısıtlar: `add_exactly_one()`, `add_no_overlap()`
+- Routing için özel modül (VRP)
+- Google tarafından aktif geliştiriliyor
 
-3. WARM START
-   - Bilinen iyi çözümü başlangıç yap
-   - Heuristic → MIP
+**Ne zaman kullan:**
+- Scheduling, atama problemleri
+- VRP (Vehicle Routing)
+- Mantıksal kısıtlar çok olduğunda
 
-4. GAP TOLERANSI
-   - %0 yerine %1 yeterli mi?
-   - Zaman kazancı büyük
+```python
+from ortools.sat.python import cp_model
 
-5. PARALEL
-   - Çok çekirdek kullan
-   - Gurobi/CPLEX otomatik yapar
+model = cp_model.CpModel()
+x = model.new_int_var(0, 100, "x")
+model.add(x >= 2)
+model.minimize(100 * x)
+solver = cp_model.CpSolver()
+solver.solve(model)
+```
+
+**CP-SAT vs MIP:**
+```
+MIP'te "her çalışan tam 1 vardiya":
+  model += lpSum(x[e,v] for v in vardiyalar) == 1
+
+CP-SAT'ta:
+  model.add_exactly_one(x[e,v] for v in vardiyalar)
+
+→ CP-SAT bu tür kısıtları daha verimli çözer
+```
+
+---
+
+### Pyomo
+
+```
+Ne: Algebraic Modeling Language (AML) - AMPL/GAMS'ın Python versiyonu
+Kurulum: pip install pyomo + ayrı solver kurulumu
+Format: Set, Parameter, Var, Constraint yapıları
+LP: ✅   MIP: ✅   NLP: ✅
+Solver: Harici (CBC, GLPK, Gurobi, CPLEX, IPOPT...)
+```
+
+**Özellikler:**
+- En esnek ve güçlü
+- Büyük, parametrik modeller için ideal
+- Veriyi modelden ayırır (aynı model, farklı veri)
+- Solver'ı tek satırda değiştirebilirsin
+- Öğrenme eğrisi dik
+
+**Ne zaman kullan:**
+- Büyük, karmaşık modeller
+- Akademik araştırma
+- Farklı solver'ları test etmek istersen
+- Nonlinear problemler (IPOPT ile)
+
+```python
+import pyomo.environ as pyo
+
+model = pyo.ConcreteModel()
+model.x = pyo.Var(within=pyo.NonNegativeIntegers)
+model.obj = pyo.Objective(expr=100 * model.x, sense=pyo.minimize)
+model.c1 = pyo.Constraint(expr=model.x >= 2)
+
+solver = pyo.SolverFactory('cbc')  # veya 'gurobi', 'cplex'
+solver.solve(model)
+```
+
+## 6.3 Karşılaştırma Tablosu
+
+| Özellik | SciPy | PuLP | OR-Tools | Pyomo |
+|---------|-------|------|----------|-------|
+| **Kurulum** | Zaten var | Kolay | Kolay | Orta (solver ayrı) |
+| **Öğrenme** | Kolay | Kolay | Orta | Zor |
+| **LP** | ✅ | ✅ | ✅ | ✅ |
+| **MIP** | ❌ | ✅ | ✅ | ✅ |
+| **CP** | ❌ | ❌ | ✅ | ❌ |
+| **NLP** | ❌ | ❌ | ❌ | ✅ |
+| **Syntax** | Matris | Algebraik | Algebraik | AML |
+| **Dahil Solver** | HiGHS | CBC | GLOP, CP-SAT | Yok |
+
+## 6.4 Solver'lar
+
+### Açık Kaynak (Ücretsiz)
+
+| Solver | Tür | Hız | Notlar |
+|--------|-----|-----|--------|
+| **CBC** | LP/MIP | Orta | PuLP default, güvenilir |
+| **HiGHS** | LP/MIP | Yüksek | SciPy default, yeni ve hızlı |
+| **GLPK** | LP/MIP | Düşük | Akademik, basit |
+| **SCIP** | MIP | Yüksek | Akademik ücretsiz |
+| **CP-SAT** | CP | Yüksek | Scheduling için en iyi |
+
+### Ticari (Paralı ama Çok Hızlı)
+
+| Solver | Tür | Notlar |
+|--------|-----|--------|
+| **Gurobi** | LP/MIP/QP | En hızlılardan, akademik ücretsiz |
+| **CPLEX** | LP/MIP/QP | IBM, kurumsal |
+| **Xpress** | LP/MIP | FICO |
+
+**Ticari vs Açık Kaynak:**
+```
+Küçük problem (< 1,000 değişken):
+  CBC ve Gurobi arasında fark az
+
+Büyük problem (> 100,000 değişken):
+  Gurobi 10-100x daha hızlı olabilir
+```
+
+## 6.5 Hangisini Seçmeliyim?
+
+```
+Başlangıç / Öğrenme:
+  → PuLP (kolay, CBC dahil)
+
+Sadece LP, hızlı deneme:
+  → SciPy linprog
+
+Scheduling / Atama:
+  → OR-Tools CP-SAT
+
+Büyük model, farklı solver'lar:
+  → Pyomo
+
+Performans kritik, bütçe var:
+  → Gurobi veya CPLEX
 ```
 
 ---
@@ -693,48 +806,23 @@ x[M1, M3, Araç1] = 1 → Araç 1, M1'den M3'e gidiyor
    Σ talep[j] · x[i,j,k] ≤ 100, ∀k (her araç için)
 
 3. Her rota depodan başlayıp depoya dönmeli
-   Araç çıktıysa dönmeli
 
 4. Subtour elimination (alt-tur engelleme)
    Depoyu içermeyen kapalı tur yasak
-   (M1→M2→M1 gibi, depoya uğramadan döngü olmaz)
 ```
-
-**Varyantlar (Problem Çeşitleri):**
-
-| Varyant | Ek Kısıt | Örnek |
-|---------|----------|-------|
-| **CVRP** | Kapasite | Araç max 100 kg |
-| **VRPTW** | Zaman penceresi | M1'e 09:00-11:00 arası git |
-| **PDVRP** | Al-götür | M1'den al, M3'e bırak |
-| **MDVRP** | Çoklu depo | 3 farklı depo var |
 
 **Çözüm Yöntemi:**
 
+| Problem Boyutu | Yöntem | Süre |
+|----------------|--------|------|
+| < 30 müşteri | MIP | Dakikalar |
+| 30-100 müşteri | MIP + Heuristic hybrid | Dakikalar-saat |
+| > 100 müşteri | Saf Heuristic (Clarke-Wright, LNS) | Saniyeler |
+
+**Neden MIP büyük problemlerde yavaş?**
 ```
-Küçük problem (< 20-30 müşteri):
-→ MIP ile optimal çözüm bulunabilir
-→ Dakikalar içinde çözülür
-
-Orta problem (30-100 müşteri):
-→ MIP çok yavaş kalır (saatler)
-→ MIP + heuristic hybrid: önce heuristic başlangıç çözümü, sonra MIP iyileştir
-
-Büyük problem (> 100 müşteri):
-→ MIP pratik değil
-→ Saf heuristic: Clarke-Wright savings, LNS (Large Neighborhood Search)
-→ Saniyeler-dakikalar içinde "iyi" çözüm (optimal garanti yok)
-```
-
-**Neden MIP büyük problemlerde patlar?**
-```
-20 müşteri, 3 araç:
-  Değişken sayısı ≈ 20 × 20 × 3 = 1,200 binary
-  → MIP çözebilir
-
-100 müşteri, 10 araç:
-  Değişken sayısı ≈ 100 × 100 × 10 = 100,000 binary
-  → Branch & Bound çok dal açar, saatler sürer
+20 müşteri, 3 araç → ~1,200 binary değişken → MIP çözer
+100 müşteri, 10 araç → ~100,000 binary değişken → Saatler sürer
 ```
 
 ## 7.2 Job Shop Scheduling
@@ -826,35 +914,70 @@ y[e,v] = Çalışan e, vardiya v'ye atandı mı? (binary)
 - Skill gereksinimleri
 ```
 
-## 7.5 Facility Location
+**Çözüm Yöntemi:**
+
+| Problem Boyutu | Yöntem | Araç |
+|----------------|--------|------|
+| Küçük (< 50 çalışan) | MIP | PuLP, Gurobi |
+| Orta (50-500 çalışan) | MIP + gap toleransı | Gurobi, CPLEX |
+| Büyük (> 500 çalışan) | CP-SAT veya Heuristic | OR-Tools CP-SAT |
+
+**Neden CP-SAT iyi?**
+```
+Scheduling problemlerinde özel kısıtlar var:
+- "Her çalışan tam 1 vardiya" → add_exactly_one()
+- "Vardiyalar çakışmasın" → add_no_overlap()
+
+CP-SAT bu kısıtları native destekler, MIP'ten hızlı çözer.
+```
+
+## 7.5 Facility Location (Tesis Yerleşimi)
 
 **Problem:** Potansiyel lokasyonlardan hangilerine fabrika/depo açalım?
 
 ```
-        Fabrika?          Müşteriler
-           │
-    ┌──────┼──────┐
-    ○      ○      ○       ●  ●  ●
-   F1     F2     F3       M1 M2 M3
+Senaryo:
+- 3 potansiyel fabrika lokasyonu (F1, F2, F3)
+- 4 müşteri (M1, M2, M3, M4)
+- Her fabrikanın açılış maliyeti ve kapasitesi var
+- Müşterilere taşıma maliyeti mesafeye bağlı
+
+    Fabrika?          Müşteriler
+       │
+ ┌─────┼─────┐
+ ○     ○     ○       ●  ●  ●  ●
+F1    F2    F3       M1 M2 M3 M4
 ```
 
 **Değişkenler:**
 ```
 y[f] ∈ {0,1} = Fabrika f açık mı?
-x[f,m] ≥ 0 = Fabrika f'den müşteri m'ye gönderim
+x[f,m] ≥ 0 = Fabrika f'den müşteri m'ye gönderim miktarı
 ```
 
 **Amaç:**
 ```
 min Σ açılış_maliyeti[f] · y[f] + Σ taşıma_maliyeti[f,m] · x[f,m]
+
+(Açılış maliyeti + Taşıma maliyeti toplamını minimize et)
 ```
 
 **Kısıtlar:**
 ```
-- Talep karşılansın: Σ x[f,m] = talep[m]
-- Kapasite: Σ x[f,m] ≤ kapasite[f] · y[f]
-- Açık değilse gönderemezsin: x[f,m] ≤ M · y[f]
+1. Talep karşılansın: Σ x[f,m] = talep[m], ∀m
+2. Kapasite: Σ x[f,m] ≤ kapasite[f] · y[f], ∀f
+3. Kapalı fabrikadan gönderemezsin: x[f,m] ≤ M · y[f]
 ```
+
+**Çözüm Yöntemi:**
+
+| Problem Boyutu | Yöntem | Süre |
+|----------------|--------|------|
+| < 50 lokasyon, < 200 müşteri | MIP | Saniyeler-dakikalar |
+| 50-500 lokasyon | MIP + gap toleransı (%1-5) | Dakikalar |
+| > 500 lokasyon | Lagrangian Relaxation, Heuristic | Değişken |
+
+**Not:** Facility Location genelde MIP ile iyi çözülür çünkü binary değişken sayısı (y[f]) lokasyon sayısı kadar, çok fazla değil.
 
 ---
 
