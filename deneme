@@ -1,25 +1,10 @@
-# === ADIM 2.5: df_emp'yi planlama tarihine göre tekil hale getir ===
-print(f"df_emp (ham): {df_emp.shape}")
-print(f"Unique agent_user_code: {df_emp['agent_user_code'].nunique()}")
+# === ADIM 5: Durum kodu (güncellenmiş) ===
+def durum_belirle(row):
+    if pd.notna(row.get('izin_tipi')):
+        return 'izinli'
+    return 'musait'
 
-# Her plan tarihi için o tarihte geçerli olan kaydı bul
-rows_filtered = []
-for dt_str in PLAN_DATES:
-    dt = pd.to_datetime(dt_str)
-    mask = (df_emp['start_date'] <= dt) & (df_emp['end_date'] >= dt)
-    df_day = df_emp[mask].copy()
-    df_day['tarih'] = dt_str
-    rows_filtered.append(df_day)
+df_merged['durum'] = df_merged.apply(durum_belirle, axis=1)
 
-df_emp_plan = pd.concat(rows_filtered, ignore_index=True)
-
-print(f"df_emp_plan: {df_emp_plan.shape}")
-display(df_emp_plan.head())
-```
-
-Ne yapıyor: her gün için `start_date <= tarih <= end_date` olan kaydı alıyor.
-
-Örnek:
-```
-Ali  start=01.01  end=13.01  ekip=A  →  10 Ocak: ekip A ✓
-Ali  start=14.01  end=99.99  ekip=B  →  10 Ocak: kapsamıyor ✗
+print(f"Durum dağılımı:")
+print(df_merged['durum'].value_counts())
