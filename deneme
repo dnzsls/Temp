@@ -1,10 +1,17 @@
-# === ADIM 5: Durum kodu (güncellenmiş) ===
-def durum_belirle(row):
-    if pd.notna(row.get('izin_tipi')):
-        return 'izinli'
-    return 'musait'
+# === ADIM 6: Pivot ===
+pivot_cols = ['agent_user_code', 'employee_user_name', 'seg_desc',
+              'employee_team_manager_user_name', 'employee_grp_manager_user_name',
+              'emp_section_manager_usr_name']
 
-df_merged['durum'] = df_merged.apply(durum_belirle, axis=1)
+pivot = df_merged.pivot_table(
+    index=pivot_cols,
+    columns='tarih',
+    values='durum',
+    aggfunc='first'
+).reset_index()
 
-print(f"Durum dağılımı:")
-print(df_merged['durum'].value_counts())
+print(f"Pivot shape: {pivot.shape}")
+display(pivot.head(10))
+
+# İzinli olanları görelim
+display(pivot[pivot[PLAN_DATES[0]] == 'izinli'].head(10))
