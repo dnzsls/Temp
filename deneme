@@ -1,119 +1,24 @@
-# === df_emp + df_dev → MÜSAİTLİK MATRİSİ ===
-
-import pandas as pd
-from datetime import timedelta
-
-# --- Planlama dönemi ---
-PLAN_DATES = ['2026-04-04', '2026-04-05']  # kendi tarihlerini yaz
-plan_start = pd.to_datetime(min(PLAN_DATES))
-plan_end = pd.to_datetime(max(PLAN_DATES))
-
-# --- 1. df_dev'i gün bazlı aç ---
-rows = []
-for _, r in df_dev.iterrows():
-    izin_bas = pd.to_datetime(r['izne_baslama_tarihi'], errors='coerce')
-    goreve_bas = pd.to_datetime(r['goreve_baslama_tarihi'], errors='coerce')
-    
-    if pd.isna(izin_bas):
-        continue
-    
-    izin_son = (goreve_bas - timedelta(days=1)) if pd.notna(goreve_bas) else plan_end
-    eff_start = max(izin_bas, plan_start)
-    eff_end = min(izin_son, plan_end)
-    
-    if eff_start > eff_end:
-        continue
-    
-    current = eff_start
-    while current <= eff_end:
-        rows.append({
-            'agent_user_code': r['sicil'],
-            'tarih': current.strftime('%Y-%m-%d'),
-            'izin_tipi': r.get('izin_tipi', ''),
-            'izin_tipi_2': r.get('izin_tipi_2', ''),
-        })
-        current += timedelta(days=1)
-
-df_izin_gun = pd.DataFrame(rows)
-print(f"Gün bazlı izin kaydı: {len(df_izin_gun)}")
-print(f"Planlama döneminde izinli kişi: {df_izin_gun['agent_user_code'].nunique()}")
-
-# --- 2. Eşleşme kontrolü ---
-emp_codes = set(df_emp['agent_user_code'])
-izin_codes = set(df_izin_gun['agent_user_code']) if len(df_izin_gun) > 0 else set()
-print(f"\ndf_emp: {len(emp_codes)} kişi")
-print(f"df_izin_gun: {len(izin_codes)} kişi")
-print(f"Eşleşen: {len(emp_codes & izin_codes)}")
-print(f"İzinde olup emp'de olmayan: {len(izin_codes - emp_codes)}")
-if len(izin_codes - emp_codes) > 0:
-    print(f"  ⚠ Örnekler: {list(izin_codes - emp_codes)[:5]}")
-
-# --- 3. Birleştir: df_emp × plan_dates ---
-df_emp_plan = df_emp.assign(key=1).merge(
-    pd.DataFrame({'tarih': PLAN_DATES, 'key': 1}), on='key'
-).drop('key', axis=1)
-
-df_merged = df_emp_plan.merge(
-    df_izin_gun,
-    on=['agent_user_code', 'tarih'],
-    how='left'
-)
-
-# --- 4. Durum kodu ---
 def durum_belirle(row):
     tarih = pd.to_datetime(row['tarih'])
     is_weekend = tarih.weekday() >= 5
-    
     ozel = str(row.get('ozel_durum', '')).strip().lower()
     
-    if str(row.get('aktif', 'evet')).strip().lower() in ['hayir', 'hayır', '0', 'false']:
-        return 'pasif'
-    if is_weekend and ozel == 'hamile':
-        return 'H'
-    if pd.notna(row.get('izin_tipi')):
-        return 'izinli'
-    if is_weekend and str(row.get('haftasonu_calisabilir', 'evet')).strip().lower() in ['hayir', 'hayır']:
-        return 'haftasonu_yok'
-    return 'musait'
+    # 1. O tarihte aktif mi? (start_date <= tarih <= end_date)
+    end_date = pd.to_datetime(row.get('end_date'), errors='coerce')
+    start_date = pd.to_datetime(row.get('start_date'), errors='coerce')
+    
+    if pd.notna(end_date) and end_date < tarih:
+        return 'pasif'       # ayrılmış
+    if pd.notna(start_date) and start_date > tarih:
+        return 'pasif'       # henüz başlamamış
+    
+    # ... geri kalanı aynı
+```
 
-df_merged['durum'] = df_merged.apply(durum_belirle, axis=1)
+Senin örneğin:
+```
+end_date = 2026-01-13
 
-# --- 5. Pivot ---
-pivot_cols = ['agent_user_code', 'employee_user_name']
-# Varsa ekle
-for col in ['tip', 'lokasyon', 'takim', 'ozel_durum', 'employee_team_manager_user_name']:
-    if col in df_merged.columns:
-        pivot_cols.append(col)
-
-pivot = df_merged.pivot_table(
-    index=pivot_cols,
-    columns='tarih',
-    values='durum',
-    aggfunc='first'
-).reset_index()
-
-# --- 6. Kontrol ---
-print(f"\n{'='*50}")
-print("ÖZET")
-print(f"{'='*50}")
-for dt in PLAN_DATES:
-    day_data = df_merged[df_merged['tarih'] == dt]['durum'].value_counts()
-    print(f"\n{dt}:")
-    for durum, count in day_data.items():
-        print(f"  {durum}: {count}")
-
-print(f"\nPivot shape: {pivot.shape}")
-pivot.head(10)
-
-
-
-
-# --- 3.5. Aktiflik kontrolü (end_date'e göre) ---
-df_merged['end_date'] = pd.to_datetime(df_merged['end_date'], errors='coerce')
-df_merged['aktif'] = df_merged['end_date'].apply(
-    lambda x: 'evet' if pd.isna(x) or x >= plan_start else 'hayir'
-)
-
-print(f"\nAktiflik durumu:")
-print(f"  Aktif: {(df_merged['aktif'] == 'evet').sum() // len(PLAN_DATES)}")
-print(f"  Ayrılmış: {(df_merged['aktif'] == 'hayir').sum() // len(PLAN_DATES)}")
+tarih = 2026-01-10 → 01-13 < 01-10? HAYIR → aktif ✓
+tarih = 2026-01-11 → 01-13 < 01-11? HAYIR → aktif ✓
+tarih = 2026-01-14 → 01-13 < 01-14? EVET  → pasif ✓
