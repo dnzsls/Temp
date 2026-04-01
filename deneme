@@ -1,24 +1,19 @@
 def durum_belirle(row):
     tarih = pd.to_datetime(row['tarih'])
     is_weekend = tarih.weekday() >= 5
-    ozel = str(row.get('ozel_durum', '')).strip().lower()
     
-    # 1. O tarihte aktif mi? (start_date <= tarih <= end_date)
+    # 1. O tarihte aktif mi?
     end_date = pd.to_datetime(row.get('end_date'), errors='coerce')
     start_date = pd.to_datetime(row.get('start_date'), errors='coerce')
     
     if pd.notna(end_date) and end_date < tarih:
-        return 'pasif'       # ayrılmış
+        return 'pasif'
     if pd.notna(start_date) and start_date > tarih:
-        return 'pasif'       # henüz başlamamış
+        return 'pasif'
     
-    # ... geri kalanı aynı
-```
-
-Senin örneğin:
-```
-end_date = 2026-01-13
-
-tarih = 2026-01-10 → 01-13 < 01-10? HAYIR → aktif ✓
-tarih = 2026-01-11 → 01-13 < 01-11? HAYIR → aktif ✓
-tarih = 2026-01-14 → 01-13 < 01-14? EVET  → pasif ✓
+    # 2. İzin kaydı var mı?
+    if pd.notna(row.get('izin_tipi')):
+        return 'izinli'
+    
+    # 3. Müsait
+    return 'musait'
