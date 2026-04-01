@@ -1,36 +1,8 @@
-# === ADIM 1: df_dev'i gün bazlı aç ===
-import pandas as pd
-from datetime import timedelta
+# === ADIM 2: Eşleşme kontrolü ===
+emp_codes = set(df_emp['agent_user_code'])
+izin_codes = set(df_izin_gun['agent_user_code']) if len(df_izin_gun) > 0 else set()
 
-PLAN_DATES = ['2026-01-10', '2026-01-11']
-plan_start = pd.to_datetime(min(PLAN_DATES))
-plan_end = pd.to_datetime(max(PLAN_DATES))
-
-rows = []
-for _, r in df_dev.iterrows():
-    izin_bas = r['izne_baslama_tarihi']
-    goreve_bas = r['goreve_baslama_tarihi']
-    
-    if pd.isna(izin_bas):
-        continue
-    
-    izin_son = (goreve_bas - timedelta(days=1)) if pd.notna(goreve_bas) else plan_end
-    eff_start = max(izin_bas, plan_start)
-    eff_end = min(izin_son, plan_end)
-    
-    if eff_start > eff_end:
-        continue
-    
-    current = eff_start
-    while current <= eff_end:
-        rows.append({
-            'agent_user_code': r['sicil'],
-            'tarih': current.strftime('%Y-%m-%d'),
-            'izin_tipi': r['izin_tipi'],
-            'izin_tipi_2': r['izin_tipi_2'],
-        })
-        current += timedelta(days=1)
-
-df_izin_gun = pd.DataFrame(rows)
-print(f"df_izin_gun: {df_izin_gun.shape}")
-display(df_izin_gun.head())
+print(f"df_emp: {len(emp_codes)} kişi")
+print(f"df_izin_gun: {len(izin_codes)} kişi")
+print(f"Eşleşen: {len(emp_codes & izin_codes)}")
+print(f"İzinde olup emp'de olmayan: {len(izin_codes - emp_codes)}")
