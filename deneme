@@ -1,99 +1,11 @@
-# === df_emp + df_dev → MÜSAİTLİK MATRİSİ ===
+# --- 2.5. df_dev'den organizasyon bilgilerini df_emp'ye ekle ---
+df_org = df_dev[['sicil', 'grup_sube_name', 'bolum', 'ekip', 'takim']].drop_duplicates(subset='sicil', keep='last')
 
-import pandas as pd
-from datetime import timedelta
+df_emp = df_emp.merge(
+    df_org, 
+    left_on='agent_user_code', 
+    right_on='sicil', 
+    how='left'
+).drop('sicil', axis=1)
 
-# --- Planlama dönemi ---
-PLAN_DATES = ['2026-01-10', '2026-01-11']
-plan_start = pd.to_datetime(min(PLAN_DATES))
-plan_end = pd.to_datetime(max(PLAN_DATES))
-
-# --- 1. df_dev'i gün bazlı aç ---
-rows = []
-for _, r in df_dev.iterrows():
-    izin_bas = r['izne_baslama_tarihi']
-    goreve_bas = r['goreve_baslama_tarihi']
-    
-    if pd.isna(izin_bas):
-        continue
-    
-    izin_son = (goreve_bas - timedelta(days=1)) if pd.notna(goreve_bas) else plan_end
-    eff_start = max(izin_bas, plan_start)
-    eff_end = min(izin_son, plan_end)
-    
-    if eff_start > eff_end:
-        continue
-    
-    current = eff_start
-    while current <= eff_end:
-        rows.append({
-            'agent_user_code': r['sicil'],
-            'tarih': current.strftime('%Y-%m-%d'),
-            'izin_tipi': r['izin_tipi'],
-            'izin_tipi_2': r['izin_tipi_2'],
-        })
-        current += timedelta(days=1)
-
-df_izin_gun = pd.DataFrame(rows)
-print(f"Gün bazlı izin kaydı: {len(df_izin_gun)}")
-print(f"Planlama döneminde izinli kişi: {df_izin_gun['agent_user_code'].nunique()}")
-
-# --- 2. Eşleşme kontrolü ---
-emp_codes = set(df_emp['agent_user_code'])
-izin_codes = set(df_izin_gun['agent_user_code']) if len(df_izin_gun) > 0 else set()
-print(f"\ndf_emp: {len(emp_codes)} kişi")
-print(f"df_izin_gun: {len(izin_codes)} kişi")
-print(f"Eşleşen: {len(emp_codes & izin_codes)}")
-print(f"İzinde olup emp'de olmayan: {len(izin_codes - emp_codes)}")
-
-# --- 3. Cross join: df_emp × plan_dates ---
-df_emp_plan = df_emp.assign(key=1).merge(
-    pd.DataFrame({'tarih': PLAN_DATES, 'key': 1}), on='key'
-).drop('key', axis=1)
-
-# İzin bilgisini ekle
-df_merged = df_emp_plan.merge(
-    df_izin_gun, on=['agent_user_code', 'tarih'], how='left'
-)
-
-# --- 4. Durum kodu ---
-def durum_belirle(row):
-    tarih = pd.to_datetime(row['tarih'])
-    
-    end_date = row.get('end_date')
-    start_date = row.get('start_date')
-    
-    if pd.notna(end_date) and end_date < tarih:
-        return 'pasif'
-    if pd.notna(start_date) and start_date > tarih:
-        return 'pasif'
-    if pd.notna(row.get('izin_tipi')):
-        return 'izinli'
-    return 'musait'
-
-df_merged['durum'] = df_merged.apply(durum_belirle, axis=1)
-
-# --- 5. Pivot ---
-pivot_cols = ['agent_user_code', 'employee_user_name', 'seg_desc',
-              'employee_team_manager_user_name', 'employee_grp_manager_user_name',
-              'emp_section_manager_usr_name']
-
-pivot = df_merged.pivot_table(
-    index=pivot_cols,
-    columns='tarih',
-    values='durum',
-    aggfunc='first'
-).reset_index()
-
-# --- 6. Kontrol ---
-print(f"\n{'='*50}")
-print("ÖZET")
-print(f"{'='*50}")
-for dt in PLAN_DATES:
-    day_data = df_merged[df_merged['tarih'] == dt]['durum'].value_counts()
-    print(f"\n{dt}:")
-    for durum, count in day_data.items():
-        print(f"  {durum}: {count}")
-
-print(f"\nPivot shape: {pivot.shape}")
-pivot.head(10)
+print(f"Organizasyon bilgisi eşleşen: {df_emp['grup_sube_name'].notna().sum()} / {len(df_emp)}")
