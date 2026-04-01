@@ -1,24 +1,8 @@
-# === ADIM 2: Eşleşme kontrolü ===
-emp_codes = set(df_emp['agent_user_code'])
-izin_codes = set(df_izin_gun['agent_user_code']) if len(df_izin_gun) > 0 else set()
+# === ADIM 4: İzin bilgisini ekle (left join) ===
+df_merged = df_emp_plan.merge(
+    df_izin_gun, on=['agent_user_code', 'tarih'], how='left'
+)
 
-print(f"df_emp: {len(emp_codes)} kişi")
-print(f"df_izin_gun: {len(izin_codes)} kişi")
-print(f"Eşleşen: {len(emp_codes & izin_codes)}")
-print(f"İzinde olup emp'de olmayan: {len(izin_codes - emp_codes)}")
-
-# Eşleşmeyenleri göster
-eslesmeyen = izin_codes - emp_codes
-if eslesmeyen:
-    df_eslesmeyen = df_izin_gun[df_izin_gun['agent_user_code'].isin(eslesmeyen)].drop_duplicates(subset='agent_user_code')
-    print(f"\nEşleşmeyen kişiler:")
-    display(df_eslesmeyen[['agent_user_code', 'izin_tipi', 'izin_tipi_2']].head(10))
-
-
-# === ADIM 3: Cross join — df_emp × plan_dates ===
-df_emp_plan = df_emp.assign(key=1).merge(
-    pd.DataFrame({'tarih': PLAN_DATES, 'key': 1}), on='key'
-).drop('key', axis=1)
-
-print(f"df_emp_plan: {df_emp_plan.shape}")
-display(df_emp_plan.head())
+print(f"df_merged: {df_merged.shape}")
+# İzinli olan birkaç kişiyi görelim
+display(df_merged[df_merged['izin_tipi'].notna()].head())
