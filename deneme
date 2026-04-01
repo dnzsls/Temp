@@ -1,20 +1,604 @@
-def prepare_df_for_oracle(df, date_cols):
-    df = df.copy()
+# =============================================================================
+# MIP2: Kişi Bazlı Vardiya Ataması — Veri Hazırlama + Model
+# =============================================================================
+# Versiyon: 0.1 (izin birleştirme + müsaitlik matrisi)
+#
+# Kullanım:
+#   1. df_employees ve df_izin'i yükle
+#   2. build_availability() ile müsaitlik matrisi oluştur
+#   3. Kontrol et, sonra assign_individuals() ile MIP2 çöz
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# =============================================================================
+# 1. VERİ YÜKLEME
+# =============================================================================
+
+def load_employees(filepath, sheet_name='Calisan_Listesi'):
+    """
+    Çalışan listesini yükler ve tip dönüşümlerini yapar.
     
-    # datetime64 → python date
-    for col in date_cols:
-        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-        df[col] = df[col].where(pd.notna(df[col]), None)
+    Parameters
+    ----------
+    filepath : str
+        Excel dosya yolu
+    sheet_name : str
+        Sheet adı
     
-    # Kalan NaN → None
-    df = df.where(pd.notna(df), None)
+    Returns
+    -------
+    pd.DataFrame
+    """
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    
+    # İlk satır açıklama satırıysa (şablondaki gibi) kaldır
+    if df.iloc[0]['agent_id'] and 'Benzersiz' in str(df.iloc[0]['agent_id']):
+        df = df.iloc[1:].reset_index(drop=True)
+    
+    # Tip dönüşümleri
+    df['haftalik_gun'] = pd.to_numeric(df['haftalik_gun'], errors='coerce').fillna(6).astype(int)
+    df['gunluk_saat'] = pd.to_numeric(df['gunluk_saat'], errors='coerce').fillna(9).astype(float)
+    
+    # evet/hayir → bool
+    for col in ['gece_calisabilir', 'haftasonu_calisabilir', 'aktif']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.lower().map(
+                {'evet': True, 'hayir': False, 'hayır': False, '1': True, '0': False}
+            ).fillna(True)
+    
+    # ozel_durum boşsa 'yok'
+    df['ozel_durum'] = df['ozel_durum'].fillna('yok').astype(str).str.strip().str.lower()
+    
+    print(f"[load_employees] {len(df)} çalışan yüklendi")
+    print(f"  tip dağılımı: {df['tip'].value_counts().to_dict()}")
+    print(f"  kuyruk dağılımı: {df['kuyruk'].value_counts().to_dict()}")
+    print(f"  lokasyon dağılımı: {df['lokasyon'].value_counts().to_dict()}")
     
     return df
 
-# Kullanım
-date_cols = ['IZNE_BASLAMA_TARIHI', 'GOREVE_BASLAMA_TARIHI', 'ISTEN_AYRILIS_TARIHI']
 
-df_ready = prepare_df_for_oracle(df, date_cols)
+def load_izin(filepath, sheet_name=0):
+    """
+    İzin tablosunu yükler.
+    
+    Parameters
+    ----------
+    filepath : str
+        Excel/CSV dosya yolu
+    sheet_name : str/int
+        Sheet adı veya index
+    
+    Returns
+    -------
+    pd.DataFrame
+    """
+    if filepath.endswith('.csv'):
+        df = pd.read_csv(filepath)
+    else:
+        df = pd.read_excel(filepath, sheet_name=sheet_name)
+    
+    # Tarih kolonlarını datetime'a çevir
+    for col in ['izne_baslama_tarihi', 'goreve_baslama_tarihi', 'isten_ayrilis_tarihi']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+    
+    # izin_gun_sayisi sayısal
+    if 'izin_gun_sayisi' in df.columns:
+        df['izin_gun_sayisi'] = pd.to_numeric(df['izin_gun_sayisi'], errors='coerce')
+    
+    # yarım gün flag'leri bool
+    for col in ['izne_baslama_yarim_gun_mu', 'goreve_baslama_yarim_gun_mu']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.lower().map(
+                {'evet': True, 'hayir': False, 'hayır': False, 
+                 '1': True, '0': False, 'true': True, 'false': False,
+                 'e': True, 'h': False}
+            ).fillna(False)
+    
+    print(f"[load_izin] {len(df)} izin kaydı yüklendi")
+    print(f"  izin tipi dağılımı: {df['izin_tipi'].value_counts().head(10).to_dict()}")
+    if 'izin_tipi_2' in df.columns:
+        print(f"  izin tipi 2 dağılımı: {df['izin_tipi_2'].value_counts().head(10).to_dict()}")
+    
+    return df
 
-rows = [tuple(row) for row in df_ready.itertuples(index=False)]
-cursor.executemany(sql, rows)
+
+# =============================================================================
+# 2. İZİN → MÜSAİTLİK MATRİSİ
+# =============================================================================
+
+def expand_izin_to_days(df_izin, plan_start, plan_end):
+    """
+    İzin kayıtlarını gün bazlı satırlara açar.
+    
+    Her izin kaydı (başlangıç-bitiş aralığı) → planlama dönemiyle kesişen
+    her gün için bir satır oluşturur.
+    
+    Parameters
+    ----------
+    df_izin : pd.DataFrame
+        Ham izin tablosu
+    plan_start : str/datetime
+        Planlama dönemi başlangıcı (ör: '2026-04-04')
+    plan_end : str/datetime
+        Planlama dönemi bitişi (ör: '2026-04-05')
+    
+    Returns
+    -------
+    pd.DataFrame
+        Kolonlar: sicil, tarih, izin_tipi, izin_tipi_2, yarim_gun, notlar
+    """
+    plan_start = pd.to_datetime(plan_start)
+    plan_end = pd.to_datetime(plan_end)
+    
+    rows = []
+    
+    for _, r in df_izin.iterrows():
+        izin_bas = r['izne_baslama_tarihi']
+        goreve_bas = r['goreve_baslama_tarihi']
+        
+        if pd.isna(izin_bas):
+            continue
+        
+        # İzin bitiş tarihi: göreve başlama - 1 gün
+        # (göreve başlama = ilk çalışma günü, yani son izin günü ondan 1 öncesi)
+        if pd.notna(goreve_bas):
+            izin_son = goreve_bas - timedelta(days=1)
+        else:
+            # Göreve başlama yoksa → hala izinde, plan sonuna kadar izinli say
+            izin_son = plan_end
+        
+        # Planlama dönemiyle kesişim
+        eff_start = max(izin_bas, plan_start)
+        eff_end = min(izin_son, plan_end)
+        
+        if eff_start > eff_end:
+            continue  # Bu izin planlama dönemini kapsamıyor
+        
+        # Gün gün aç
+        current = eff_start
+        while current <= eff_end:
+            yarim = False
+            # İlk gün yarım mı?
+            if current == izin_bas and r.get('izne_baslama_yarim_gun_mu', False):
+                yarim = True
+            # Son gün yarım mı? (göreve başlama günü yarım ise, bir önceki gün yarım izin)
+            if pd.notna(goreve_bas) and current == (goreve_bas - timedelta(days=1)):
+                if r.get('goreve_baslama_yarim_gun_mu', False):
+                    yarim = True
+            
+            rows.append({
+                'sicil': r.get('sicil', r.get('agent_id', '')),
+                'tarih': current,
+                'izin_tipi': r.get('izin_tipi', ''),
+                'izin_tipi_2': r.get('izin_tipi_2', ''),
+                'yarim_gun': yarim,
+            })
+            current += timedelta(days=1)
+    
+    df_gun = pd.DataFrame(rows)
+    
+    if len(df_gun) > 0:
+        print(f"[expand_izin_to_days] {len(df_gun)} gün-bazlı izin kaydı oluşturuldu")
+        print(f"  Planlama dönemi: {plan_start.date()} → {plan_end.date()}")
+        print(f"  İzinli kişi sayısı: {df_gun['sicil'].nunique()}")
+        print(f"  Yarım gün sayısı: {df_gun['yarim_gun'].sum()}")
+    else:
+        print(f"[expand_izin_to_days] Planlama döneminde izin kaydı yok")
+    
+    return df_gun
+
+
+def build_availability(df_employees, df_izin, plan_dates, queue='kitle'):
+    """
+    Kişi × gün bazlı müsaitlik matrisi oluşturur.
+    
+    Parameters
+    ----------
+    df_employees : pd.DataFrame
+        Çalışan listesi
+    df_izin : pd.DataFrame
+        Ham izin tablosu (veya None)
+    plan_dates : list of str
+        Planlama günleri ['2026-04-04', '2026-04-05']
+    queue : str
+        Kuyruk filtresi
+    
+    Returns
+    -------
+    dict
+        {
+            'available': {tarih: [agent_id listesi]},
+            'unavailable': {tarih: {agent_id: sebep}},
+            'half_day': {tarih: [agent_id listesi]},
+            'constraints': {agent_id: {kısıt bilgileri}},
+            'summary': pd.DataFrame  # kontrol için özet tablo
+        }
+    """
+    plan_dates = [pd.to_datetime(d) for d in plan_dates]
+    plan_start = min(plan_dates)
+    plan_end = max(plan_dates)
+    
+    # Kuyruk filtresi
+    df_q = df_employees[df_employees['kuyruk'] == queue].copy()
+    print(f"\n{'='*60}")
+    print(f"MÜSAİTLİK MATRİSİ — {queue.upper()} — {plan_start.date()} → {plan_end.date()}")
+    print(f"{'='*60}")
+    print(f"Toplam çalışan ({queue}): {len(df_q)}")
+    
+    # İzin verisi varsa gün bazlı aç
+    if df_izin is not None and len(df_izin) > 0:
+        df_izin_gun = expand_izin_to_days(df_izin, plan_start, plan_end)
+    else:
+        df_izin_gun = pd.DataFrame(columns=['sicil', 'tarih', 'izin_tipi', 'izin_tipi_2', 'yarim_gun'])
+    
+    available = {}      # tarih → müsait agent_id listesi
+    unavailable = {}    # tarih → {agent_id: sebep kodu}
+    half_day = {}       # tarih → yarım gün çalışacak agent_id listesi
+    constraints = {}    # agent_id → kişiye özel kısıtlar
+    
+    summary_rows = []
+    
+    for dt in plan_dates:
+        dt_str = dt.strftime('%Y-%m-%d')
+        weekday = dt.weekday()  # 0=Pzt, 5=Cmt, 6=Paz
+        is_weekend = weekday >= 5
+        
+        available[dt_str] = []
+        unavailable[dt_str] = {}
+        half_day[dt_str] = []
+        
+        for _, emp in df_q.iterrows():
+            aid = emp['agent_id']
+            reason = None  # None = müsait
+            is_half = False
+            
+            # --- Filtreleme kuralları (öncelik sırasıyla) ---
+            
+            # 1. Aktif değilse
+            if not emp.get('aktif', True):
+                reason = 'pasif'
+            
+            # 2. Haftasonu çalışamaz (genel)
+            elif is_weekend and not emp.get('haftasonu_calisabilir', True):
+                reason = 'haftasonu_yok'
+            
+            # 3. Hamile → haftasonu çalışamaz (H5)
+            elif is_weekend and emp['ozel_durum'] == 'hamile':
+                reason = 'H'  # Hamile haftasonu yasağı
+            
+            # 4. Doğum izni flag'i (tüm dönem izinli)
+            elif emp.get('dogum_izni_flg', 0) == 1:
+                reason = 'D'  # Doğum izni
+            
+            # 5. İzin tablosunda bu gün izinli mi?
+            else:
+                izin_rows = df_izin_gun[
+                    (df_izin_gun['sicil'] == aid) & 
+                    (df_izin_gun['tarih'] == dt)
+                ]
+                if len(izin_rows) > 0:
+                    izin_row = izin_rows.iloc[0]
+                    izin_tip = str(izin_row.get('izin_tipi_2', izin_row.get('izin_tipi', 'izin')))
+                    
+                    if izin_row['yarim_gun']:
+                        is_half = True
+                        # Yarım gün izinli = yarım gün çalışabilir
+                    else:
+                        # Tam gün izin — izin tipine göre kod belirle
+                        reason = _map_izin_kodu(izin_tip)
+            
+            # 6. Doğum günü izni
+            if reason is None and 'dogum_gunu' in emp.index:
+                dg = emp.get('dogum_gunu', '')
+                if pd.notna(dg) and str(dg).strip() != '':
+                    dg_date = pd.to_datetime(dg, errors='coerce')
+                    if pd.notna(dg_date) and dg_date.date() == dt.date():
+                        reason = 'DO'  # Doğum günü izni
+            
+            # Sonuç
+            if reason:
+                unavailable[dt_str][aid] = reason
+            else:
+                available[dt_str].append(aid)
+                if is_half:
+                    half_day[dt_str].append(aid)
+            
+            # Kişiye özel kısıtlar (bir kere hesapla)
+            if aid not in constraints:
+                constraints[aid] = {
+                    'tip': emp['tip'],
+                    'lokasyon': emp.get('lokasyon', ''),
+                    'takim': emp.get('takim', ''),
+                    'gunluk_saat': emp.get('gunluk_saat', 9),
+                    'haftalik_gun': emp.get('haftalik_gun', 6),
+                    'gece_ok': emp.get('gece_calisabilir', True),
+                    'ozel_durum': emp.get('ozel_durum', 'yok'),
+                    'mesai_flg': emp.get('mesai_flg', 0),
+                    'max_saat': _get_max_saat(emp),
+                }
+            
+            summary_rows.append({
+                'agent_id': aid,
+                'isim': emp.get('isim', ''),
+                'tip': emp['tip'],
+                'lokasyon': emp.get('lokasyon', ''),
+                'takim': emp.get('takim', ''),
+                'ozel_durum': emp['ozel_durum'],
+                'tarih': dt_str,
+                'musait': reason is None,
+                'sebep': reason or ('yarim_gun' if is_half else 'musait'),
+            })
+    
+    # Özet tablo
+    df_summary = pd.DataFrame(summary_rows)
+    
+    # Print özet
+    for dt in plan_dates:
+        dt_str = dt.strftime('%Y-%m-%d')
+        gun_adi = ['Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz'][dt.weekday()]
+        n_avail = len(available[dt_str])
+        n_unavail = len(unavailable[dt_str])
+        n_half = len(half_day[dt_str])
+        
+        print(f"\n  {dt_str} ({gun_adi}):")
+        print(f"    Müsait: {n_avail} kişi (yarım gün: {n_half})")
+        print(f"    Müsait değil: {n_unavail} kişi")
+        
+        if n_unavail > 0:
+            sebep_counts = {}
+            for s in unavailable[dt_str].values():
+                sebep_counts[s] = sebep_counts.get(s, 0) + 1
+            for s, c in sorted(sebep_counts.items(), key=lambda x: -x[1]):
+                kod_aciklama = _izin_kodu_aciklama(s)
+                print(f"      {s} ({kod_aciklama}): {c}")
+    
+    # Tip bazlı özet
+    if len(df_summary) > 0:
+        print(f"\n  Tip bazlı müsaitlik:")
+        for dt in plan_dates:
+            dt_str = dt.strftime('%Y-%m-%d')
+            gun_adi = ['Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz'][dt.weekday()]
+            df_day = df_summary[df_summary['tarih'] == dt_str]
+            tip_ozet = df_day.groupby('tip')['musait'].agg(['sum', 'count'])
+            tip_ozet.columns = ['musait', 'toplam']
+            print(f"    {dt_str} ({gun_adi}): ", end='')
+            parts = []
+            for tip, row in tip_ozet.iterrows():
+                parts.append(f"{tip}={int(row['musait'])}/{int(row['toplam'])}")
+            print(', '.join(parts))
+    
+    return {
+        'available': available,
+        'unavailable': unavailable,
+        'half_day': half_day,
+        'constraints': constraints,
+        'summary': df_summary,
+    }
+
+
+def _map_izin_kodu(izin_tip_str):
+    """İzin tipi string'ini MIP2 durum koduna çevirir."""
+    izin_tip_str = str(izin_tip_str).strip().lower()
+    
+    mapping = {
+        'yıllık izin': 'Y',
+        'yillik izin': 'Y',
+        'yıllık': 'Y',
+        'doğum izni': 'D',
+        'dogum izni': 'D',
+        'doğum sonrası': 'D',
+        'dogum sonrasi': 'D',
+        'ücretsiz izin': 'D',  # doğum sonrası ücretsiz → D
+        'ucretsiz izin': 'D',
+        'ücretsiz izinler': 'D',
+        'sağlık raporu': 'R',  # rapor
+        'saglik raporu': 'R',
+        'hastalık': 'R',
+        'hastalik': 'R',
+        'evlilik izni': 'O',
+        'ölüm izni': 'O',
+        'olum izni': 'O',
+        'mazeret izni': 'O',
+        'idari izin': 'O',
+    }
+    
+    for key, code in mapping.items():
+        if key in izin_tip_str:
+            return code
+    
+    return 'O'  # default: genel izin
+
+
+def _izin_kodu_aciklama(kod):
+    """Durum kodu açıklaması."""
+    aciklamalar = {
+        'O': 'Off/İzin',
+        'Y': 'Yıllık izin',
+        'D': 'Doğum izni',
+        'DO': 'Doğum günü izni',
+        'H': 'Hamile (haftasonu yasak)',
+        'R': 'Rapor/Hastalık',
+        'M': 'Mesai',
+        'K': 'Kısmi çalışan',
+        'pasif': 'Aktif değil',
+        'haftasonu_yok': 'Haftasonu çalışamaz',
+        'musait': 'Müsait',
+        'yarim_gun': 'Yarım gün',
+    }
+    return aciklamalar.get(kod, kod)
+
+
+def _get_max_saat(emp):
+    """Kişinin günlük max çalışma saatini belirler."""
+    ozel = emp.get('ozel_durum', 'yok')
+    if ozel in ['hamile', 'sut_izni']:
+        return min(emp.get('gunluk_saat', 7), 11)  # max 20:00'a kadar
+    return emp.get('gunluk_saat', 9)
+
+
+# =============================================================================
+# 3. KONTROL / DOĞRULAMA FONKSİYONLARI
+# =============================================================================
+
+def print_availability_report(avail_result, df_employees=None):
+    """
+    Müsaitlik matrisinin detaylı raporunu yazdırır.
+    Jupyter'da kontrol için kullanılır.
+    """
+    print(f"\n{'='*70}")
+    print("MÜSAİTLİK KONTROL RAPORU")
+    print(f"{'='*70}")
+    
+    available = avail_result['available']
+    unavailable = avail_result['unavailable']
+    half_day = avail_result['half_day']
+    constraints = avail_result['constraints']
+    
+    # Genel özet
+    print(f"\nToplam kişi (constraints): {len(constraints)}")
+    
+    tip_counts = {}
+    for aid, c in constraints.items():
+        tip = c['tip']
+        tip_counts[tip] = tip_counts.get(tip, 0) + 1
+    print(f"Tip dağılımı: {tip_counts}")
+    
+    # Gün bazlı detay
+    for dt_str in sorted(available.keys()):
+        avail_ids = available[dt_str]
+        unavail_dict = unavailable[dt_str]
+        half_ids = half_day[dt_str]
+        
+        print(f"\n{'─'*50}")
+        print(f"  {dt_str}")
+        print(f"{'─'*50}")
+        
+        # Müsait olanları tip bazlı say
+        avail_by_tip = {}
+        for aid in avail_ids:
+            if aid in constraints:
+                tip = constraints[aid]['tip']
+                avail_by_tip[tip] = avail_by_tip.get(tip, 0) + 1
+        
+        print(f"  Müsait: {len(avail_ids)} → {avail_by_tip}")
+        print(f"  Yarım gün: {len(half_ids)}")
+        print(f"  Müsait değil: {len(unavail_dict)}")
+        
+        # Sebep bazlı
+        if unavail_dict:
+            sebep_detay = {}
+            for aid, sebep in unavail_dict.items():
+                if sebep not in sebep_detay:
+                    sebep_detay[sebep] = []
+                sebep_detay[sebep].append(aid)
+            
+            for sebep in sorted(sebep_detay.keys()):
+                ids = sebep_detay[sebep]
+                aciklama = _izin_kodu_aciklama(sebep)
+                print(f"    {sebep} ({aciklama}): {len(ids)} kişi")
+                # İlk 5'ini göster
+                if len(ids) <= 5:
+                    print(f"      → {ids}")
+                else:
+                    print(f"      → {ids[:5]} ... (+{len(ids)-5})")
+    
+    # Ekip bütünlüğü kontrolü
+    print(f"\n{'─'*50}")
+    print("EKİP BÜTÜNLÜĞÜ KONTROLÜ")
+    print(f"{'─'*50}")
+    
+    takim_members = {}
+    for aid, c in constraints.items():
+        t = c.get('takim', '')
+        if t:
+            if t not in takim_members:
+                takim_members[t] = []
+            takim_members[t].append(aid)
+    
+    for dt_str in sorted(available.keys()):
+        avail_set = set(available[dt_str])
+        print(f"\n  {dt_str}:")
+        for takim in sorted(takim_members.keys()):
+            members = takim_members[takim]
+            musait = [m for m in members if m in avail_set]
+            print(f"    {takim}: {len(musait)}/{len(members)} müsait")
+
+
+def availability_to_pivot(avail_result):
+    """
+    Müsaitlik matrisini kişi × gün pivot tablosuna çevirir.
+    Excel'e export veya görsel kontrol için.
+    
+    Returns
+    -------
+    pd.DataFrame
+        index=agent_id, columns=tarihler, values=durum kodu
+    """
+    df_summary = avail_result['summary']
+    
+    if len(df_summary) == 0:
+        return pd.DataFrame()
+    
+    pivot = df_summary.pivot_table(
+        index=['agent_id', 'isim', 'tip', 'lokasyon', 'takim', 'ozel_durum'],
+        columns='tarih',
+        values='sebep',
+        aggfunc='first'
+    )
+    
+    pivot = pivot.reset_index()
+    return pivot
+
+
+# =============================================================================
+# 4. ÖRNEK KULLANIM
+# =============================================================================
+
+if __name__ == '__main__':
+    # ---- Dosya yollarını kendi ortamına göre değiştir ----
+    EMPLOYEES_FILE = 'calisan_listesi.xlsx'
+    IZIN_FILE = 'izin_tablosu.xlsx'  # veya .csv
+    
+    # Planlama dönemi (haftasonu)
+    PLAN_DATES = ['2026-04-04', '2026-04-05']  # Cumartesi, Pazar
+    
+    # ---- Yükleme ----
+    df_employees = load_employees(EMPLOYEES_FILE)
+    df_izin = load_izin(IZIN_FILE)
+    
+    # ---- Sicil eşleşmesi kontrol ----
+    # df_employees'ta agent_id, df_izin'de sicil kullanılıyor
+    # Eşleşmeyi kontrol et:
+    emp_ids = set(df_employees['agent_id'])
+    izin_siciller = set(df_izin['sicil'])
+    
+    ortak = emp_ids & izin_siciller
+    sadece_emp = emp_ids - izin_siciller
+    sadece_izin = izin_siciller - emp_ids
+    
+    print(f"\n{'='*50}")
+    print("SİCİL EŞLEŞMESİ KONTROLÜ")
+    print(f"{'='*50}")
+    print(f"  df_employees: {len(emp_ids)} kişi")
+    print(f"  df_izin (unique sicil): {len(izin_siciller)} kişi")
+    print(f"  Eşleşen: {len(ortak)}")
+    print(f"  Sadece employees'ta: {len(sadece_emp)}")
+    print(f"  Sadece izin'de: {len(sadece_izin)}")
+    
+    if len(sadece_izin) > 0:
+        print(f"  ⚠ İzin tablosunda olup çalışan listesinde olmayan: {list(sadece_izin)[:10]}")
+    
+    # ---- Müsaitlik matrisi ----
+    avail = build_availability(df_employees, df_izin, PLAN_DATES, queue='kitle')
+    
+    # ---- Kontrol raporu ----
+    print_availability_report(avail)
+    
+    # ---- Pivot tablo (Excel'e export için) ----
+    pivot = availability_to_pivot(avail)
+    print(f"\nPivot tablo shape: {pivot.shape}")
+    print(pivot.head(20).to_string())
