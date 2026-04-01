@@ -1,8 +1,24 @@
-# === ADIM 4: İzin bilgisini ekle (left join) ===
-df_merged = df_emp_plan.merge(
-    df_izin_gun, on=['agent_user_code', 'tarih'], how='left'
-)
+# === ADIM 5: Durum kodu ===
+def durum_belirle(row):
+    tarih = pd.to_datetime(row['tarih'])
+    
+    end_date = row.get('end_date')
+    start_date = row.get('start_date')
+    
+    if pd.notna(end_date) and end_date < tarih:
+        return 'pasif'
+    if pd.notna(start_date) and start_date > tarih:
+        return 'pasif'
+    if pd.notna(row.get('izin_tipi')):
+        return 'izinli'
+    return 'musait'
 
-print(f"df_merged: {df_merged.shape}")
-# İzinli olan birkaç kişiyi görelim
-display(df_merged[df_merged['izin_tipi'].notna()].head())
+df_merged['durum'] = df_merged.apply(durum_belirle, axis=1)
+
+print(f"Durum dağılımı:")
+print(df_merged['durum'].value_counts())
+
+# Her durumdan örnek görelim
+for d in df_merged['durum'].unique():
+    print(f"\n--- {d} ---")
+    display(df_merged[df_merged['durum'] == d][['agent_user_code', 'employee_user_name', 'tarih', 'izin_tipi', 'durum']].head(3))
