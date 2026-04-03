@@ -1,17 +1,61 @@
-# === ADIM 6: Pivot ===
-pivot_cols = ['agent_user_code', 'employee_user_name', 'seg_desc',
-              'employee_team_manager_user_name', 'employee_grp_manager_user_name',
-              'emp_section_manager_usr_name']
+import pandas as pd
 
-pivot = df_merged.pivot_table(
-    index=pivot_cols,
-    columns='tarih',
-    values='durum',
-    aggfunc='first'
-).reset_index()
+# ─── CONFIG: Sen sadece burayı değiştirirsin ───
+AGENT_CONFIG = {
+    "L1":    {"takim_sayisi": 6,  "kisi_per_takim": 3},   # dummy: 6 takım × 3 kişi = 18
+    "L2":    {"takim_sayisi": 11, "kisi_per_takim": 3},   # dummy: 11 × 3 = 33
+    "L3_L4": {"takim_sayisi": 10, "kisi_per_takim": 3},   # dummy: 10 × 3 = 30
+    "L5":    {"takim_sayisi": 6,  "kisi_per_takim": 3},   # dummy: 6 × 3 = 18
+}
 
-print(f"Pivot shape: {pivot.shape}")
-display(pivot.head(10))
+def generate_dummy_agents(config):
+    """
+    Girdi:  config dict → lokasyon: {takim_sayisi, kisi_per_takim}
+    Çıktı:  df_agents → her satır bir agent
+    """
+    rows = []
+    for lokasyon, params in config.items():
+        for t in range(1, params["takim_sayisi"] + 1):
+            takim_kodu = f"{lokasyon}_T{t:02d}"
+            for k in range(1, params["kisi_per_takim"] + 1):
+                agent_id = f"KIT_{lokasyon}_T{t:02d}_{k:03d}"
+                rows.append({
+                    "agent_id": agent_id,
+                    "kuyruk": "kitle",
+                    "lokasyon": lokasyon,
+                    "takim": takim_kodu,
+                    "tip": "inhouse",
+                    "gunluk_saat": 9,
+                    "haftalik_gun": 6,
+                    "gece_calisabilir": True,
+                    "haftasonu_calisabilir": True,
+                    "aktif": True,
+                })
+    
+    df = pd.DataFrame(rows)
+    return df
 
-# İzinli olanları görelim
-display(pivot[pivot[PLAN_DATES[0]] == 'izinli'].head(10))
+
+# ─── ÇALIŞTIR VE ÇIKTIYI GÖSTER ───
+print("=" * 60)
+print("GİRDİ: AGENT_CONFIG")
+print("=" * 60)
+for lok, params in AGENT_CONFIG.items():
+    toplam = params["takim_sayisi"] * params["kisi_per_takim"]
+    print(f"  {lok:8s} → {params['takim_sayisi']} takım × {params['kisi_per_takim']} kişi = {toplam} agent")
+
+df_agents = generate_dummy_agents(AGENT_CONFIG)
+
+print(f"\n{'=' * 60}")
+print(f"ÇIKTI: df_agents  →  shape: {df_agents.shape}")
+print(f"{'=' * 60}")
+print(f"\nKolonlar: {list(df_agents.columns)}")
+print(f"\nİlk 5 satır:")
+print(df_agents.head().to_string(index=False))
+print(f"\nSon 5 satır:")
+print(df_agents.tail().to_string(index=False))
+print(f"\nLokasyon × Takım dağılımı:")
+print(df_agents.groupby("lokasyon")["takim"].nunique().to_string())
+print(f"\nLokasyon bazlı toplam agent:")
+print(df_agents.groupby("lokasyon")["agent_id"].count().to_string())
+print(f"\nToplam agent: {len(df_agents)}")
