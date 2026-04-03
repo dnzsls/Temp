@@ -1,29 +1,62 @@
 import pandas as pd
 
 # ─── CONFIG: Sen sadece burayı değiştirirsin ───
+# Lokasyon → Takım kodu → kişi sayısı
 AGENT_CONFIG = {
-    "L1":    {"takim_sayisi": 6,  "kisi_per_takim": 3},   # dummy: 6 takım × 3 kişi = 18
-    "L2":    {"takim_sayisi": 11, "kisi_per_takim": 3},   # dummy: 11 × 3 = 33
-    "L3_L4": {"takim_sayisi": 10, "kisi_per_takim": 3},   # dummy: 10 × 3 = 30
-    "L5":    {"takim_sayisi": 6,  "kisi_per_takim": 3},   # dummy: 6 × 3 = 18
+    "L1": {
+        "T01": 5,   # dummy sayılar, sen gerçeğini yaz
+        "T02": 4,
+        "T03": 6,
+        "T04": 3,
+        "T05": 5,
+        "T06": 4,
+    },
+    "L2": {
+        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
+        "T06": 3, "T07": 3, "T08": 3, "T09": 3, "T10": 3,
+        "T11": 3,
+    },
+    "L3_L4": {
+        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
+        "T06": 3, "T07": 3, "T08": 3, "T09": 3, "T10": 3,
+    },
+    "L5": {
+        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
+        "T06": 3,
+    },
 }
 
 def generate_dummy_agents(config):
     """
-    Girdi:  config dict → lokasyon: {takim_sayisi, kisi_per_takim}
+    Girdi:  config dict → lokasyon: {takim_kodu: kisi_sayisi, ...}
     Çıktı:  df_agents → her satır bir agent
     """
     rows = []
-    for lokasyon, params in config.items():
-        for t in range(1, params["takim_sayisi"] + 1):
-            takim_kodu = f"{lokasyon}_T{t:02d}"
-            for k in range(1, params["kisi_per_takim"] + 1):
-                agent_id = f"KIT_{lokasyon}_T{t:02d}_{k:03d}"
+    
+    # 1. DIŞ DÖNGÜ: Her lokasyonu dolaş
+    for lokasyon, takimlar in config.items():
+        # lokasyon = "L1"
+        # takimlar = {"T01": 5, "T02": 4, "T03": 6, ...}
+        
+        # 2. ORTA DÖNGÜ: O lokasyondaki her takımı dolaş
+        for takim_kodu, kisi_sayisi in takimlar.items():
+            # takim_kodu = "T01", kisi_sayisi = 5
+            
+            takim_adi = f"{lokasyon}_{takim_kodu}"
+            # → "L1_T01"
+            
+            # 3. İÇ DÖNGÜ: O takımdaki her kişiyi üret
+            for k in range(1, kisi_sayisi + 1):
+                # kisi_sayisi=5 → k = 1, 2, 3, 4, 5
+                
+                agent_id = f"KIT_{lokasyon}_{takim_kodu}_{k:03d}"
+                # → "KIT_L1_T01_001", "KIT_L1_T01_002", ...
+                
                 rows.append({
                     "agent_id": agent_id,
                     "kuyruk": "kitle",
                     "lokasyon": lokasyon,
-                    "takim": takim_kodu,
+                    "takim": takim_adi,
                     "tip": "inhouse",
                     "gunluk_saat": 9,
                     "haftalik_gun": 6,
@@ -40,22 +73,24 @@ def generate_dummy_agents(config):
 print("=" * 60)
 print("GİRDİ: AGENT_CONFIG")
 print("=" * 60)
-for lok, params in AGENT_CONFIG.items():
-    toplam = params["takim_sayisi"] * params["kisi_per_takim"]
-    print(f"  {lok:8s} → {params['takim_sayisi']} takım × {params['kisi_per_takim']} kişi = {toplam} agent")
+for lok, takimlar in AGENT_CONFIG.items():
+    toplam = sum(takimlar.values())
+    detay = ", ".join([f"{t}:{s}" for t, s in takimlar.items()])
+    print(f"  {lok:8s} → {len(takimlar)} takım, toplam {toplam} agent")
+    print(f"           ({detay})")
 
 df_agents = generate_dummy_agents(AGENT_CONFIG)
 
 print(f"\n{'=' * 60}")
 print(f"ÇIKTI: df_agents  →  shape: {df_agents.shape}")
 print(f"{'=' * 60}")
-print(f"\nKolonlar: {list(df_agents.columns)}")
-print(f"\nİlk 5 satır:")
-print(df_agents.head().to_string(index=False))
-print(f"\nSon 5 satır:")
-print(df_agents.tail().to_string(index=False))
-print(f"\nLokasyon × Takım dağılımı:")
-print(df_agents.groupby("lokasyon")["takim"].nunique().to_string())
-print(f"\nLokasyon bazlı toplam agent:")
+
+print(f"\nİlk 8 satır:")
+print(df_agents.head(8).to_string(index=False))
+
+print(f"\nTakım bazlı kişi sayıları:")
+print(df_agents.groupby(["lokasyon", "takim"])["agent_id"].count().to_string())
+
+print(f"\nLokasyon bazlı toplam:")
 print(df_agents.groupby("lokasyon")["agent_id"].count().to_string())
 print(f"\nToplam agent: {len(df_agents)}")
