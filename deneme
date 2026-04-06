@@ -1,108 +1,284 @@
 import pandas as pd
+from ortools.sat.python import cp_model
 
-# ─── MIP 1 ÇIKTISI (DUMMY) ───
-# Gerçekte optimize_queue'dan döner:
-#   assignments = {"V07_inhouse": 10, "V08_inhouse": 35, "V08_outsource": 40, ...}
-#   info = {"shift_coverage": {shift_key: {"company": ..., "start": ..., "slots": [...]}}, ...}
-#
-# Dummy olarak haftasonu tipik bir çıktı simüle ediyorum:
+# ─── DEF 1 ve DEF 2'den gelen dummy veriler ───
 
-DUMMY_MIP1_RESULT = {
-    "assignments": {
-        "V07_inhouse":    8,
-        "V08_inhouse":    30,
-        "V08_outsource":  35,
-        "V09_inhouse":    25,
-        "V09_outsource":  20,
-        "V10_inhouse":    15,
-        "V10_outsource":  10,
-        "V00_inhouse":    12,
-        "V17_outsource":  18,
-    },
-    "info": {
-        "shift_coverage": {
-            "V07_inhouse":   {"company": "inhouse",   "start": "07:00", "end": "16:00"},
-            "V08_inhouse":   {"company": "inhouse",   "start": "08:00", "end": "17:00"},
-            "V08_outsource": {"company": "outsource",  "start": "08:00", "end": "17:00"},
-            "V09_inhouse":   {"company": "inhouse",   "start": "09:00", "end": "18:00"},
-            "V09_outsource": {"company": "outsource",  "start": "09:00", "end": "18:00"},
-            "V10_inhouse":   {"company": "inhouse",   "start": "10:00", "end": "19:00"},
-            "V10_outsource": {"company": "outsource",  "start": "10:00", "end": "19:00"},
-            "V00_inhouse":   {"company": "inhouse",   "start": "00:00", "end": "08:00"},
-            "V17_outsource": {"company": "outsource",  "start": "17:00", "end": "01:30"},
-        }
-    }
+# Def 1: Agent listesi (küçük dummy)
+AGENT_CONFIG = {
+    "L1":    {"T01": 5, "T02": 4, "T03": 6},          # 15 agent
+    "L2":    {"T01": 4, "T02": 5, "T03": 4, "T04": 5}, # 18 agent
+    "L3_L4": {"T01": 5, "T02": 4, "T03": 5},           # 14 agent
+    "L5":    {"T01": 4, "T02": 3},                      # 7 agent
 }
+# Toplam: 54 inhouse agent
+
+def generate_dummy_agents(config):
+    rows = []
+    for lokasyon, takimlar in config.items():
+        for takim_kodu, kisi_sayisi in takimlar.items():
+            takim_adi = f"{lokasyon}_{takim_kodu}"
+            for k in range(1, kisi_sayisi + 1):
+                agent_id = f"KIT_{lokasyon}_{takim_kodu}_{k:03d}"
+                rows.append({
+                    "agent_id": agent_id, "kuyruk": "kitle",
+                    "lokasyon": lokasyon, "takim": takim_adi,
+                    "tip": "inhouse", "gunluk_saat": 9,
+                    "haftalik_gun": 6, "gece_calisabilir": True,
+                    "haftasonu_calisabilir": True, "aktif": True,
+                })
+    return pd.DataFrame(rows)
+
+# Def 2: MIP 1 kotaları (dummy — 54 agente uygun küçük kotalar)
+df_quotas_dummy = pd.DataFrame([
+    {"shift_key": "V08_inhouse", "company": "inhouse", "start": "08:00", "end": "17:00", "kota": 20},
+    {"shift_key": "V09_inhouse", "company": "inhouse", "start": "09:00", "end": "18:00", "kota": 15},
+    {"shift_key": "V10_inhouse", "company": "inhouse", "start": "10:00", "end": "19:00", "kota": 10},
+    {"shift_key": "V00_inhouse", "company": "inhouse", "start": "00:00", "end": "08:00", "kota": 5},
+])
+# Toplam kota: 50 (54 agentten 50'si atanacak, 4'ü izinli kalacak)
 
 
-def parse_mip1_quotas(assignments, shift_coverage):
+# ─── DEF 3: MODEL KURULUMU ───
+
+def build_assignment_model(df_agents, df_quotas, days):
     """
     Girdi:
-        assignments    → dict: {shift_key: kişi_sayısı}
-                         ör: {"V08_inhouse": 35, "V08_outsource": 40, ...}
-        shift_coverage → dict: {shift_key: {"company": ..., "start": ..., "end": ...}}
+        df_agents  → Def 1 çıktısı (agent listesi)
+        df_quotas  → Def 2 çıktısı (inhouse vardiya kotaları)
+        days       → liste: ["cumartesi", "pazar"]
 
     Çıktı:
-        df_quotas → DataFrame: sadece INHOUSE vardiyaları
-                    Kolonlar: shift_key, company, start, end, kota
-
-    Mantık:
-        1. assignments'tan kota > 0 olanları al
-        2. shift_coverage'dan company bilgisini eşle
-        3. Sadece inhouse olanları filtrele (outsource sayı olarak kalacak)
+        model      → CP-SAT model objesi (henüz çözülmedi)
+        X          → karar değişkenleri dict: X[(agent_id, gün, shift_key)] = BoolVar
+        meta       → yardımcı bilgiler (agent listesi, vardiyalar, günler)
     """
-    rows = []
 
-    for shift_key, kota in assignments.items():
-        if kota <= 0:
-            continue
+    # ─── ADIM 1: Setleri hazırla ───
+    # Aktif agentları al
+    agents = df_agents[df_agents["aktif"] == True]["agent_id"].tolist()
+    shifts = df_quotas["shift_key"].tolist()
 
-        # shift_coverage'dan bu vardiyayı bul
-        cov = shift_coverage.get(shift_key, {})
-        company = cov.get("company", "unknown")
-        start = cov.get("start", "")
-        end = cov.get("end", "")
+    # Agent bilgilerini hızlı erişim için dict'e çevir
+    agent_info = {}
+    for _, row in df_agents.iterrows():
+        agent_info[row["agent_id"]] = {
+            "lokasyon": row["lokasyon"],
+            "takim": row["takim"],
+            "gece": row["gece_calisabilir"],
+            "haftasonu": row["haftasonu_calisabilir"],
+            "gunluk_saat": row["gunluk_saat"],
+            "haftalik_gun": row["haftalik_gun"],
+        }
 
-        rows.append({
-            "shift_key": shift_key,
-            "company": company,
-            "start": start,
-            "end": end,
-            "kota": kota,
-        })
+    # Shift bilgilerini dict'e çevir
+    shift_info = {}
+    for _, row in df_quotas.iterrows():
+        shift_info[row["shift_key"]] = {
+            "start": row["start"],
+            "end": row["end"],
+            "kota": row["kota"],
+        }
 
-    df_all = pd.DataFrame(rows)
+    # Hangi vardiyalar gece vardiyası?
+    def is_gece(start_str):
+        hour = int(start_str.split(":")[0])
+        return hour >= 22 or hour < 6   # 22:00-06:00 arası = gece
 
-    # Sadece inhouse kotalarını ayır
-    df_inhouse = df_all[df_all["company"] == "inhouse"].copy()
-    df_outsource = df_all[df_all["company"] != "inhouse"].copy()
+    # Hangi vardiyalar sabah vardiyası?
+    def is_sabah(start_str):
+        hour = int(start_str.split(":")[0])
+        return 6 <= hour <= 9            # 06:00-09:00 arası = sabah
 
-    return df_inhouse, df_outsource
+    gece_shifts = [s for s in shifts if is_gece(shift_info[s]["start"])]
+    sabah_shifts = [s for s in shifts if is_sabah(shift_info[s]["start"])]
+
+    print(f"  Gece vardiyaları: {gece_shifts}")
+    print(f"  Sabah vardiyaları: {sabah_shifts}")
+
+    # ─── ADIM 2: Model ve değişkenler ───
+    model = cp_model.CpModel()
+
+    # X[(agent, gün, shift)] = 1 ise agent o gün o vardiyada çalışıyor
+    X = {}
+    for a in agents:
+        for d in days:
+            for s in shifts:
+                X[(a, d, s)] = model.NewBoolVar(f"X_{a}_{d}_{s}")
+
+    print(f"  Toplam değişken sayısı: {len(X)}")
+    print(f"  ({len(agents)} agent × {len(days)} gün × {len(shifts)} shift)")
+
+    # ─── ADIM 3: Kısıtları kur ───
+    kisit_sayaci = {"kota": 0, "tek_vardiya": 0, "lokasyon": 0,
+                    "gece": 0, "haftasonu": 0, "gece_sabah": 0, "ekip": 0}
+
+    # K1: KOTA EŞLEŞMESİ
+    # Her gün, her vardiya için: toplam atanan = MIP 1 kotası
+    for d in days:
+        for s in shifts:
+            kota = shift_info[s]["kota"]
+            model.Add(
+                sum(X[(a, d, s)] for a in agents) == kota
+            )
+            kisit_sayaci["kota"] += 1
+
+    # K2: GÜNDE TEK VARDİYA
+    # Her agent, her gün için: en fazla 1 vardiyaya atanabilir
+    for a in agents:
+        for d in days:
+            model.Add(
+                sum(X[(a, d, s)] for s in shifts) <= 1
+            )
+            kisit_sayaci["tek_vardiya"] += 1
+
+    # K3: LOKASYON SABİTLİĞİ (şimdilik tüm vardiyalar lokasyon-bağımsız)
+    # İleride vardiyalar lokasyona bağlanınca: agent.lok ≠ shift.lok → X=0
+    # Şu an MIP 1'de vardiyalar lokasyon taşımıyor, bu kısıt ileride aktif olacak
+    # Placeholder olarak bırakıyorum
+    # for a in agents:
+    #     for d in days:
+    #         for s in shifts:
+    #             if agent_info[a]["lokasyon"] != shift_info[s].get("lokasyon"):
+    #                 model.Add(X[(a, d, s)] == 0)
+    #                 kisit_sayaci["lokasyon"] += 1
+
+    # K4: GECE ÇALIŞAMAZ
+    # gece_calisabilir=False olan agentlar gece vardiyasına atanamaz
+    for a in agents:
+        if not agent_info[a]["gece"]:
+            for d in days:
+                for s in gece_shifts:
+                    model.Add(X[(a, d, s)] == 0)
+                    kisit_sayaci["gece"] += 1
+
+    # K5: HAFTASONU ÇALIŞAMAZ
+    # haftasonu_calisabilir=False olan agentlar hiçbir vardiyaya atanamaz
+    for a in agents:
+        if not agent_info[a]["haftasonu"]:
+            for d in days:
+                for s in shifts:
+                    model.Add(X[(a, d, s)] == 0)
+                    kisit_sayaci["haftasonu"] += 1
+
+    # K6: GECE → SABAH YASAĞI
+    # Cumartesi gece çalışan → Pazar sabah çalışamaz
+    if len(days) == 2 and gece_shifts and sabah_shifts:
+        for a in agents:
+            for gs in gece_shifts:
+                for ss in sabah_shifts:
+                    model.Add(
+                        X[(a, days[0], gs)] + X[(a, days[1], ss)] <= 1
+                    )
+                    kisit_sayaci["gece_sabah"] += 1
+
+    # K7: EKİP BÜTÜNLÜĞÜ (soft constraint — penalty ile)
+    # Aynı takımdaki kişiler mümkünse aynı vardiyaya atansın
+    # Yöntem: Her takım-gün-vardiya için "takımdan kaç kişi atandı" say
+    #         Eğer takımdan en az 1 kişi atandıysa ama hepsi atanmadıysa → ceza
+    #
+    # Basitleştirilmiş yaklaşım:
+    # Her takım-gün için: takım üyeleri aynı vardiyaya mı?
+    # same_shift[(takim, gün, shift)] = takımdan o vardiyaya atanan sayısı
+    # Bonus: same_shift yüksekse ödül ver
+
+    takimlar = df_agents.groupby("takim")["agent_id"].apply(list).to_dict()
+    ekip_bonus_vars = []
+
+    for takim, uyeler in takimlar.items():
+        for d in days:
+            for s in shifts:
+                # Bu takımdan bu vardiyaya kaç kişi atandı
+                count_var = model.NewIntVar(0, len(uyeler), f"team_{takim}_{d}_{s}")
+                model.Add(count_var == sum(X[(a, d, s)] for a in uyeler if a in agents))
+                ekip_bonus_vars.append(count_var)
+                kisit_sayaci["ekip"] += 1
+
+    # ─── ADIM 4: Amaç fonksiyonu ───
+    # Ekip bütünlüğü bonusunu maximize et
+    # (CP-SAT'ta maximize = minimize(-1 * toplam))
+    model.Maximize(sum(ekip_bonus_vars))
+
+    # ─── Meta bilgiler ───
+    meta = {
+        "agents": agents,
+        "shifts": shifts,
+        "days": days,
+        "agent_info": agent_info,
+        "shift_info": shift_info,
+        "gece_shifts": gece_shifts,
+        "sabah_shifts": sabah_shifts,
+        "takimlar": takimlar,
+        "kisit_sayaci": kisit_sayaci,
+    }
+
+    return model, X, meta
 
 
 # ─── ÇALIŞTIR VE ÇIKTIYI GÖSTER ───
-print("=" * 60)
-print("GİRDİ: MIP 1 assignments")
-print("=" * 60)
-for shift, kota in DUMMY_MIP1_RESULT["assignments"].items():
-    cov = DUMMY_MIP1_RESULT["info"]["shift_coverage"][shift]
-    print(f"  {shift:20s} → {kota:3d} kişi  ({cov['company']}, {cov['start']}-{cov['end']})")
+df_agents = generate_dummy_agents(AGENT_CONFIG)
+days = ["cumartesi", "pazar"]
 
-df_inhouse, df_outsource = parse_mip1_quotas(
-    DUMMY_MIP1_RESULT["assignments"],
-    DUMMY_MIP1_RESULT["info"]["shift_coverage"]
-)
+print("=" * 60)
+print("GİRDİ 1: df_agents")
+print("=" * 60)
+print(f"  Toplam agent: {len(df_agents)}")
+print(f"  Lokasyonlar: {df_agents['lokasyon'].unique().tolist()}")
+print(f"  Takımlar: {df_agents['takim'].nunique()} adet")
 
 print(f"\n{'=' * 60}")
-print(f"ÇIKTI 1: df_inhouse (MIP 2'ye girecek kotalar)")
-print(f"{'=' * 60}")
-print(f"Shape: {df_inhouse.shape}")
-print(df_inhouse.to_string(index=False))
-print(f"\nToplam inhouse kota: {df_inhouse['kota'].sum()}")
+print("GİRDİ 2: df_quotas")
+print("=" * 60)
+print(df_quotas_dummy.to_string(index=False))
+print(f"  Toplam kota/gün: {df_quotas_dummy['kota'].sum()}")
 
 print(f"\n{'=' * 60}")
-print(f"ÇIKTI 2: df_outsource (bilgi amaçlı, MIP 2'ye girmez)")
-print(f"{'=' * 60}")
-print(f"Shape: {df_outsource.shape}")
-print(df_outsource.to_string(index=False))
-print(f"\nToplam outsource kota: {df_outsource['kota'].sum()}")
+print("GİRDİ 3: days = {days}")
+print("=" * 60)
+
+print(f"\n{'=' * 60}")
+print("MODEL KURULUMU BAŞLIYOR...")
+print("=" * 60)
+
+model, X, meta = build_assignment_model(df_agents, df_quotas_dummy, days)
+
+print(f"\n{'=' * 60}")
+print("ÇIKTI: Model özeti")
+print("=" * 60)
+print(f"  Değişken sayısı: {len(X)}")
+print(f"  Agent sayısı: {len(meta['agents'])}")
+print(f"  Vardiya sayısı: {len(meta['shifts'])}")
+print(f"  Gün sayısı: {len(meta['days'])}")
+print(f"\n  Kısıt sayıları:")
+for kisit, sayi in meta["kisit_sayaci"].items():
+    print(f"    {kisit:15s} → {sayi}")
+print(f"    {'TOPLAM':15s} → {sum(meta['kisit_sayaci'].values())}")
+
+print(f"\n  Gece vardiyaları: {meta['gece_shifts']}")
+print(f"  Sabah vardiyaları: {meta['sabah_shifts']}")
+print(f"\n  Takımlar ve üye sayıları:")
+for takim, uyeler in meta["takimlar"].items():
+    print(f"    {takim}: {len(uyeler)} kişi")
+
+# ─── Hızlı çözüm testi ───
+print(f"\n{'=' * 60}")
+print("HIZLI ÇÖZÜM TESTİ")
+print("=" * 60)
+
+solver = cp_model.CpSolver()
+solver.parameters.max_time_in_seconds = 10
+status = solver.Solve(model)
+
+status_map = {
+    cp_model.OPTIMAL: "OPTIMAL",
+    cp_model.FEASIBLE: "FEASIBLE",
+    cp_model.INFEASIBLE: "INFEASIBLE",
+    cp_model.MODEL_INVALID: "MODEL_INVALID",
+    cp_model.UNKNOWN: "UNKNOWN",
+}
+print(f"  Çözüm durumu: {status_map.get(status, status)}")
+if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    print(f"  Amaç fonksiyonu (ekip bonusu): {solver.ObjectiveValue()}")
+    # Kaç agent atandı
+    atanan = sum(1 for a in meta["agents"] for d in meta["days"]
+                 for s in meta["shifts"] if solver.Value(X[(a, d, s)]) == 1)
+    print(f"  Toplam atama: {atanan} (agent×gün)")
