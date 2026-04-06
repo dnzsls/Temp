@@ -87,28 +87,224 @@ LP, hem amaç fonksiyonunun hem kısıtların **lineer** (doğrusal) olduğu opt
 ❌ Lineer DEĞİL: log(x₁) ≤ 100     (logaritma)
 ```
 
-## 2.2 Standart Form
+## 2.2 Standart Form ve Matris Gösterimi
+
+LP problemleri **standart formda** yazılır:
 
 ```
-maksimize   z = c₁x₁ + c₂x₂ + ... + cₙxₙ
+min  z = c₁x₁ + c₂x₂ + ... + cₙxₙ
 
 kısıtlar:
-            a₁₁x₁ + a₁₂x₂ + ... ≤ b₁
-            a₂₁x₁ + a₂₂x₂ + ... ≤ b₂
-            ...
-            x₁, x₂, ... ≥ 0
+     a₁₁x₁ + a₁₂x₂ + ... ≤ b₁
+     a₂₁x₁ + a₂₂x₂ + ... ≤ b₂
+     x₁, x₂, ... ≥ 0
 ```
 
-**Matris formunda:**
+**Matris formunda:** `min z = cᵀx,  Ax ≤ b,  x ≥ 0`
+
+| Sembol | Ne | Örnek |
+|--------|-----|-------|
+| **x** | Karar değişkenleri (aranan) | [x₁, x₂]ᵀ |
+| **c** | Amaç katsayıları | [3, 2]ᵀ |
+| **cᵀx** | Amaç fonksiyonu (iç çarpım) | 3x₁ + 2x₂ |
+| **A** | Kısıt katsayıları matrisi | [[1,1], [2,1]] |
+| **b** | Kısıt sağ tarafları | [10, 16]ᵀ |
+| **ᵀ** | Transpoz (sütunu satıra çevir) | [3,2]ᵀ → [3 2] |
+
+## 2.3 Standart Form → linprog → Simplex
+
+| | **Standart Form** | **linprog** | **Simplex** |
+|---|---|---|---|
+| **Ne?** | Matematik gösterimi | Python fonksiyonu | Çözüm algoritması |
+| **Kim yapar?** | Sen (kağıtta) | Sen (kodda) | linprog (otomatik) |
+
+### Örnek Problem — 3 Format
+
+**Problem:** 2 ürün üret, maliyeti minimize et, kapasiteyi aşma.
+
+<table>
+<tr>
+<th>Standart Form</th>
+<th>linprog Kodu</th>
+<th>Simplex (arka plan)</th>
+</tr>
+<tr>
+<td>
+
 ```
-max  z = cᵀx
-kısıtlar:  Ax ≤ b
-           x ≥ 0
+min z = 3x₁ + 2x₂
+
+kısıtlar:
+  x₁ + x₂ ≤ 10
+  2x₁ + x₂ ≤ 16
+  x₁, x₂ ≥ 0
 ```
 
-## 2.3 Simplex Algoritması
+</td>
+<td>
 
-LP'nin çözüm yöntemi. 1947'de George Dantzig tarafından geliştirildi.
+```python
+c = [3, 2]
+A_ub = [[1,1], [2,1]]
+b_ub = [10, 16]
+bounds = [(0,None), (0,None)]
+
+result = linprog(c, 
+  A_ub=A_ub, 
+  b_ub=b_ub, 
+  bounds=bounds)
+```
+
+</td>
+<td>
+
+```
+Köşe (0,0)  → z=0
+Köşe (0,10) → z=20 ✓
+Köşe (6,4)  → z=26
+
+Optimal: (0,10)
+z = 20
+```
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Satır satır:**
+- `3x₁ + 2x₂` → maliyet
+- `x₁ + x₂ ≤ 10` → kapasite 1
+- `2x₁ + x₂ ≤ 16` → kapasite 2
+
+</td>
+<td>
+
+**Parametre eşleştirme:**
+- `c` → amaç katsayıları
+- `A_ub` → ≤ kısıt matrisi
+- `b_ub` → ≤ sağ taraflar
+- `bounds` → x ≥ 0
+
+</td>
+<td>
+
+**Ne yapıyor:**
+- Köşeleri geziyor
+- z'yi karşılaştırıyor
+- En küçük z'yi buluyor
+
+</td>
+</tr>
+</table>
+
+**Sonuç:** `result.x = [0, 10]`, `result.fun = 20`
+
+## 2.4 Kısıt Formatları ve Dönüşümler
+
+Standart form ve linprog farklı formatlar kabul eder. Dönüşüm gerekebilir:
+
+| Yazmak İstediğin | Standart Form | linprog Karşılığı |
+|------------------|---------------|-------------------|
+| **minimize** | ✅ Direkt yaz | ✅ `c = [5, 3]` |
+| **maximize** | ❌ Dönüştür: -c yap | ❌ `c = [-5, -3]`, sonucu -1 ile çarp |
+| **≤ kısıtı** | ✅ Direkt yaz | ✅ `A_ub`, `b_ub` |
+| **≥ kısıtı** | ❌ Dönüştür: -1 ile çarp | ❌ `A_ub`'a -1 ile çarpılmış ekle |
+| **= kısıtı** | ✅ Direkt yaz | ✅ `A_eq`, `b_eq` (ayrı parametre) |
+
+**Dönüşüm örnekleri:**
+
+```
+MAXIMIZE → MINIMIZE:
+    max z = 5x₁ + 3x₂
+    ↓
+    min z' = -5x₁ - 3x₂
+    (sonucu -1 ile çarp: z = -z')
+
+≥ → ≤:
+    x₁ + x₂ ≥ 10
+    ↓
+    -x₁ - x₂ ≤ -10
+    (her iki tarafı -1 ile çarp)
+
+= KISITI:
+    x₁ + x₂ = 10
+    ↓
+    linprog'da: A_eq = [[1, 1]], b_eq = [10]
+    (ayrı parametre, dönüşüm yok)
+```
+
+## 2.5 SciPy linprog Kullanımı
+
+**Örnek problem:**
+```
+max  z = 5x₁ + 4x₂
+
+kısıtlar:
+     x₁ + x₂ ≤ 10      (≤ kısıtı)
+     2x₁ + x₂ ≤ 15     (≤ kısıtı)
+     x₁ + x₂ = 8       (= kısıtı)
+     x₁, x₂ ≥ 0
+```
+
+**linprog kodu:**
+```python
+from scipy.optimize import linprog
+
+# 1. AMAÇ: max → min dönüşümü (katsayıları negatif yap)
+c = [-5, -4]  # max 5x₁+4x₂ → min -5x₁-4x₂
+
+# 2. ≤ KISITLARI: A_ub @ x ≤ b_ub
+A_ub = [
+    [1, 1],   # x₁ + x₂ ≤ 10
+    [2, 1],   # 2x₁ + x₂ ≤ 15
+]
+b_ub = [10, 15]
+
+# 3. = KISITLARI: A_eq @ x = b_eq
+A_eq = [
+    [1, 1],   # x₁ + x₂ = 8
+]
+b_eq = [8]
+
+# 4. DEĞİŞKEN SINIRLARI: x ≥ 0
+bounds = [(0, None), (0, None)]
+
+# 5. ÇÖZ
+result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
+
+# 6. SONUÇ
+if result.success:
+    print(f"x₁ = {result.x[0]:.2f}")
+    print(f"x₂ = {result.x[1]:.2f}")
+    print(f"max z = {-result.fun:.2f}")  # min sonucunu -1 ile çarp → max
+else:
+    print("Çözüm bulunamadı!")
+```
+
+**Çıktı:**
+```
+x₁ = 7.00
+x₂ = 1.00
+max z = 39.00
+```
+
+**linprog özellikleri:**
+
+| Özellik | Durum |
+|---------|-------|
+| minimize | ✅ Direkt |
+| maximize | ❌ Dönüşüm lazım (c'yi negatif yap) |
+| ≤ kısıtı | ✅ `A_ub`, `b_ub` |
+| ≥ kısıtı | ❌ Dönüşüm lazım (-1 ile çarp) |
+| = kısıtı | ✅ `A_eq`, `b_eq` |
+| Integer | ❌ Desteklemez (sadece continuous) |
+| Solver | HiGHS (çok hızlı) |
+| Kurulum | Gereksiz (SciPy ile gelir) |
+
+## 2.6 Simplex Algoritması
+
+LP'nin çözüm yöntemi. 1947'de George Dantzig tarafından geliştirildi. linprog (ve diğer LP solver'lar) arka planda bunu kullanır.
 
 ### Geometrik Anlam
 
@@ -129,25 +325,25 @@ Her kısıt, n-boyutlu uzayda bir **yarı-düzlem** tanımlar. Tüm kısıtları
          0    4    8
 ```
 
-**Feasible region:** Tüm kısıtları sağlayan noktaların kümesi. Yukarıdaki şekilde çizgilerle sınırlanan alan.
+**Feasible region:** Tüm kısıtları sağlayan noktaların kümesi.
 
 ### Algoritma Adımları
 
 ```
-1. BAŞLA: Orijin veya bir köşe noktasından başla
+1. BAŞLA: Bir köşe noktasından başla (feasible region'ın köşesi)
 
 2. KONTROL: Komşu köşelere bak
-   - Daha iyi (daha yüksek z) köşe var mı?
+   - Daha iyi (daha düşük z) köşe var mı?
 
-3. HAREKET: Varsa o köşeye git, yoksa DUR
+3. HAREKET: Varsa o köşeye git, yoksa DUR (optimal buldun)
 
 4. TEKRAR: Adım 2'ye dön
 ```
 
 **Neden çalışır?**
-- LP'de optimal çözüm her zaman bir köşededir (convexity)
+- LP'de optimal çözüm her zaman bir köşededir (convexity özelliği)
 - Simplex köşeleri gezer, içeriyi taramaz → çok hızlı
-- Her adımda z artar → sonlu adımda biter
+- Her adımda z azalır (min) veya artar (max) → sonlu adımda biter
 
 ### Karmaşıklık
 
@@ -198,7 +394,49 @@ y = 0 → x ≤ 0 → üretim yok
 y = 1 → x ≤ M → üretim yapılabilir (M = büyük sayı)
 ```
 
-## 3.4 LP Relaxation
+## 3.4 Araçlarda Integer Tanımlama
+
+**PuLP:**
+```python
+# Integer (tam sayı)
+x = LpVariable("x", lowBound=0, cat="Integer")
+
+# Binary (0 veya 1)
+y = LpVariable("y", cat="Binary")
+
+# Continuous (kesirli - default)
+z = LpVariable("z", lowBound=0)  # cat="Continuous"
+```
+
+**OR-Tools CP-SAT:**
+```python
+# CP-SAT sadece integer destekler (continuous yok!)
+x = model.new_int_var(0, 100, "x")
+
+# Binary
+y = model.new_bool_var("y")
+```
+
+**Pyomo:**
+```python
+# Integer
+model.x = Var(within=NonNegativeIntegers)
+
+# Binary
+model.y = Var(within=Binary)
+
+# Continuous
+model.z = Var(within=NonNegativeReals)
+```
+
+**SciPy linprog:**
+```python
+# ❌ Integer desteklemez!
+# Sadece continuous çözer
+# IP/MIP için PuLP veya OR-Tools kullan
+```
+
+## 3.5 LP Relaxation
 
 IP'yi çözmeden önce, integer kısıtını **gevşetip** LP olarak çözeriz.
 
@@ -317,227 +555,22 @@ Gap = %1 → Optimal'in %1 içindeyiz
 
 # 5. HEURISTIC & METAHEURISTIC
 
-## 5.1 Neden Lazım?
+MIP her zaman çalışmaz. Problem çok büyükse (100,000+ değişken) veya zaman kısıtlıysa (saniyeler içinde cevap lazım) **heuristic** yöntemler kullanılır.
 
-Exact yöntemler (LP/MIP) her zaman çalışmaz:
+| Yöntem | Ne Yapar | Örnek |
+|--------|----------|-------|
+| **Heuristic** | Probleme özel kural, hızlı ama optimal garanti yok | Greedy, Nearest Neighbor |
+| **Metaheuristic** | Genel arama stratejisi, lokal optimumdan kaçabilir | Simulated Annealing, Genetic Algorithm, Tabu Search |
 
+**Pratikte:**
 ```
-1. Problem çok büyük
-   - 1 milyon binary değişken → Branch & Bound patlar
-
-2. Zaman kısıtlı
-   - Gerçek zamanlı karar: saniyeler içinde cevap lazım
-
-3. Problem lineer değil
-   - Amaç fonksiyonu x², sin(x) içeriyor
-```
-
-## 5.2 Heuristic (Sezgisel)
-
-Probleme özel, elle tasarlanmış kural. Optimal garanti etmez ama hızlı çözüm verir.
-
-### Greedy (Açgözlü)
-
-Her adımda o an en iyi görüneni seç. Geleceği düşünme.
-
-**Örnek — Sırt Çantası Problemi:**
-
-```
-Çanta kapasitesi: 10 kg
-Eşyalar:
-  A: 6 kg, 30₺ değer  → ₺/kg = 5.0
-  B: 4 kg, 24₺ değer  → ₺/kg = 6.0  ← en iyi oran
-  C: 3 kg, 15₺ değer  → ₺/kg = 5.0
-  D: 2 kg, 8₺ değer   → ₺/kg = 4.0
-
-Greedy çözüm (₺/kg sırasıyla):
-  1. B'yi al (4 kg, 24₺) → kalan kapasite: 6 kg
-  2. A'yı al (6 kg, 30₺) → kalan kapasite: 0 kg
-  Toplam: 54₺
-
-Optimal çözüm:
-  B + C + D = 4+3+2 = 9 kg, 24+15+8 = 47₺
-  veya A + B = 6+4 = 10 kg, 30+24 = 54₺ ✓
-
-Bu örnekte Greedy optimal buldu, ama her zaman bulmaz!
+1. Önce MIP dene
+2. Yavaşsa → gap toleransı ekle (%1-5)
+3. Hala yavaşsa → heuristic ile başlangıç çözümü bul, MIP'e ver
+4. MIP hiç bitmiyorsa → saf heuristic/metaheuristic kullan
 ```
 
-### Construction Heuristic
-
-Boş çözümden başla, adım adım inşa et.
-
-**Örnek — Gezgin Satıcı (TSP) için Nearest Neighbor:**
-
-```
-Şehirler: A, B, C, D
-Mesafeler: A-B=10, A-C=15, A-D=20, B-C=35, B-D=25, C-D=30
-
-Adımlar:
-  1. A'dan başla
-  2. En yakın ziyaret edilmemiş: B (10 km) → A→B
-  3. B'den en yakın ziyaret edilmemiş: D (25 km) → A→B→D
-  4. D'den en yakın ziyaret edilmemiş: C (30 km) → A→B→D→C
-  5. Başa dön: C→A (15 km)
-  
-Toplam: 10+25+30+15 = 80 km
-
-Optimal olabilir de olmayabilir de. Ama çok hızlı!
-```
-
-## 5.3 Metaheuristic (Üst-Sezgisel)
-
-Probleme bağımsız, genel arama stratejisi. Farklı problemlere uygulanabilir.
-
-### Simulated Annealing (SA) — Tavlama Benzetimi
-
-Metal tavlama sürecinden esinlenme. Sıcak metal yavaş soğutulunca kristal yapısı düzgün olur.
-
-**Problem:** Yerel arama (her adımda daha iyiye git) **lokal optimuma** takılır.
-
-```
-        ^
-Değer   │    /\
-        │   /  \  ← Lokal optimum (takılırsın)
-        │  /    \
-        │ /      \    /\
-        │/        \  /  \ ← Global optimum (asıl hedef)
-        └──────────\/─────────→ Çözüm uzayı
-```
-
-**SA'nın çözümü:** Bazen kötü adımları da kabul et → lokal optimumdan kaç.
-
-**Algoritma:**
-
-```
-1. Rastgele bir çözüm seç (x)
-2. Sıcaklık T'yi yüksek başlat (örn: T=1000)
-3. Tekrar et:
-   a) Komşu çözüm üret (x')
-   b) Δ = f(x') - f(x)  (yeni - eski)
-   c) Eğer Δ > 0 (daha iyi): kabul et, x = x'
-   d) Eğer Δ < 0 (daha kötü): olasılıkla kabul et
-      - P = exp(Δ/T)
-      - T yüksekken P yüksek (riskli adım)
-      - T düşükken P düşük (temkinli)
-   e) T'yi azalt (soğut): T = T × 0.99
-4. T çok düşünce dur
-```
-
-**Örnek:**
-
-```
-Mevcut çözüm: x, değer = 100
-Yeni çözüm:   x', değer = 95 (daha kötü, Δ = -5)
-Sıcaklık: T = 100
-
-Kabul olasılığı: P = exp(-5/100) = exp(-0.05) = 0.95 → %95 kabul
-
-Sıcaklık: T = 10
-Kabul olasılığı: P = exp(-5/10) = exp(-0.5) = 0.60 → %60 kabul
-
-Sıcaklık: T = 1
-Kabul olasılığı: P = exp(-5/1) = exp(-5) = 0.007 → %0.7 kabul
-
-→ Başta riskli, sonra temkinli. Lokal optimumdan kaçıp global'e ulaşabilir.
-```
-
-### Genetic Algorithm (GA) — Genetik Algoritma
-
-Doğal evrimden esinlenme. En uygun bireyler hayatta kalır ve çoğalır.
-
-**Terimler:**
-```
-Birey (Chromosome) = Bir çözüm (örn: [1,0,1,1,0])
-Gen = Çözümün bir parçası (örn: ilk eleman = 1)
-Popülasyon = Çözümler kümesi (örn: 100 farklı çözüm)
-Fitness = Çözümün kalitesi (yüksek = iyi)
-```
-
-**Algoritma:**
-
-```
-1. BAŞLAT: Rastgele 100 çözüm oluştur (popülasyon)
-
-2. DEĞERLENDİR: Her çözümün fitness'ını hesapla
-
-3. SEÇ: En iyi çözümleri ebeveyn olarak seç
-   (fitness yüksek olanlar daha çok seçilir)
-
-4. ÇAPRAZLA (Crossover): İki ebeveyni birleştir
-   Ebeveyn A: [1,0,1,1,0]
-   Ebeveyn B: [0,1,1,0,1]
-   Kesim noktası: 3
-   Çocuk:     [1,0,1|0,1]  ← A'nın ilk 3'ü + B'nin son 2'si
-
-5. MUTASYON: Rastgele değişiklik (küçük olasılıkla)
-   Çocuk:     [1,0,1,0,1]
-   Mutasyon:  [1,0,0,0,1]  ← 3. gen değişti
-
-6. YENİ NESİL: Çocuklar yeni popülasyonu oluşturur
-
-7. TEKRAR: Adım 2'ye dön (100 nesil boyunca)
-
-8. BİTİR: En iyi çözümü döndür
-```
-
-**Neden çalışır?**
-- İyi çözümlerin özellikleri bir sonraki nesle aktarılır
-- Çaprazlama: iyi parçaları birleştirir
-- Mutasyon: çeşitlilik sağlar, lokal optimumdan kaçar
-- Doğal seleksiyon: kötüler elenir
-
-### Tabu Search — Tabu Arama
-
-Hafızalı yerel arama. Aynı yere tekrar gitmemeyi garanti eder.
-
-**Problem:** Yerel arama döngüye girebilir: A → B → A → B → ...
-
-**Tabu Search çözümü:** Son N hamleyi "yasaklı" listesine koy.
-
-**Algoritma:**
-
-```
-1. Başlangıç çözümü seç (x)
-2. Tabu listesi = [] (boş)
-3. Tekrar et:
-   a) Tüm komşu çözümleri listele
-   b) Tabu listesindeki hamleleri çıkar
-   c) Kalanlar arasından en iyisini seç
-   d) O hamleyi tabu listesine ekle
-   e) Liste N'den uzunsa en eskiyi sil
-4. Belirli adım sonra dur
-```
-
-**Örnek — TSP:**
-
-```
-Mevcut tur: A → B → C → D → A
-Komşu hamleler (iki şehri değiştir):
-  - A↔B: B → A → C → D → B (maliyet: 120)
-  - B↔C: A → C → B → D → A (maliyet: 115)  ← en iyi
-  - C↔D: A → B → D → C → A (maliyet: 125)
-
-Tabu listesi: [A↔B, D↔C]  (son 2 hamle)
-
-B↔C yasak değil → seç
-Yeni tabu listesi: [D↔C, B↔C]  (A↔B düştü, B↔C eklendi)
-
-→ Döngüye girmez, yeni bölgeler keşfeder
-```
-
-**Ne zaman kullanılır?**
-- Kombinatoryal problemler (TSP, VRP, Scheduling)
-- Komşuluk yapısı net tanımlı problemler
-
-## 5.4 Karşılaştırma
-
-| Yöntem | Optimal Garanti | Hız | En İyi Kullanım |
-|--------|-----------------|-----|-----------------|
-| Exact (MIP) | ✅ Evet | Yavaş olabilir | Küçük-orta, kesinlik şart |
-| Greedy | ❌ Hayır | Çok hızlı | Başlangıç çözümü |
-| SA | ❌ Hayır | Hızlı | Continuous, sürekli uzay |
-| GA | ❌ Hayır | Orta | Kombinatoryal, paralel |
-| Tabu | ❌ Hayır | Hızlı | Scheduling, routing |
+Bu workshop'ta MIP'e odaklanıyoruz. Heuristic/Metaheuristic ayrı bir konu.
 
 ---
 
@@ -1011,21 +1044,75 @@ Problem lineer mi?
 | 1,000 - 100,000 | Saniyeler | Dakikalar-saatler | Exact + Gap |
 | > 100,000 | Dakikalar | Saatler-günler | Heuristic hybrid |
 
-## 8.3 Checklist
+## 8.3 Solver Seçim Kriterleri
 
-Bir optimizasyon projesi başlatırken:
+### Açık Kaynak Solver'lar
+
+| Solver | LP | MIP | Güçlü Yönü | Zayıf Yönü |
+|--------|-----|-----|-----------|-----------|
+| **CBC** | ✅ | ✅ | Ücretsiz, PuLP ile gelir, genel amaç | Büyük MIP'te yavaş |
+| **HiGHS** | ✅ | ✅ | Çok hızlı LP, SciPy default | MIP'te CBC kadar olgun değil |
+| **GLPK** | ✅ | ✅ | Hafif, her yerde çalışır | Performans düşük |
+| **SCIP** | ✅ | ✅ | Akademik ücretsiz, güçlü MIP | Ticari kullanım paralı |
+| **CP-SAT** | ❌ | ✅ | Scheduling'de çok hızlı, native kısıtlar | Sadece integer, LP yok |
+
+### Ticari Solver'lar
+
+| Solver | LP | MIP | Güçlü Yönü | Fiyat |
+|--------|-----|-----|-----------|-------|
+| **Gurobi** | ✅ | ✅ | En hızlı MIP, paralel, akademik ücretsiz | Ticari: $$$$ |
+| **CPLEX** | ✅ | ✅ | Kurumsal destek, IBM ekosistemi | Ticari: $$$$ |
+| **Xpress** | ✅ | ✅ | Hızlı, FICO entegrasyonu | Ticari: $$$ |
+
+### Performans Farkı (Örnek)
 
 ```
-□ Problemi net tanımla (amaç ne?)
-□ Karar değişkenlerini belirle
-□ Kısıtları listele (hard vs soft)
-□ Lineerlik kontrolü yap
-□ Boyut tahmini yap
-□ Doğru solver/yöntem seç
-□ Basit versiyonla başla, karmaşıklaştır
-□ Sonuçları doğrula (sanity check)
-□ Sensitivity analizi yap
+10,000 binary değişkenli MIP:
+
+CBC:    45 dakika
+HiGHS:  30 dakika  
+SCIP:   20 dakika
+Gurobi: 3 dakika   ← 15x daha hızlı
+
+Küçük problemlerde fark yok, büyüdükçe açılır.
 ```
+
+### Hangi Durumda Hangisi?
+
+| Durum | Önerilen Solver |
+|-------|-----------------|
+| Öğrenme / prototip | CBC (PuLP ile gelir) |
+| Hızlı LP lazım | HiGHS (SciPy) |
+| Scheduling / atama | CP-SAT (OR-Tools) |
+| Büyük MIP, zaman kritik | Gurobi (akademik ücretsiz) |
+| Kurumsal proje, destek lazım | Gurobi veya CPLEX |
+| Akademik araştırma | SCIP (ücretsiz) |
+
+### Solver Değiştirmek
+
+**PuLP'ta:**
+```python
+model.solve(PULP_CBC_CMD())      # CBC
+model.solve(GUROBI_CMD())        # Gurobi
+model.solve(CPLEX_CMD())         # CPLEX
+```
+
+**Pyomo'da:**
+```python
+SolverFactory('cbc').solve(model)
+SolverFactory('gurobi').solve(model)
+SolverFactory('cplex').solve(model)
+```
+
+**OR-Tools'ta:**
+```python
+# LP/MIP
+solver = pywraplp.Solver.CreateSolver('CBC')
+solver = pywraplp.Solver.CreateSolver('SCIP')
+solver = pywraplp.Solver.CreateSolver('GUROBI')
+```
+
+Model kodu aynı kalır, sadece solver ismi değişir.
 
 ---
 
