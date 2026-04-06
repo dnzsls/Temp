@@ -119,16 +119,27 @@ def build_assignment_model(df_agents, df_quotas, days):
                     model.Add(X[(a, days[0], gs)] + X[(a, days[1], ss)] <= 1)
                     kisit_sayaci["gece_sabah"] += 1
 
-    # K7: EKİP BÜTÜNLÜĞÜ (soft constraint)
+    # K7: EKİP BÜTÜNLÜĞÜ (soft constraint — kare bonus)
+    # Kare almak yoğunlaşmayı ödüllendirir:
+    #   5 kişi aynı vardiya → 5² = 25 bonus
+    #   3+2 dağılım         → 3² + 2² = 13 bonus
+    #   1+1+1+1+1 dağılım   → 5 × 1² = 5 bonus
     takimlar = df_agents.groupby("takim")["agent_id"].apply(list).to_dict()
     ekip_bonus_vars = []
 
     for takim, uyeler in takimlar.items():
+        max_uye = len(uyeler)
         for d in days:
             for s in shifts:
-                count_var = model.NewIntVar(0, len(uyeler), f"team_{takim}_{d}_{s}")
+                # Takımdan bu vardiyaya kaç kişi atandı
+                count_var = model.NewIntVar(0, max_uye, f"team_{takim}_{d}_{s}")
                 model.Add(count_var == sum(X[(a, d, s)] for a in uyeler if a in agents))
-                ekip_bonus_vars.append(count_var)
+
+                # Karesini al
+                sq_var = model.NewIntVar(0, max_uye * max_uye, f"sq_{takim}_{d}_{s}")
+                model.AddMultiplicationEquality(sq_var, count_var, count_var)
+
+                ekip_bonus_vars.append(sq_var)
                 kisit_sayaci["ekip"] += 1
 
     # ─── ADIM 4: Amaç fonksiyonu ───
