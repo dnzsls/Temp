@@ -1,96 +1,108 @@
 import pandas as pd
 
-# ─── CONFIG: Sen sadece burayı değiştirirsin ───
-# Lokasyon → Takım kodu → kişi sayısı
-AGENT_CONFIG = {
-    "L1": {
-        "T01": 5,   # dummy sayılar, sen gerçeğini yaz
-        "T02": 4,
-        "T03": 6,
-        "T04": 3,
-        "T05": 5,
-        "T06": 4,
+# ─── MIP 1 ÇIKTISI (DUMMY) ───
+# Gerçekte optimize_queue'dan döner:
+#   assignments = {"V07_inhouse": 10, "V08_inhouse": 35, "V08_outsource": 40, ...}
+#   info = {"shift_coverage": {shift_key: {"company": ..., "start": ..., "slots": [...]}}, ...}
+#
+# Dummy olarak haftasonu tipik bir çıktı simüle ediyorum:
+
+DUMMY_MIP1_RESULT = {
+    "assignments": {
+        "V07_inhouse":    8,
+        "V08_inhouse":    30,
+        "V08_outsource":  35,
+        "V09_inhouse":    25,
+        "V09_outsource":  20,
+        "V10_inhouse":    15,
+        "V10_outsource":  10,
+        "V00_inhouse":    12,
+        "V17_outsource":  18,
     },
-    "L2": {
-        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
-        "T06": 3, "T07": 3, "T08": 3, "T09": 3, "T10": 3,
-        "T11": 3,
-    },
-    "L3_L4": {
-        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
-        "T06": 3, "T07": 3, "T08": 3, "T09": 3, "T10": 3,
-    },
-    "L5": {
-        "T01": 3, "T02": 3, "T03": 3, "T04": 3, "T05": 3,
-        "T06": 3,
-    },
+    "info": {
+        "shift_coverage": {
+            "V07_inhouse":   {"company": "inhouse",   "start": "07:00", "end": "16:00"},
+            "V08_inhouse":   {"company": "inhouse",   "start": "08:00", "end": "17:00"},
+            "V08_outsource": {"company": "outsource",  "start": "08:00", "end": "17:00"},
+            "V09_inhouse":   {"company": "inhouse",   "start": "09:00", "end": "18:00"},
+            "V09_outsource": {"company": "outsource",  "start": "09:00", "end": "18:00"},
+            "V10_inhouse":   {"company": "inhouse",   "start": "10:00", "end": "19:00"},
+            "V10_outsource": {"company": "outsource",  "start": "10:00", "end": "19:00"},
+            "V00_inhouse":   {"company": "inhouse",   "start": "00:00", "end": "08:00"},
+            "V17_outsource": {"company": "outsource",  "start": "17:00", "end": "01:30"},
+        }
+    }
 }
 
-def generate_dummy_agents(config):
+
+def parse_mip1_quotas(assignments, shift_coverage):
     """
-    Girdi:  config dict → lokasyon: {takim_kodu: kisi_sayisi, ...}
-    Çıktı:  df_agents → her satır bir agent
+    Girdi:
+        assignments    → dict: {shift_key: kişi_sayısı}
+                         ör: {"V08_inhouse": 35, "V08_outsource": 40, ...}
+        shift_coverage → dict: {shift_key: {"company": ..., "start": ..., "end": ...}}
+
+    Çıktı:
+        df_quotas → DataFrame: sadece INHOUSE vardiyaları
+                    Kolonlar: shift_key, company, start, end, kota
+
+    Mantık:
+        1. assignments'tan kota > 0 olanları al
+        2. shift_coverage'dan company bilgisini eşle
+        3. Sadece inhouse olanları filtrele (outsource sayı olarak kalacak)
     """
     rows = []
-    
-    # 1. DIŞ DÖNGÜ: Her lokasyonu dolaş
-    for lokasyon, takimlar in config.items():
-        # lokasyon = "L1"
-        # takimlar = {"T01": 5, "T02": 4, "T03": 6, ...}
-        
-        # 2. ORTA DÖNGÜ: O lokasyondaki her takımı dolaş
-        for takim_kodu, kisi_sayisi in takimlar.items():
-            # takim_kodu = "T01", kisi_sayisi = 5
-            
-            takim_adi = f"{lokasyon}_{takim_kodu}"
-            # → "L1_T01"
-            
-            # 3. İÇ DÖNGÜ: O takımdaki her kişiyi üret
-            for k in range(1, kisi_sayisi + 1):
-                # kisi_sayisi=5 → k = 1, 2, 3, 4, 5
-                
-                agent_id = f"KIT_{lokasyon}_{takim_kodu}_{k:03d}"
-                # → "KIT_L1_T01_001", "KIT_L1_T01_002", ...
-                
-                rows.append({
-                    "agent_id": agent_id,
-                    "kuyruk": "kitle",
-                    "lokasyon": lokasyon,
-                    "takim": takim_adi,
-                    "tip": "inhouse",
-                    "gunluk_saat": 9,
-                    "haftalik_gun": 6,
-                    "gece_calisabilir": True,
-                    "haftasonu_calisabilir": True,
-                    "aktif": True,
-                })
-    
-    df = pd.DataFrame(rows)
-    return df
+
+    for shift_key, kota in assignments.items():
+        if kota <= 0:
+            continue
+
+        # shift_coverage'dan bu vardiyayı bul
+        cov = shift_coverage.get(shift_key, {})
+        company = cov.get("company", "unknown")
+        start = cov.get("start", "")
+        end = cov.get("end", "")
+
+        rows.append({
+            "shift_key": shift_key,
+            "company": company,
+            "start": start,
+            "end": end,
+            "kota": kota,
+        })
+
+    df_all = pd.DataFrame(rows)
+
+    # Sadece inhouse kotalarını ayır
+    df_inhouse = df_all[df_all["company"] == "inhouse"].copy()
+    df_outsource = df_all[df_all["company"] != "inhouse"].copy()
+
+    return df_inhouse, df_outsource
 
 
 # ─── ÇALIŞTIR VE ÇIKTIYI GÖSTER ───
 print("=" * 60)
-print("GİRDİ: AGENT_CONFIG")
+print("GİRDİ: MIP 1 assignments")
 print("=" * 60)
-for lok, takimlar in AGENT_CONFIG.items():
-    toplam = sum(takimlar.values())
-    detay = ", ".join([f"{t}:{s}" for t, s in takimlar.items()])
-    print(f"  {lok:8s} → {len(takimlar)} takım, toplam {toplam} agent")
-    print(f"           ({detay})")
+for shift, kota in DUMMY_MIP1_RESULT["assignments"].items():
+    cov = DUMMY_MIP1_RESULT["info"]["shift_coverage"][shift]
+    print(f"  {shift:20s} → {kota:3d} kişi  ({cov['company']}, {cov['start']}-{cov['end']})")
 
-df_agents = generate_dummy_agents(AGENT_CONFIG)
+df_inhouse, df_outsource = parse_mip1_quotas(
+    DUMMY_MIP1_RESULT["assignments"],
+    DUMMY_MIP1_RESULT["info"]["shift_coverage"]
+)
 
 print(f"\n{'=' * 60}")
-print(f"ÇIKTI: df_agents  →  shape: {df_agents.shape}")
+print(f"ÇIKTI 1: df_inhouse (MIP 2'ye girecek kotalar)")
 print(f"{'=' * 60}")
+print(f"Shape: {df_inhouse.shape}")
+print(df_inhouse.to_string(index=False))
+print(f"\nToplam inhouse kota: {df_inhouse['kota'].sum()}")
 
-print(f"\nİlk 8 satır:")
-print(df_agents.head(8).to_string(index=False))
-
-print(f"\nTakım bazlı kişi sayıları:")
-print(df_agents.groupby(["lokasyon", "takim"])["agent_id"].count().to_string())
-
-print(f"\nLokasyon bazlı toplam:")
-print(df_agents.groupby("lokasyon")["agent_id"].count().to_string())
-print(f"\nToplam agent: {len(df_agents)}")
+print(f"\n{'=' * 60}")
+print(f"ÇIKTI 2: df_outsource (bilgi amaçlı, MIP 2'ye girmez)")
+print(f"{'=' * 60}")
+print(f"Shape: {df_outsource.shape}")
+print(df_outsource.to_string(index=False))
+print(f"\nToplam outsource kota: {df_outsource['kota'].sum()}")
