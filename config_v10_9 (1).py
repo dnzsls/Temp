@@ -1,0 +1,308 @@
+# =============================================================================
+# CONFIG v10.9 — Pattern ve Occupancy kaldırıldı
+# =============================================================================
+
+CONFIG = {
+
+    # ---- KUYRUKLAR ----
+    'queues': {
+        'kitle': {
+            'label': 'Kitle',
+            'actual_name': 'kitle_cagrilar',
+            'companies': ['inhouse', 'outsource'],
+        },
+        'kurumsal': {
+            'label': 'Kurumsal',
+            'actual_name': 'kurumsal_cagrilar',
+            'companies': ['inhouse'],
+        },
+        'gold': {
+            'label': 'Gold',
+            'actual_name': 'gold_cagrilar',
+            'companies': ['inhouse'],
+        }
+    },
+
+    # ---- AHT ----
+    # load_aht_from_df() ile doldurulur
+    'sub_queues': {},
+
+    # Manuel saat bazlı AHT override (varsa weighted AHT yerine kullanılır)
+    # Örnek: 'kitle': {9: 160, 10: 165}
+    'aht_overrides': {
+        'kitle': {},
+        'kurumsal': {},
+        'gold': {},
+    },
+
+    # Sub-queue ve override yoksa fallback
+    'default_aht': 150,
+
+    # ---- PART-TIME ----
+    'part_time': {
+        'enabled': True,
+        'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
+        'count': {'kitle': 32, 'kurumsal': 0, 'gold': 0}
+    },
+
+    # ---- ERLANG ----
+    'erlang': {
+        'target_asa': 30,
+        'target_seconds': 30,
+        'shrinkage': {
+            0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+            7: 0.03, 8: 0.03, 9: 0.20, 10: 0.12, 11: 0.11, 12: 0.13,
+            13: 0.20, 14: 0.17, 15: 0.23, 16: 0.25, 17: 0.22, 18: 0.16,
+            19: 0.13, 20: 0.16, 21: 0.11, 22: 0.14, 23: 0.12,
+
+            'default': 0.0,
+        },
+        'interval_minutes': 30,
+    },
+
+    # ---- OUTSOURCE HEDEF (kuyruk bazlı, None = sadece inhouse) ----
+    'outsource_ratio': {
+        'kitle': {'min': 0.60, 'max': 0.65},
+        'kurumsal': None,
+        'gold': None
+    },
+
+    # ---- MIP ----
+    'mip': {
+        'cost_inhouse': 1.0,
+        'cost_outsource': 1.0,
+        'min_per_shift': 5
+    },
+
+    # ---- RR PENALTY (Fazla Atama Cezası) ----
+    # penalty_per_person: Erlang üstü her fazla kişi başına ceza (base_cost=1.0'a göre)
+    # peak_exempt: True ise peak slotlarda ceza uygulanmaz
+    # peak_threshold: max çağrının bu oranı üstü = peak slot (cezadan muaf)
+    'rr_penalty': {
+        'enabled': True,
+        'peak_exempt': True,
+        'penalty_per_person': 4.0,     # gündüz off-peak ceza
+        'peak_penalty': 2.0,           # peak slotlarda ceza
+        'peak_threshold': 0.90,        # Erlang >= max * 0.90 = peak
+        'night_multiplier': {
+            'enabled': True,
+            'hours': {'start': '02:00', 'end': '07:00'},
+            'multiplier': 100.0,
+        }
+    },
+
+    # ---- SLOT CAP (Saat Aralığı Bazlı Üst Sınır) ----
+    'slot_cap': {
+        'enabled': True,
+        'queues': ['kitle'],
+        'bands': [
+            {'start': '07:00', 'end': '09:00', 'max_ratio': 1.05, 'penalty': 50.0},
+            {'start': '09:00', 'end': '10:00', 'max_ratio': 1.25, 'penalty': 50.0},
+            {'start': '10:00', 'end': '11:00', 'max_ratio': 1.30, 'penalty': 50.0},
+            #{'start': '18:00', 'end': '19:00', 'max_ratio': 1.20, 'penalty': 50.0},
+        ],
+    },
+
+    # ---- KÜÇÜK ATAMA CEZASI ----
+    # Her aktif shift için sabit maliyet ekler.
+    # MIP 2-3 kişilik shift açmak yerine mevcut shift'e eklemeyi tercih eder.
+    'small_shift_penalty': {
+        'enabled': True,
+        'penalty': 10,
+    },
+
+    # ---- SAAT BAZLI MALİYET ÇARPANLARI - KUYRUK BAZLI ----
+    'time_cost_multipliers': {
+        'kitle': {
+            'inhouse': {'07:00': 1.5, '07:30': 1.3},
+            'outsource': {}
+        },
+        'kurumsal': {
+            'inhouse': {'07:00': 1.8, '07:30': 1.5},
+            'outsource': {}
+        },
+        'gold': {
+            'inhouse': {'07:00': 2.0, '07:30': 1.7},
+            'outsource': {}
+        },
+        'default': {
+            'inhouse': {'07:00': 1.5, '07:30': 1.3},
+            'outsource': {}
+        }
+    },
+
+    # ---- COMPANY ----
+    'company': {
+        'inhouse': {'shift_value': 'inhouse', 'outsource_flg': 0},
+        'outsource': {'shift_value': 'outsource', 'outsource_flg': 1}
+    },
+
+    # ---- KOLON İSİMLERİ ----
+    'shift_columns': {
+        'shift': 'shift',
+        'start': 'start',
+        'end': 'end',
+        'company': 'company'
+    },
+
+    'calls_columns': {
+        'date': 'data_date',
+        'time': 'min_time_period_value',
+        'sub_queue': 'resource_group_key',
+        'main_queue': 'line_based_main_group',
+        'calls': 'nof_call'
+    },
+
+    'actual_columns': {
+        'date': 'working_date',
+        'queue': 'line_based_main_group',
+        'location': 'working_main_group',
+        'shift_start': 'shifts_start_hour',
+        'shift_end': 'shifts_end_hour',
+        'outsource': 'outsource_flg',
+        'weekend': 'weekend_flg',
+        'count': 'calisan_kisi_sayisi'
+    },
+
+    # ---- FORECAST KOLON İSİMLERİ ----
+    'forecast_cols': {
+        'datetime': 'model_data_date',
+        'date': 'truncddate',
+        'kitle_total': 'KITLE_NOF_CALL',
+        'kurumsal_total': 'KURUMSAL_NOF_CALL',
+        'gold_total': 'GOLD_NOF_CALL',
+    },
+
+    # ---- KAPASİTE ----
+    'capacity': {
+        'efficiency': {
+            'inhouse': 0.70,
+            'outsource': 0.70,
+            'part_time': 0.80
+        }
+    },
+
+    # ---- RAPOR ----
+    'report': {
+        'peak_threshold': 0.70
+    },
+
+    # ---- INHOUSE-ONLY ALT KUYRUKLAR ----
+    # Bu alt kuyruklardaki çağrılar sadece inhouse tarafından karşılanmalı
+    'inhouse_only_subqueues': {
+        'kitle': [
+            #'retention_line',
+            #{'sub_queue': 'kart_temel', 'min_ratio': 0.30},
+        ],
+        'kurumsal': [],
+        'gold': []
+    },
+
+    # ---- OUTSOURCE-ONLY ALT KUYRUKLAR ----
+    # Bu alt kuyruklardaki çağrılar sadece outsource tarafından karşılanmalı
+    'outsource_only_subqueues': {
+        'kitle': [
+            {'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0,
+             'hours': {'start': '08:00', 'end': '00:00'}},
+        ],
+        'kurumsal': [],
+        'gold': []
+    },
+
+    # ---- SLOT BAZLI KAPASİTE RAPORU ----
+    'hourly_report': {
+        'rapor_etkisi': {
+            0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+            7: 0.03, 8: 0.03, 9: 0.04, 10: 0.04, 11: 0.04, 12: 0.04,
+            13: 0.04, 14: 0.04, 15: 0.04, 16: 0.04, 17: 0.04, 18: 0.04,
+            19: 0.04, 20: 0.04, 21: 0.04, 22: 0.04, 23: 0.04,
+            'default': 0.04,
+        },
+        'kapasite_kaybi': {
+            0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+            7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+            13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+            19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+            'default': 0.08,
+        },
+        'cagri_adedi': {
+            'default': 15,
+        },
+    },
+
+    # ---- KUYRUK + GÜN TİPİ BAZLI OVERRIDE ----
+    # Cumartesi/Pazar/Haftalıcı için farklı config değerleri
+    # Sadece değiştirmek istediğin bölümleri yaz, geri kalan ana CONFIG'ten gelir
+    # Desteklenen gün tipleri: 'haftalici', 'cumartesi', 'pazar'
+    'queue_overrides': {
+        'kitle': {
+            'cumartesi': {
+                # Cumartesi shrinkage farklı olabilir
+                'erlang': {
+                    'shrinkage': {
+                        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                        7: 0.03, 8: 0.03, 9: 0.15, 10: 0.10, 11: 0.08, 12: 0.10,
+                        13: 0.15, 14: 0.12, 15: 0.18, 16: 0.20, 17: 0.17, 18: 0.12,
+                        19: 0.10, 20: 0.12, 21: 0.08, 22: 0.10, 23: 0.08,
+                        'default': 0.05,
+                    },
+                },
+                # Cumartesi RR penalty farklı olabilir
+                #'rr_penalty': {
+                #    'penalty_per_person': 6.0,
+                #    'peak_penalty': 3.0,
+                #},
+                # Cumartesi kapasite kaybi farklı olabilir
+                #'hourly_report': {
+                #    'kapasite_kaybi': {9: 0.12, 12: 0.07, 'default': 0.05},
+                #},
+            },
+            'pazar': {
+                'erlang': {
+                    'shrinkage': {
+                        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                        7: 0.03, 8: 0.03, 9: 0.12, 10: 0.08, 11: 0.06, 12: 0.08,
+                        13: 0.12, 14: 0.10, 15: 0.15, 16: 0.17, 17: 0.14, 18: 0.10,
+                        19: 0.08, 20: 0.10, 21: 0.06, 22: 0.08, 23: 0.06,
+                        'default': 0.03,
+                    },
+                },
+            },
+            # 'haftalici': {}   # boş bırakırsan ana CONFIG kullanılır
+        },
+        # 'kurumsal': {
+        #     'cumartesi': {...},
+        #     'pazar': {...},
+        # },
+        # 'gold': {...},
+    },
+
+    # ---- SURPLUS DAĞITIM (Aşama 2) ----
+    # MIP min ihtiyacı çıkardıktan sonra, configdeki kadro ile MIP atamasının
+    # farkı kadar fazla kişiyi (sadece inhouse) uygun shift'lere yayar.
+    # Sadece haftaiçi için kullanılır (run_queue_pipeline'da kontrol ediliyor).
+    'surplus_distribution': {
+        'enabled': True,
+        # PT hariç inhouse kadro
+        'total_kadro': {
+            'kitle':    {'inhouse': 400},
+            'kurumsal': {'inhouse': 80},
+            'gold':     {'inhouse': 50},
+        },
+        # Surplus dağıtım pencereleri. Her pencerenin kendi pay oranı var.
+        # Oranlar toplamı 1.0 olmalı. Saatler dahil-dahil (start <= shift_start <= end).
+        'windows': [
+            {'name': 'sabah', 'start': '09:00', 'end': '13:00', 'ratio': 2/3},
+            {'name': 'aksam', 'start': '13:00', 'end': '20:00', 'ratio': 1/3},
+        ],
+        # Aday seçimi: True ise sadece MIP'in atadığı (>0) shift'ler aday
+        'only_assigned_shifts': True,
+        # Tüm pencerelerde aday yoksa: True → tüm atanmış inhouse shift'lere yay
+        'fallback_all_inhouse': True,
+        # Dağıtım yöntemi (her pencere içinde):
+        #   'rr_first'  → önce RR<%100 olan slotları kapatan shift'lere greedy,
+        #                 kalan MIP ağırlığına oransal
+        #   'weighted'  → direkt MIP ağırlığına oransal
+        'method': 'rr_first',
+    },
+}
