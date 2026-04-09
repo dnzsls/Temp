@@ -1254,7 +1254,7 @@ def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=T
       - Hiçbir pencerede aday yoksa ve fallback_all_inhouse=True ise →
         tüm atanmış inhouse shift'lere yayılır.
       - Her pencere içinde method='rr_first' ise: önce RR<%100 olan slotları
-        kapatan shift'lere greedy, kalanı MIP ağırlığına oransal.
+        kapatan shift'lere greedy, kalanı eşit dağıtılır (küçük shiftlere öncelik).
       - Shift bazlı tavan yok.
 
     Raporlama için karşılaştırma snapshot'ı alır: 'stage1_*' anahtarları
@@ -1362,7 +1362,7 @@ def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=T
               f"fazla={surplus}, method={method}")
         print(f"      Pencere payları: {share_str}")
 
-    # --- Her pencere için RR-fix + oransal dağıtım ---
+    # --- Her pencere için RR-fix + eşit dağıtım ---
     added_total = {}
     by_window_log = {}
     local_mip_by_slot = dict(mip_info['mip_by_slot'])
@@ -1388,7 +1388,7 @@ def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=T
         }
         if verbose and share > 0:
             print(f"      [{name} {win['start']}-{win['end']}] "
-                  f"pay={share}, RR-fix={used_rr}, oransal={used_prop}")
+                  f"pay={share}, RR-fix={used_rr}, eşit={used_prop}")
 
     # --- mip_info'yu güncelle ---
     total_added = sum(added_total.values())
@@ -1440,9 +1440,9 @@ def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=T
 def _allocate_within_pool(share, candidates, shift_cov, erlang_by_slot,
                           assignments, mip_by_slot_state, method):
     """
-    Tek bir aday havuzu için RR-fix + oransal dağıtım.
+    Tek bir aday havuzu için RR-fix + eşit dağıtım.
     mip_by_slot_state'i yerinde günceller (sonraki pencere bunu görür).
-    Döner: (added_dict, used_rr, used_proportional)
+    Döner: (added_dict, used_rr, used_equal)
     """
     added = {s: 0 for s in candidates}
     remaining = share
@@ -1486,39 +1486,25 @@ def _allocate_within_pool(share, candidates, shift_cov, erlang_by_slot,
                 mip_by_slot_state[slot] = mip_by_slot_state.get(slot, 0) + 1
             deficits = _open_deficits()
 
-    # 2) Oransal (MIP ağırlığına göre)
+    # 2) Eşit dağıtım (her aday shift'e eşit pay)
+    #    Bölünemeyen kalan: MIP ataması EN AZ olan shift'lere öncelikli verilir
+    #    (küçük shift'ler kalanı alır — off-peak dengesini korur)
     if remaining > 0:
-        weights = {s: assignments.get(s, 0) for s in candidates}
-        weight_sum = sum(weights.values())
+        n = len(candidates)
+        base = remaining // n
+        extra = remaining - base * n  # bölünemeyen kalan
 
-        if weight_sum == 0:
-            n = len(candidates)
-            base = remaining // n
-            extra = remaining - base * n
-            for i, s in enumerate(candidates):
-                inc = base + (1 if i < extra else 0)
+        # Bölünemeyen kalanı dağıtma sırası: MIP ataması az olana öncelik
+        sorted_cands = sorted(candidates, key=lambda s: assignments.get(s, 0))
+
+        for i, s in enumerate(sorted_cands):
+            inc = base + (1 if i < extra else 0)
+            if inc > 0:
                 added[s] += inc
                 for slot in shift_cov[s]['slots']:
                     mip_by_slot_state[slot] = mip_by_slot_state.get(slot, 0) + inc
-            used_prop += remaining
-            remaining = 0
-        else:
-            raw = {s: remaining * (weights[s] / weight_sum) for s in candidates}
-            floors = {s: int(raw[s]) for s in candidates}
-            leftover = remaining - sum(floors.values())
-            fracs = sorted(
-                ((s, raw[s] - floors[s]) for s in candidates),
-                key=lambda x: x[1], reverse=True
-            )
-            for i in range(leftover):
-                floors[fracs[i][0]] += 1
-            for s in candidates:
-                inc = floors[s]
-                added[s] += inc
-                for slot in shift_cov[s]['slots']:
-                    mip_by_slot_state[slot] = mip_by_slot_state.get(slot, 0) + inc
-            used_prop += remaining
-            remaining = 0
+        used_prop += remaining
+        remaining = 0
 
     return added, used_rr, used_prop
 
