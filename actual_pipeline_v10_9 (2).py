@@ -6,79 +6,17 @@
 # Yapı değişiklikleri (v10.9 → v2):
 #   - Kuyruk bazlı olmasını istediğimiz bloklar 'queue_overrides' altına taşındı:
 #       erlang, mip, rr_penalty, small_shift_penalty, hourly_report
-#   - Bu blokların GLOBAL versiyonları silindi. Artık her kuyruk kendi
-#     değerlerine sahip olmalı (kitle / kurumsal / gold).
-#   - queue_overrides yapısı 2-seviyeli oldu: queue > section (eski 3-seviyeli
-#     queue > gün_tipi > section kaldırıldı, cumartesi/pazar blokları silindi).
+#   - Bu blokların GLOBAL versiyonları silindi.
+#   - queue_overrides yapısı 2-seviyeli oldu: queue > section
+#     (eski 3-seviyeli queue > gün_tipi > section kaldırıldı,
+#      cumartesi/pazar blokları silindi).
 #   - V2 default'ları:
 #       * outsource_ratio hepsi None (kısıt pasif)
 #       * mip.cost_outsource = 10.0 (inhouse öncelikli)
+#
+# NOT: Kurumsal ve gold şu an kitle ile aynı değerlerle başlıyor. Her kuyruğu
+#      bağımsız olarak değiştirebilirsin — biri diğerini etkilemez.
 # =============================================================================
-
-# --- Kuyruklar için ortak şablon (kopya kaynağı) ---
-# Tek yerden yönetmek istediğin değerleri bu şablondan türet.
-# Kurumsal ve gold şu an kitle ile aynı değerlerle başlatılıyor — farklılaşacaklarsa
-# ilgili kuyruğun bloğunda manuel olarak değiştirebilirsin.
-
-_ERLANG_DEFAULT = {
-    'target_asa': 30,
-    'target_seconds': 30,
-    'shrinkage': {
-        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
-        7: 0.03, 8: 0.03, 9: 0.20, 10: 0.12, 11: 0.11, 12: 0.13,
-        13: 0.20, 14: 0.17, 15: 0.23, 16: 0.25, 17: 0.22, 18: 0.16,
-        19: 0.13, 20: 0.16, 21: 0.11, 22: 0.14, 23: 0.12,
-        'default': 0.0,
-    },
-    'interval_minutes': 30,
-}
-
-_MIP_DEFAULT = {
-    'cost_inhouse': 1.0,
-    'cost_outsource': 10.0,   # V2: outsource pahalı → inhouse öncelikli
-    'min_per_shift': 5,
-}
-
-_RR_PENALTY_DEFAULT = {
-    'enabled': True,
-    'peak_exempt': True,
-    'penalty_per_person': 4.0,
-    'peak_penalty': 2.0,
-    'peak_threshold': 0.90,
-    'night_multiplier': {
-        'enabled': True,
-        'hours': {'start': '02:00', 'end': '07:00'},
-        'multiplier': 100.0,
-    },
-}
-
-_SMALL_SHIFT_PENALTY_DEFAULT = {
-    'enabled': True,
-    'penalty': 10,
-}
-
-_HOURLY_REPORT_DEFAULT = {
-    'rapor_etkisi': {
-        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
-        7: 0.03, 8: 0.03, 9: 0.04, 10: 0.04, 11: 0.04, 12: 0.04,
-        13: 0.04, 14: 0.04, 15: 0.04, 16: 0.04, 17: 0.04, 18: 0.04,
-        19: 0.04, 20: 0.04, 21: 0.04, 22: 0.04, 23: 0.04,
-        'default': 0.04,
-    },
-    'kapasite_kaybi': {
-        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-        7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
-        13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
-        19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
-        'default': 0.08,
-    },
-    'cagri_adedi': {
-        'default': 15,
-    },
-}
-
-import copy as _copy
-
 
 CONFIG = {
 
@@ -141,7 +79,7 @@ CONFIG = {
         ],
     },
 
-    # ---- SAAT BAZLI MALİYET ÇARPANLARI (zaten queue-aware, kuyruk key'li) ----
+    # ---- SAAT BAZLI MALİYET ÇARPANLARI (zaten queue-aware) ----
     'time_cost_multipliers': {
         'kitle': {
             'inhouse': {'07:00': 1.5, '07:30': 1.3},
@@ -231,38 +169,179 @@ CONFIG = {
     # =========================================================================
     # ---- QUEUE OVERRIDES (KUYRUK BAZLI AYARLAR) ----
     # =========================================================================
-    # Her kuyruk için kendi: erlang, mip, rr_penalty, small_shift_penalty,
-    # hourly_report bloklarını tanımlar.
-    #
     # Yapı 2-seviyeli: queue_overrides[<queue>][<section>]
-    # Pipeline deep-merge ile bu değerleri CONFIG'in üstüne yazar.
-    #
-    # NOT: Bu bloklar GLOBAL'de artık yok — her kuyruk için tanımlı olmalı.
-    # Varsayılan olarak 3 kuyruk aynı şablon değerlerle başlatılıyor
-    # (deepcopy ile — biri değiştirilince diğerleri etkilenmez).
-    # Farklı olacaklarsa ilgili kuyruğun bloğunda değiştirin.
+    # Pipeline bu değerleri CONFIG'in üstüne deep-merge ile yazar.
+    # Bu bloklar (erlang, mip, rr_penalty, small_shift_penalty, hourly_report)
+    # GLOBAL'de YOK — her kuyruk için tanımlı olmalı.
     # =========================================================================
     'queue_overrides': {
+
+        # -----------------------------------------------------------------
         'kitle': {
-            'erlang':              _copy.deepcopy(_ERLANG_DEFAULT),
-            'mip':                 _copy.deepcopy(_MIP_DEFAULT),
-            'rr_penalty':          _copy.deepcopy(_RR_PENALTY_DEFAULT),
-            'small_shift_penalty': _copy.deepcopy(_SMALL_SHIFT_PENALTY_DEFAULT),
-            'hourly_report':       _copy.deepcopy(_HOURLY_REPORT_DEFAULT),
+            'erlang': {
+                'target_asa': 30,
+                'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.20, 10: 0.12, 11: 0.11, 12: 0.13,
+                    13: 0.20, 14: 0.17, 15: 0.23, 16: 0.25, 17: 0.22, 18: 0.16,
+                    19: 0.13, 20: 0.16, 21: 0.11, 22: 0.14, 23: 0.12,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0,
+                'cost_outsource': 10.0,
+                'min_per_shift': 5,
+            },
+            'rr_penalty': {
+                'enabled': True,
+                'peak_exempt': True,
+                'penalty_per_person': 4.0,
+                'peak_penalty': 2.0,
+                'peak_threshold': 0.90,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '02:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {
+                'enabled': True,
+                'penalty': 10,
+            },
+            'hourly_report': {
+                'rapor_etkisi': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.04, 10: 0.04, 11: 0.04, 12: 0.04,
+                    13: 0.04, 14: 0.04, 15: 0.04, 16: 0.04, 17: 0.04, 18: 0.04,
+                    19: 0.04, 20: 0.04, 21: 0.04, 22: 0.04, 23: 0.04,
+                    'default': 0.04,
+                },
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                    13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                    19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {
+                    'default': 15,
+                },
+            },
         },
+
+        # -----------------------------------------------------------------
         'kurumsal': {
-            'erlang':              _copy.deepcopy(_ERLANG_DEFAULT),
-            'mip':                 _copy.deepcopy(_MIP_DEFAULT),
-            'rr_penalty':          _copy.deepcopy(_RR_PENALTY_DEFAULT),
-            'small_shift_penalty': _copy.deepcopy(_SMALL_SHIFT_PENALTY_DEFAULT),
-            'hourly_report':       _copy.deepcopy(_HOURLY_REPORT_DEFAULT),
+            'erlang': {
+                'target_asa': 30,
+                'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.20, 10: 0.12, 11: 0.11, 12: 0.13,
+                    13: 0.20, 14: 0.17, 15: 0.23, 16: 0.25, 17: 0.22, 18: 0.16,
+                    19: 0.13, 20: 0.16, 21: 0.11, 22: 0.14, 23: 0.12,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0,
+                'cost_outsource': 10.0,
+                'min_per_shift': 5,
+            },
+            'rr_penalty': {
+                'enabled': True,
+                'peak_exempt': True,
+                'penalty_per_person': 4.0,
+                'peak_penalty': 2.0,
+                'peak_threshold': 0.90,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '02:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {
+                'enabled': True,
+                'penalty': 10,
+            },
+            'hourly_report': {
+                'rapor_etkisi': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.04, 10: 0.04, 11: 0.04, 12: 0.04,
+                    13: 0.04, 14: 0.04, 15: 0.04, 16: 0.04, 17: 0.04, 18: 0.04,
+                    19: 0.04, 20: 0.04, 21: 0.04, 22: 0.04, 23: 0.04,
+                    'default': 0.04,
+                },
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                    13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                    19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {
+                    'default': 15,
+                },
+            },
         },
+
+        # -----------------------------------------------------------------
         'gold': {
-            'erlang':              _copy.deepcopy(_ERLANG_DEFAULT),
-            'mip':                 _copy.deepcopy(_MIP_DEFAULT),
-            'rr_penalty':          _copy.deepcopy(_RR_PENALTY_DEFAULT),
-            'small_shift_penalty': _copy.deepcopy(_SMALL_SHIFT_PENALTY_DEFAULT),
-            'hourly_report':       _copy.deepcopy(_HOURLY_REPORT_DEFAULT),
+            'erlang': {
+                'target_asa': 30,
+                'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.20, 10: 0.12, 11: 0.11, 12: 0.13,
+                    13: 0.20, 14: 0.17, 15: 0.23, 16: 0.25, 17: 0.22, 18: 0.16,
+                    19: 0.13, 20: 0.16, 21: 0.11, 22: 0.14, 23: 0.12,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0,
+                'cost_outsource': 10.0,
+                'min_per_shift': 5,
+            },
+            'rr_penalty': {
+                'enabled': True,
+                'peak_exempt': True,
+                'penalty_per_person': 4.0,
+                'peak_penalty': 2.0,
+                'peak_threshold': 0.90,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '02:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {
+                'enabled': True,
+                'penalty': 10,
+            },
+            'hourly_report': {
+                'rapor_etkisi': {
+                    0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03,
+                    7: 0.03, 8: 0.03, 9: 0.04, 10: 0.04, 11: 0.04, 12: 0.04,
+                    13: 0.04, 14: 0.04, 15: 0.04, 16: 0.04, 17: 0.04, 18: 0.04,
+                    19: 0.04, 20: 0.04, 21: 0.04, 22: 0.04, 23: 0.04,
+                    'default': 0.04,
+                },
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                    13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                    19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {
+                    'default': 15,
+                },
+            },
         },
     },
 
@@ -278,7 +357,7 @@ CONFIG = {
             'gold':     {'inhouse': 50},
         },
         # Surplus dağıtım pencereleri. Her pencerenin kendi pay oranı var.
-        # Oranlar toplamı 1.0 olmalı. Saatler dahil-dahil (start <= shift_start <= end).
+        # Oranlar toplamı 1.0 olmalı. Saatler dahil-dahil.
         'windows': [
             {'name': 'sabah', 'start': '09:00', 'end': '13:00', 'ratio': 2/3},
             {'name': 'aksam', 'start': '13:00', 'end': '20:00', 'ratio': 1/3},
