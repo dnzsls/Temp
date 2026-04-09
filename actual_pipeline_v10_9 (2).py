@@ -1685,12 +1685,13 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             f"v10.9 (run_queue_pipeline) kullanın."
         )
 
-    override_key = 'haftalici'
     is_weekend = False
     day_label = 'Haftaiçi'
 
-    # Queue override uygula (deep merge — sadece değişen anahtarları yaz yeterli)
-    overrides = config.get('queue_overrides', {}).get(queue, {}).get(override_key, {})
+    # Queue override uygula (deep merge)
+    # V2: 2-seviyeli yapı → queue_overrides[<queue>] doğrudan section'ları içerir
+    # (eski 3-seviyeli queue_overrides[<queue>][<gün_tipi>] kullanılmıyor)
+    overrides = config.get('queue_overrides', {}).get(queue, {})
     if overrides:
         config = copy.deepcopy(config)
         def _deep_merge(base, override):
@@ -1702,7 +1703,7 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                     base[key] = val
         _deep_merge(config, overrides)
         if verbose:
-            print(f"   📌 Override aktif: {queue}/{override_key} → {list(overrides.keys())}")
+            print(f"   📌 Queue config: {queue} → {list(overrides.keys())}")
 
     label = config['queues'][queue]['label']
 
@@ -1816,7 +1817,7 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
         'date': target_date,
         'queue': queue,
         'label': label,
-        'day_type': override_key,
+        'day_type': 'haftalici',
         'erlang_by_slot': erlang_by_slot,
         'weighted_aht_by_slot': weighted_aht_by_slot,
         'mip_info': mip_info,
