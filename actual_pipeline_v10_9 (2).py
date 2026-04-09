@@ -782,59 +782,6 @@ def get_actual_summary(df_actual, date, queue, config=CONFIG):
     }
 
 
-# =============================================================================
-# 9. GÜNLÜK KAPASİTE HESABI
-# =============================================================================
-
-def calculate_daily_capacity(mip_info, weighted_aht_by_slot, config=CONFIG):
-    eff = config.get('capacity', {}).get('efficiency', {
-        'inhouse': 0.70, 'outsource': 0.70, 'part_time': 0.80
-    })
-
-    active_ahts = [v for v in weighted_aht_by_slot.values() if v > 0]
-    avg_aht = sum(active_ahts) / len(active_ahts) if active_ahts else 150
-
-    sc = mip_info['shift_coverage']
-    assignments = mip_info['assignments']
-
-    total_cap = 0
-    in_cap = 0
-    out_cap = 0
-    pt_cap = 0
-
-    for shift, count in assignments.items():
-        info = sc[shift]
-        company = info['company']
-
-        start_h, start_m = int(info['start'][:2]), int(info['start'][3:5])
-        end_h, end_m = int(info['end'][:2]), int(info['end'][3:5])
-
-        start_min = start_h * 60 + start_m
-        end_min = end_h * 60 + end_m
-        if end_min <= start_min:
-            end_min += 24 * 60
-
-        duration_sn = (end_min - start_min) * 60
-        efficiency = eff.get(company, 0.70)
-        cap_per_person = (duration_sn / avg_aht) * efficiency
-        cap_total = cap_per_person * count
-
-        total_cap += cap_total
-        if company == 'inhouse':
-            in_cap += cap_total
-        elif company == 'outsource':
-            out_cap += cap_total
-        elif company == 'part_time':
-            pt_cap += cap_total
-
-    return {
-        'total_capacity': round(total_cap, 0),
-        'inhouse_capacity': round(in_cap, 0),
-        'outsource_capacity': round(out_cap, 0),
-        'pt_capacity': round(pt_cap, 0),
-        'avg_aht': round(avg_aht, 1),
-    }
-
 
 # =============================================================================
 # 6. RAPOR (MIP vs Gerçek + kapasite raporu)
@@ -858,24 +805,24 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     print(f"\n📊 ÖZET (KİŞİ BAZLI):")
     if mip_info_stage1 is not None:
         s1 = mip_info_stage1
-        print(f"   {'Metrik':<22} {'MIP(1)':>10} {'Surplus(2)':>11} {'Fark':>7} {'Gerçek':>10} {'MIP2-G':>8}")
+        print(f"   {'Metrik':<22} {'MIP(1)':>10} {'MIP(2)':>10} {'Fark':>7} {'Gerçek':>10} {'MIP2-G':>8}")
         print(f"   {'-'*72}")
-        print(f"   {'Toplam Kişi':<22} {s1['total_kisi']:>10} {mip_info['total_kisi']:>11} "
+        print(f"   {'Toplam Kişi':<22} {s1['total_kisi']:>10} {mip_info['total_kisi']:>10} "
               f"{mip_info['total_kisi']-s1['total_kisi']:>+7} {actual['kisi_total']:>10} "
               f"{mip_info['total_kisi']-actual['kisi_total']:>+8}")
-        print(f"   {'Inhouse Kişi':<22} {s1['total_inhouse_kisi']:>10} {mip_info['total_inhouse_kisi']:>11} "
+        print(f"   {'Inhouse Kişi':<22} {s1['total_inhouse_kisi']:>10} {mip_info['total_inhouse_kisi']:>10} "
               f"{mip_info['total_inhouse_kisi']-s1['total_inhouse_kisi']:>+7} {actual['kisi_in']:>10} "
               f"{mip_info['total_inhouse_kisi']-actual['kisi_in']:>+8}")
-        print(f"   {'Outsource Kişi':<22} {s1['total_outsource_kisi']:>10} {mip_info['total_outsource_kisi']:>11} "
+        print(f"   {'Outsource Kişi':<22} {s1['total_outsource_kisi']:>10} {mip_info['total_outsource_kisi']:>10} "
               f"{mip_info['total_outsource_kisi']-s1['total_outsource_kisi']:>+7} {actual['kisi_out']:>10} "
               f"{mip_info['total_outsource_kisi']-actual['kisi_out']:>+8}")
         if mip_info.get('total_part_time_kisi', 0) > 0:
-            print(f"   {'Part-time Kişi':<22} {s1['total_part_time_kisi']:>10} {mip_info['total_part_time_kisi']:>11} "
+            print(f"   {'Part-time Kişi':<22} {s1['total_part_time_kisi']:>10} {mip_info['total_part_time_kisi']:>10} "
                   f"{'-':>7} {'-':>10} {'-':>8}")
         print(f"   {'Outsource %':<22} {s1['outsource_ratio']:>9.1%} {mip_info['outsource_ratio']:>10.1%} "
               f"{'':>7} {actual['outsource_ratio']:>9.1%} {'':>8}")
         print(f"   {'Aktif Shift':<22} {len([s for s,c in s1['assignments'].items() if c>0]):>10} "
-              f"{len([s for s,c in mip_info['assignments'].items() if c>0]):>11}")
+              f"{len([s for s,c in mip_info['assignments'].items() if c>0]):>10}")
     else:
         print(f"   {'Metrik':<25} {'MIP':>10} {'Gerçek':>10} {'Fark':>10}")
         print(f"   {'-'*55}")
@@ -890,27 +837,14 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         print(f"   {'Outsource %':<25} {mip_info['outsource_ratio']:>9.1%} {actual['outsource_ratio']:>9.1%}")
         print(f"   {'Aktif Shift Sayısı':<25} {len(mip_info['assignments']):>10}")
 
-    print(f"\n📊 EŞZAMANLI PEAK:")
-    print(f"   Erlang: {e_peak}  |  MIP: {m_peak}  |  Gerçek: {a_peak}")
-
-    if weighted_aht_by_slot:
-        cap = calculate_daily_capacity(mip_info, weighted_aht_by_slot, config)
-        rr = cap['total_capacity'] / total_calls_day if total_calls_day > 0 else 0
-
-        print(f"\n📊 GÜNLÜK KAPASİTE:")
-        print(f"   {'Metrik':<30} {'Değer':>12}")
-        print(f"   {'-'*45}")
-        print(f"   {'Günlük Avg AHT':<30} {cap['avg_aht']:>11.0f}s")
-        print(f"   {'Toplam Kapasite (çağrı)':<30} {cap['total_capacity']:>12,.0f}")
-        print(f"   {'  - Inhouse':<30} {cap['inhouse_capacity']:>12,.0f}")
-        print(f"   {'  - Outsource':<30} {cap['outsource_capacity']:>12,.0f}")
-        if cap['pt_capacity'] > 0:
-            print(f"   {'  - Part-time':<30} {cap['pt_capacity']:>12,.0f}")
-        if total_calls_day > 0:
-            print(f"   {'Toplam Çağrı':<30} {total_calls_day:>12,.0f}")
-            print(f"   {'Response Rate':<30} {rr:>11.1%}")
-            status = "✅ Yeterli" if rr >= 1.0 else "⚠ Yetersiz"
-            print(f"   {'Durum':<30} {status:>12}")
+    # EŞZAMANLI PEAK
+    if mip_info_stage1 is not None:
+        m1_peak = max(mip_info_stage1['mip_by_slot'].values()) if mip_info_stage1['mip_by_slot'] else 0
+        print(f"\n📊 EŞZAMANLI PEAK:")
+        print(f"   Erlang: {e_peak}  |  MIP1: {m1_peak}  |  MIP2: {m_peak}  |  Gerçek: {a_peak}")
+    else:
+        print(f"\n📊 EŞZAMANLI PEAK:")
+        print(f"   Erlang: {e_peak}  |  MIP: {m_peak}  |  Gerçek: {a_peak}")
 
     # Erken saat raporu
     early_starts = mip_info.get('early_starts', {})
@@ -1002,8 +936,8 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
 
     print(f"\n📋 SHIFT ATAMALARI ({len(mip_info['assignments'])} shift):")
     if mip_info_stage1 is not None:
-        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'MIP(1)':>7} {'Surplus(2)':>11} {'Fark':>6} {'Maliyet':>10}")
-        print(f"   {'-'*82}")
+        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'MIP(1)':>7} {'MIP(2)':>7} {'Fark':>6} {'Maliyet':>10}")
+        print(f"   {'-'*78}")
         s1_assigns = mip_info_stage1['assignments']
     else:
         print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'Kişi':>6} {'Maliyet':>10}")
@@ -1031,7 +965,7 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
             diff_str = f"{diff:+d}" if diff != 0 else "-"
             mark = " ←" if diff > 0 else "  "
             print(f"   {s:<22} {info['start']}-{info['end']:<5} {info['company']:<10} "
-                  f"{cnt1:>7} {cnt:>11} {diff_str:>6}{mark} {final_cost:>8.2f}{mult_str}")
+                  f"{cnt1:>7} {cnt:>7} {diff_str:>6}{mark} {final_cost:>8.2f}{mult_str}")
         else:
             print(f"   {s:<22} {info['start']}-{info['end']:<5} {info['company']:<10} {cnt:>6} {final_cost:>9.2f}{mult_str}")
 
@@ -1059,34 +993,54 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     has_subq = bool(in_only_by_slot or out_only_by_slot)
     has_s1 = mip_info_stage1 is not None
     s1_slot = mip_info_stage1['mip_by_slot'] if has_s1 else {}
-
-    mip_label = "MIP(2)" if has_s1 else "MIP"
+    s1_slot_in = mip_info_stage1['mip_in_by_slot'] if has_s1 else {}
+    s1_slot_out = mip_info_stage1.get('mip_out_by_slot', {}) if has_s1 else {}
 
     print(f"\n📋 SLOT BAZLI (eşzamanlı çalışan)  * = peak slot")
-    m1_hdr = f"{'MIP1':>6} " if has_s1 else ""
-    sub_blank = "       " if has_s1 else ""
-    rr_hdr = f"{'RR1':>6} {'RR2':>6}" if has_s1 else f"{'RR':>7}"
-    rr_blank_hdr = f"{'':>6} {'':>6}" if has_s1 else f"{'':>7}"
-    # Genişlik hesabı: +8 has_s1 ise
-    extra = 6 if has_s1 else 0
-    if has_subq:
-        print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
-              f"{m1_hdr}{'-- ' + mip_label + ' --':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {rr_hdr} {'E.Fark':>7}")
-        print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
-              f"{sub_blank}{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
-              f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {rr_blank_hdr} {'':>7}")
-        print(f"   {'-'*(122 + extra if has_s1 else 115)}")
+    if has_s1:
+        # Yapı: Slot W_AHT Erlang [InMin OutMin]  MIP(1):Tot/In/Out  MIP(2):Tot/In/Out  GERÇEK:Tot/In/Out  Fark RR1 RR2↑ E.Fark
+        if has_subq:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+                  f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
+                  f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'':>6} {'':>6} {'':>6}  {'':>7}")
+            sep_len = 148
+        else:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+                  f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
+                  f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'':>6} {'':>6} {'':>6}  {'':>7}")
+            sep_len = 134
+        print(f"   {'-'*sep_len}")
     else:
-        print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
-              f"{m1_hdr}{'-- ' + mip_label + ' --':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {rr_hdr} {'E.Fark':>7}")
-        print(f"   {'':>8} {'':>6} {'':>7}  "
-              f"{sub_blank}{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
-              f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {rr_blank_hdr} {'':>7}")
-        print(f"   {'-'*(113 + extra if has_s1 else 106)}")
+        if has_subq:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+                  f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
+            sep_len = 115
+        else:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+                  f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
+            sep_len = 106
+        print(f"   {'-'*sep_len}")
 
     e_slot_sum = 0
     m_slot_sum = 0
     a_slot_sum = 0
+    m1_slot_sum = 0
 
     for slot in SLOTS_30:
         e = erlang_by_slot.get(slot, 0)
@@ -1101,53 +1055,76 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         m_slot_sum += m
         a_slot_sum += at
 
+        if has_s1:
+            m1 = s1_slot.get(slot, 0)
+            m1i = s1_slot_in.get(slot, 0)
+            m1o = s1_slot_out.get(slot, 0)
+            m1_slot_sum += m1
+        else:
+            m1 = m1i = m1o = 0
+
         if e > 0 or m > 0 or at > 0:
             w_aht = weighted_aht_by_slot.get(slot, 0) if weighted_aht_by_slot else 0
             fark = m - at
             peak_mark = "*" if slot in peak_slots else " "
             e_fark = m - e
-            m1 = s1_slot.get(slot, 0) if has_s1 else 0
-            m1_str = f"{m1:>6} " if has_s1 else ""
+
             if has_s1:
-                rr1_str = f"{m1/e:.0%}" if e > 0 else "-"
-                rr2_str = f"{m/e:.0%}" if e > 0 else "-"
-                rr_cell = f"{rr1_str:>6} {rr2_str:>6}"
+                rr1_v = (m1 / e) if e > 0 else 0
+                rr2_v = (m / e) if e > 0 else 0
+                rr1_str = f"{rr1_v:.0%}" if e > 0 else "-"
+                # RR2 > RR1 ise artış işareti
+                rr2_arrow = "↑" if e > 0 and rr2_v > rr1_v else " "
+                rr2_str = f"{rr2_v:.0%}{rr2_arrow}" if e > 0 else "- "
+                if has_subq:
+                    in_min = in_only_by_slot.get(slot, 0)
+                    out_min = out_only_by_slot.get(slot, 0)
+                    in_min_str = str(in_min) if in_min > 0 else "-"
+                    out_min_str = str(out_min) if out_min > 0 else "-"
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                          f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
+                          f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
+                else:
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                          f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
+                          f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
             else:
-                rr_cell = f"{m/e:.0%}" if e > 0 else "-"
-                rr_cell = f"{rr_cell:>7}"
+                rr_str = f"{m/e:.0%}" if e > 0 else "-"
+                if has_subq:
+                    in_min = in_only_by_slot.get(slot, 0)
+                    out_min = out_only_by_slot.get(slot, 0)
+                    in_min_str = str(in_min) if in_min > 0 else "-"
+                    out_min_str = str(out_min) if out_min > 0 else "-"
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                          f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
+                else:
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                          f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
 
-            if has_subq:
-                in_min = in_only_by_slot.get(slot, 0)
-                out_min = out_only_by_slot.get(slot, 0)
-                in_min_str = str(in_min) if in_min > 0 else "-"
-                out_min_str = str(out_min) if out_min > 0 else "-"
-                print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
-                      f"{m1_str}{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_cell} {e_fark:>+7}")
-            else:
-                print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
-                      f"{m1_str}{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_cell} {e_fark:>+7}")
-
-    sep_len = (122 + extra if has_s1 else 115) if has_subq else (113 + extra if has_s1 else 106)
     sep = '-' * sep_len
     print(f"   {sep}")
     e_m_fark = m_slot_sum - e_slot_sum
-    m1_sum = sum(s1_slot.values()) if has_s1 else 0
-    m1_top_str = f"{m1_sum:>6} " if has_s1 else ""
     if has_s1:
-        trr1 = f"{m1_sum/e_slot_sum:.0%}" if e_slot_sum > 0 else "-"
-        trr2 = f"{m_slot_sum/e_slot_sum:.0%}" if e_slot_sum > 0 else "-"
-        rr_tot_cell = f"{trr1:>6} {trr2:>6}"
+        trr1_v = (m1_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
+        trr2_v = (m_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
+        trr1 = f"{trr1_v:.0%}" if e_slot_sum > 0 else "-"
+        trr2 = f"{trr2_v:.0%}" if e_slot_sum > 0 else "-"
+        # TOPLAM için in/out ayrımı yok, toplamda göster
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+              f"{m1_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum:>7} {'':>7} {'':>7}  "
+              f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {trr1:>6} {trr2:>6}  {e_m_fark:>+7}")
     else:
-        rr_tot_cell = f"{'':>7}"
-    print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  {m1_top_str}{m_slot_sum:>7} {'':>7} {'':>7}  "
-          f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {rr_tot_cell} {e_m_fark:>+7}")
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+              f"{m_slot_sum:>7} {'':>7} {'':>7}  "
+              f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {'':>7} {e_m_fark:>+7}")
+
     legend = "Fark = MIP-Gerçek  |  RR = MIP/Erlang  |  E.Fark = MIP-Erlang  |  * = Peak"
     if has_s1:
-        legend = "MIP1 = Aşama1 (min)  |  MIP(2) = Aşama2 (+surplus)  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  " + legend
+        legend = "MIP(1) = Aşama1 (min)  |  MIP(2) = MIP(1)+surplus  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  ↑ = RR2>RR1  |  " + legend
     print(f"\n   {legend}")
 
     # =================================================================
-    # SLOT BAZLI KAPASİTE RAPORU (30dk)
+    # SLOT BAZLI KAPASİTE RAPORU (30dk) — MIP1 ve MIP2 için ayrı hesap
     # =================================================================
     hr_cfg = config.get('hourly_report', {})
     if hr_cfg and weighted_aht_by_slot and calls_by_slot:
@@ -1156,163 +1133,95 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         cagri_adedi_cfg = hr_cfg.get('cagri_adedi', {})
 
         print(f"\n📋 SLOT BAZLI KAPASİTE RAPORU (30dk)")
-        print(f"   {'Slot':<7} {'Çağrı':>7} {'Kap.':>6} {'R.Etk':>6} {'K.Kay':>6} {'NetMT':>6} {'Ç.Kap':>7} {'RR':>7}")
-        print(f"   {'-'*55}")
+        if has_s1:
+            print(f"   {'Slot':<6} {'Çağrı':>6} {'Erlng':>6} "
+                  f"{'MIP1':>5} {'MIP2':>5} {'Fark':>5}  "
+                  f"{'R.Et1':>5} {'R.Et2':>5}  "
+                  f"{'K.Ka1':>5} {'K.Ka2':>5}  "
+                  f"{'NMT1':>5} {'NMT2':>5} {'FNMT':>5}  "
+                  f"{'Ç.Kp1':>6} {'Ç.Kp2':>6}  "
+                  f"{'KpRR1':>6} {'KpRR2':>6}")
+            print(f"   {'-'*115}")
+        else:
+            print(f"   {'Slot':<7} {'Çağrı':>7} {'Erlang':>7} {'Kap.':>6} "
+                  f"{'R.Etk':>6} {'K.Kay':>6} {'NetMT':>6} {'Ç.Kap':>7} {'Kap_RR':>7}")
+            print(f"   {'-'*70}")
 
-        total_cagri = 0
-        total_cap = 0
-        total_retki = 0
-        total_kkaybi = 0
-        total_netmt = 0
-        total_ckap = 0
+        t_cagri = 0
+        t_erl = 0
+        t_m1 = t_m2 = 0
+        t_re1 = t_re2 = 0
+        t_kk1 = t_kk2 = 0
+        t_nmt1 = t_nmt2 = 0
+        t_ck1 = t_ck2 = 0
 
         for slot in SLOTS_30:
             h = int(slot[:2])
             cagri = int(calls_by_slot.get(slot, 0))
-            kapasite = mip_info['mip_by_slot'].get(slot, 0)
+            kap2 = mip_info['mip_by_slot'].get(slot, 0)
+            kap1 = mip_info_stage1['mip_by_slot'].get(slot, 0) if has_s1 else kap2
+            erl = erlang_by_slot.get(slot, 0)
 
-            if cagri == 0 and kapasite == 0:
+            if cagri == 0 and kap2 == 0:
                 continue
 
             re_oran = rapor_etkisi_cfg.get(h, rapor_etkisi_cfg.get('default', 0))
-            rapor_etki = round(kapasite * re_oran)
-
             kk_oran = kap_kaybi_cfg.get(h, kap_kaybi_cfg.get('default', 0))
-            kap_kaybi = round(kapasite * kk_oran)
-
-            net_mt = kapasite - rapor_etki - kap_kaybi
-
             ca = cagri_adedi_cfg.get(h, cagri_adedi_cfg.get('default', 15))
-            cagri_kap = net_mt * (ca / 2)
 
-            rr = cagri_kap / cagri if cagri > 0 else 0
+            re1 = round(kap1 * re_oran)
+            kk1 = round(kap1 * kk_oran)
+            nmt1 = kap1 - re1 - kk1
+            ck1 = nmt1 * (ca / 2)
+            rr1 = ck1 / cagri if cagri > 0 else 0
 
-            total_cagri += cagri
-            total_cap += kapasite
-            total_retki += rapor_etki
-            total_kkaybi += kap_kaybi
-            total_netmt += net_mt
-            total_ckap += cagri_kap
+            re2 = round(kap2 * re_oran)
+            kk2 = round(kap2 * kk_oran)
+            nmt2 = kap2 - re2 - kk2
+            ck2 = nmt2 * (ca / 2)
+            rr2 = ck2 / cagri if cagri > 0 else 0
 
-            warn = " ⚠" if rr < 1.0 and cagri > 0 else ""
-            print(f"   {slot:<7} {cagri:>7} {kapasite:>6} {rapor_etki:>6} {kap_kaybi:>6} {net_mt:>6} {cagri_kap:>7.0f} {rr:>6.0%}{warn}")
+            t_cagri += cagri
+            t_erl += erl
+            t_m1 += kap1; t_m2 += kap2
+            t_re1 += re1; t_re2 += re2
+            t_kk1 += kk1; t_kk2 += kk2
+            t_nmt1 += nmt1; t_nmt2 += nmt2
+            t_ck1 += ck1; t_ck2 += ck2
 
-        print(f"   {'-'*55}")
-        total_rr = total_ckap / total_cagri if total_cagri > 0 else 0
-        print(f"   {'TOPLAM':<7} {total_cagri:>7} {total_cap:>6} {total_retki:>6} {total_kkaybi:>6} {total_netmt:>6} {total_ckap:>7.0f} {total_rr:>6.0%}")
+            if has_s1:
+                arrow = "↑" if rr2 > rr1 else " "
+                warn = " ⚠" if rr2 < 1.0 and cagri > 0 else ""
+                print(f"   {slot:<6} {cagri:>6} {erl:>6} "
+                      f"{kap1:>5} {kap2:>5} {kap2-kap1:>+5}  "
+                      f"{re1:>5} {re2:>5}  "
+                      f"{kk1:>5} {kk2:>5}  "
+                      f"{nmt1:>5} {nmt2:>5} {nmt2-nmt1:>+5}  "
+                      f"{ck1:>6.0f} {ck2:>6.0f}  "
+                      f"{rr1:>5.0%} {rr2:>5.0%}{arrow}{warn}")
+            else:
+                warn = " ⚠" if rr2 < 1.0 and cagri > 0 else ""
+                print(f"   {slot:<7} {cagri:>7} {erl:>7} {kap2:>6} "
+                      f"{re2:>6} {kk2:>6} {nmt2:>6} {ck2:>7.0f} {rr2:>6.0%}{warn}")
 
-    # --- AŞAMA 1 vs AŞAMA 2 KARŞILAŞTIRMA (surplus uygulandıysa) ---
-    if mip_info_stage1 is not None:
-        _print_stage_comparison(mip_info_stage1, mip_info, erlang_by_slot, config)
-
-
-def _print_stage_comparison(stage1, stage2, erlang_by_slot, config):
-    """
-    Aşama 1 (saf MIP) ile Aşama 2 (surplus sonrası) karşılaştırmalı rapor.
-    """
-    ccfg = config['company']
-    inhouse_value = ccfg['inhouse']['shift_value']
-    shift_cov = stage2['shift_coverage']
-
-    print(f"\n{'='*95}")
-    print(f"🔄 AŞAMA 1 (MIP MİN) vs AŞAMA 2 (SURPLUS SONRASI) KARŞILAŞTIRMA")
-    print(f"{'='*95}")
-
-    # --- Özet ---
-    s1_total = stage1['total_kisi']
-    s2_total = stage2['total_kisi']
-    s1_in = stage1['total_inhouse_kisi']
-    s2_in = stage2['total_inhouse_kisi']
-    s1_out = stage1['total_outsource_kisi']
-    s2_out = stage2['total_outsource_kisi']
-    s1_ratio = stage1['outsource_ratio']
-    s2_ratio = stage2['outsource_ratio']
-
-    print(f"\n📊 ÖZET:")
-    print(f"   {'Metrik':<25} {'Aşama 1':>10} {'Aşama 2':>10} {'Fark':>10}")
-    print(f"   {'-'*57}")
-    print(f"   {'Toplam Kişi':<25} {s1_total:>10} {s2_total:>10} {s2_total - s1_total:>+10}")
-    print(f"   {'Inhouse Kişi':<25} {s1_in:>10} {s2_in:>10} {s2_in - s1_in:>+10}")
-    print(f"   {'Outsource Kişi':<25} {s1_out:>10} {s2_out:>10} {s2_out - s1_out:>+10}")
-    print(f"   {'Outsource %':<25} {s1_ratio:>9.1%} {s2_ratio:>9.1%} {(s2_ratio - s1_ratio)*100:>+9.1f}p")
-
-    # Pencere bazlı özet (varsa)
-    by_window = stage2.get('surplus_by_window', {})
-    if by_window:
-        print(f"\n📅 PENCERE BAZLI DAĞITIM:")
-        print(f"   {'Pencere':<12} {'Aralık':<16} {'Pay':>6} {'RR-fix':>8} {'Oransal':>10}")
-        print(f"   {'-'*55}")
-        for name, info in by_window.items():
-            print(f"   {name:<12} {info['window']:<16} {info['share']:>6} "
-                  f"{info['rr_fix']:>8} {info['proportional']:>10}")
-
-    # --- Shift bazlı karşılaştırma (sadece inhouse, sadece değişenler + sabitler) ---
-    print(f"\n📋 SHIFT KARŞILAŞTIRMA (INHOUSE):")
-    print(f"   {'Shift':<20} {'Başl.':<7} {'Aşama1':>8} {'Aşama2':>8} {'Fark':>8} {'Pencere':<20}")
-    print(f"   {'-'*75}")
-
-    s1_assigns = stage1['assignments']
-    s2_assigns = stage2['assignments']
-
-    # Hangi shift hangi pencerede?
-    sd_cfg = config.get('surplus_distribution', {})
-    windows_cfg = sd_cfg.get('windows', [])
-
-    def _which_windows(start_h):
-        names = [w['name'] for w in windows_cfg if w['start'] <= start_h <= w['end']]
-        return "+".join(names) if names else "-"
-
-    in_shifts = [s for s in shift_cov if shift_cov[s]['company'] == inhouse_value]
-    in_shifts.sort(key=lambda s: shift_cov[s]['start'])
-
-    total_s1 = 0
-    total_s2 = 0
-    for s in in_shifts:
-        a1 = s1_assigns.get(s, 0)
-        a2 = s2_assigns.get(s, 0)
-        if a1 == 0 and a2 == 0:
-            continue
-        total_s1 += a1
-        total_s2 += a2
-        start_h = shift_cov[s]['start']
-        window_name = _which_windows(start_h) if a2 != a1 else "-"
-        diff = a2 - a1
-        diff_str = f"{diff:+d}" if diff != 0 else "0"
-        shift_name = shift_cov[s]['shift'][:20]
-        print(f"   {shift_name:<20} {start_h:<7} {a1:>8} {a2:>8} {diff_str:>8} {window_name:<20}")
-
-    print(f"   {'-'*75}")
-    print(f"   {'TOPLAM INHOUSE':<20} {'':<7} {total_s1:>8} {total_s2:>8} {total_s2 - total_s1:>+8}")
-
-    # --- Slot bazlı karşılaştırma ---
-    print(f"\n📈 SLOT BAZLI KARŞILAŞTIRMA (30 DK):")
-    print(f"   {'Slot':<7} {'Erlang':>7} {'MIP1':>6} {'MIP2':>6} {'Fark':>6} {'RR1':>7} {'RR2':>7}")
-    print(f"   {'-'*55}")
-
-    s1_by_slot = stage1['mip_by_slot']
-    s2_by_slot = stage2['mip_by_slot']
-    slots_sorted = sorted(erlang_by_slot.keys())
-
-    t_erl = t_m1 = t_m2 = 0
-    for slot in slots_sorted:
-        erl = erlang_by_slot.get(slot, 0)
-        m1 = s1_by_slot.get(slot, 0)
-        m2 = s2_by_slot.get(slot, 0)
-        if erl == 0 and m1 == 0 and m2 == 0:
-            continue
-        rr1 = (m1 / erl) if erl > 0 else 0
-        rr2 = (m2 / erl) if erl > 0 else 0
-        diff = m2 - m1
-        t_erl += erl
-        t_m1 += m1
-        t_m2 += m2
-        warn = " ↑" if diff > 0 else ""
-        print(f"   {slot:<7} {erl:>7} {m1:>6} {m2:>6} {diff:>+6} {rr1:>6.0%} {rr2:>6.0%}{warn}")
-
-    print(f"   {'-'*55}")
-    trr1 = (t_m1 / t_erl) if t_erl > 0 else 0
-    trr2 = (t_m2 / t_erl) if t_erl > 0 else 0
-    print(f"   {'TOPLAM':<7} {t_erl:>7} {t_m1:>6} {t_m2:>6} {t_m2 - t_m1:>+6} {trr1:>6.0%} {trr2:>6.0%}")
+        if has_s1:
+            print(f"   {'-'*115}")
+            trr1 = t_ck1 / t_cagri if t_cagri > 0 else 0
+            trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
+            arrow = "↑" if trr2 > trr1 else " "
+            print(f"   {'TOPLAM':<6} {t_cagri:>6} {t_erl:>6} "
+                  f"{t_m1:>5} {t_m2:>5} {t_m2-t_m1:>+5}  "
+                  f"{t_re1:>5} {t_re2:>5}  "
+                  f"{t_kk1:>5} {t_kk2:>5}  "
+                  f"{t_nmt1:>5} {t_nmt2:>5} {t_nmt2-t_nmt1:>+5}  "
+                  f"{t_ck1:>6.0f} {t_ck2:>6.0f}  "
+                  f"{trr1:>5.0%} {trr2:>5.0%}{arrow}")
+            print(f"\n   Kap_RR = Çağrı_Kapasitesi / Gelen_Çağrı (MIP1 ve MIP2 ayrı hesap)  |  ↑ = KpRR2>KpRR1")
+        else:
+            print(f"   {'-'*70}")
+            trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
+            print(f"   {'TOPLAM':<7} {t_cagri:>7} {t_erl:>7} {t_m2:>6} "
+                  f"{t_re2:>6} {t_kk2:>6} {t_nmt2:>6} {t_ck2:>7.0f} {trr2:>6.0%}")
 
 
 # =============================================================================
@@ -1843,8 +1752,8 @@ def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
     print(f"TÜM KUYRUKLAR - {target_date.strftime('%Y-%m-%d')} [{day_label}]")
     print(f"{'='*95}")
     print(f"{'Kuyruk':<12} {'MIP':>8} {'Grç':>8} {'Fark':>6} "
-          f"{'In':>6} {'Out':>6} {'PT':>5} {'MIP%':>7} {'Grç%':>7} {'Shift':>6} {'RR':>8}")
-    print(f"{'-'*85}")
+          f"{'In':>6} {'Out':>6} {'PT':>5} {'MIP%':>7} {'Grç%':>7} {'Shift':>6}")
+    print(f"{'-'*77}")
 
     for q, r in results.items():
         mi = r['mip_info']
@@ -1853,17 +1762,9 @@ def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
         pt = mi.get('total_part_time_kisi', 0)
         n_shifts = len(mi['assignments'])
 
-        w_aht = r.get('weighted_aht_by_slot', {})
-        calls = r.get('total_calls_day', 0)
-        if w_aht and calls > 0:
-            cap = calculate_daily_capacity(mi, w_aht, config)
-            rr = f"{cap['total_capacity'] / calls:.1%}"
-        else:
-            rr = "-"
-
         print(f"{r['label']:<12} {mi['total_kisi']:>8} {a['kisi_total']:>8} {fark:>+6} "
               f"{mi['total_inhouse_kisi']:>6} {mi['total_outsource_kisi']:>6} {pt:>5} "
-              f"{mi['outsource_ratio']:>6.1%} {a['outsource_ratio']:>6.1%} {n_shifts:>6} {rr:>8}")
+              f"{mi['outsource_ratio']:>6.1%} {a['outsource_ratio']:>6.1%} {n_shifts:>6}")
 
     # Toplam (tüm kuyruklar) kapasite RR — her kuyruk kendi override config'i ile
     t_mip = t_grc = t_in = t_out = t_pt = 0
@@ -2012,19 +1913,32 @@ def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                     m1 = s1_slot.get(slot, 0)
                     rr_a1 = round(m1 / e, 3) if e > 0 else None
                 else:
+                    m1 = None
                     rr_a1 = None
 
-                # Kapasite raporu
+                # Kapasite raporu — MIP1 ve MIP2 için ayrı hesap
                 h = int(slot[:2])
                 cagri = int(calls_by_slot.get(slot, 0))
                 re_oran = re_cfg.get(h, re_cfg.get('default', 0))
                 kk_oran = kk_cfg.get(h, kk_cfg.get('default', 0))
                 ca = ca_cfg.get(h, ca_cfg.get('default', 15))
-                rapor_etki = round(m * re_oran)
-                kap_kaybi = round(m * kk_oran)
-                net_mt = m - rapor_etki - kap_kaybi
-                cagri_kap = net_mt * (ca / 2)
-                kap_rr = round(cagri_kap / cagri, 3) if cagri > 0 else None
+
+                # MIP2 (final)
+                rapor_etki_a2 = round(m * re_oran)
+                kap_kaybi_a2 = round(m * kk_oran)
+                net_mt_a2 = m - rapor_etki_a2 - kap_kaybi_a2
+                cagri_kap_a2 = net_mt_a2 * (ca / 2)
+                kap_rr_a2 = round(cagri_kap_a2 / cagri, 3) if cagri > 0 else None
+
+                # MIP1 (min) — sadece s1 varsa
+                if s1_slot is not None:
+                    rapor_etki_a1 = round(m1 * re_oran)
+                    kap_kaybi_a1 = round(m1 * kk_oran)
+                    net_mt_a1 = m1 - rapor_etki_a1 - kap_kaybi_a1
+                    cagri_kap_a1 = net_mt_a1 * (ca / 2)
+                    kap_rr_a1 = round(cagri_kap_a1 / cagri, 3) if cagri > 0 else None
+                else:
+                    rapor_etki_a1 = kap_kaybi_a1 = net_mt_a1 = cagri_kap_a1 = kap_rr_a1 = None
 
                 if e > 0 or m > 0 or a > 0:
                     slot_row = {
@@ -2045,20 +1959,38 @@ def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                         slot_row['Surplus_Fark'] = m - s1_slot.get(slot, 0)
                         slot_row['Response_Rate_A1'] = rr_a1
                         slot_row['Response_Rate_A2'] = rr_a2
+                        slot_row['MIP_PartTime'] = m_pt
+                        slot_row['Gerçek_Toplam'] = a
+                        slot_row['Gerçek_Inhouse'] = a_in
+                        slot_row['Gerçek_Outsource'] = a_out
+                        slot_row['Fark_MIP_Gerçek'] = m - a
+                        slot_row['Çağrı'] = cagri
+                        slot_row['Rapor_Etkisi_A1'] = rapor_etki_a1
+                        slot_row['Rapor_Etkisi_A2'] = rapor_etki_a2
+                        slot_row['Kapasite_Kaybı_A1'] = kap_kaybi_a1
+                        slot_row['Kapasite_Kaybı_A2'] = kap_kaybi_a2
+                        slot_row['Net_MT_A1'] = net_mt_a1
+                        slot_row['Net_MT_A2'] = net_mt_a2
+                        slot_row['Çağrı_Kapasitesi_A1'] = round(cagri_kap_a1) if cagri_kap_a1 is not None else None
+                        slot_row['Çağrı_Kapasitesi_A2'] = round(cagri_kap_a2)
+                        slot_row['Kapasite_RR_A1'] = kap_rr_a1
+                        slot_row['Kapasite_RR_A2'] = kap_rr_a2
                     else:
                         slot_row['MIP_Toplam'] = m
                         slot_row['MIP_Inhouse'] = m_in
                         slot_row['MIP_Outsource'] = m_out
                         slot_row['Response_Rate_Slot'] = rr_a2
-                    slot_row.update({
-                        'MIP_PartTime': m_pt,
-                        'Gerçek_Toplam': a, 'Gerçek_Inhouse': a_in,
-                        'Gerçek_Outsource': a_out, 'Fark_MIP_Gerçek': m - a,
-                        'Çağrı': cagri, 'Rapor_Etkisi': rapor_etki,
-                        'Kapasite_Kaybı': kap_kaybi, 'Net_MT': net_mt,
-                        'Çağrı_Kapasitesi': round(cagri_kap),
-                        'Kapasite_RR': kap_rr,
-                    })
+                        slot_row['MIP_PartTime'] = m_pt
+                        slot_row['Gerçek_Toplam'] = a
+                        slot_row['Gerçek_Inhouse'] = a_in
+                        slot_row['Gerçek_Outsource'] = a_out
+                        slot_row['Fark_MIP_Gerçek'] = m - a
+                        slot_row['Çağrı'] = cagri
+                        slot_row['Rapor_Etkisi'] = rapor_etki_a2
+                        slot_row['Kapasite_Kaybı'] = kap_kaybi_a2
+                        slot_row['Net_MT'] = net_mt_a2
+                        slot_row['Çağrı_Kapasitesi'] = round(cagri_kap_a2)
+                        slot_row['Kapasite_RR'] = kap_rr_a2
                     all_slots.append(slot_row)
 
             avg_aht = sum(weighted_aht_by_slot.values()) / len(weighted_aht_by_slot) \
@@ -2172,8 +2104,11 @@ def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                         'Asama1_MIP_Toplam': 0, 'Asama1_MIP_Inhouse': 0, 'Asama1_MIP_Outsource': 0,
                         'MIP_Toplam': 0, 'MIP_Inhouse': 0, 'MIP_Outsource': 0, 'MIP_PartTime': 0,
                         'Erlang': 0, 'Gerçek_Toplam': 0, 'Gerçek_Inhouse': 0, 'Gerçek_Outsource': 0,
-                        'Çağrı': 0, 'Rapor_Etkisi': 0, 'Kapasite_Kaybı': 0, 'Net_MT': 0,
-                        'Çağrı_Kapasitesi': 0,
+                        'Çağrı': 0,
+                        'Rapor_Etkisi_A1': 0, 'Rapor_Etkisi_A2': 0,
+                        'Kapasite_Kaybı_A1': 0, 'Kapasite_Kaybı_A2': 0,
+                        'Net_MT_A1': 0, 'Net_MT_A2': 0,
+                        'Çağrı_Kapasitesi_A1': 0, 'Çağrı_Kapasitesi_A2': 0,
                     }
                 sa = slot_agg[slot]
                 sa['MIP_Toplam'] += _st(s)
@@ -2189,17 +2124,23 @@ def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                 sa['Gerçek_Inhouse'] += s.get('Gerçek_Inhouse', 0) or 0
                 sa['Gerçek_Outsource'] += s.get('Gerçek_Outsource', 0) or 0
                 sa['Çağrı'] += s.get('Çağrı', 0) or 0
-                sa['Rapor_Etkisi'] += s.get('Rapor_Etkisi', 0) or 0
-                sa['Kapasite_Kaybı'] += s.get('Kapasite_Kaybı', 0) or 0
-                sa['Net_MT'] += s.get('Net_MT', 0) or 0
-                sa['Çağrı_Kapasitesi'] += s.get('Çağrı_Kapasitesi', 0) or 0
+                # A1 ve A2 ayrı kapasite kolonları; geriye uyum için eski 'Rapor_Etkisi' vs. fallback
+                sa['Rapor_Etkisi_A1'] += (s.get('Rapor_Etkisi_A1', 0) or 0)
+                sa['Rapor_Etkisi_A2'] += (s.get('Rapor_Etkisi_A2', s.get('Rapor_Etkisi', 0)) or 0)
+                sa['Kapasite_Kaybı_A1'] += (s.get('Kapasite_Kaybı_A1', 0) or 0)
+                sa['Kapasite_Kaybı_A2'] += (s.get('Kapasite_Kaybı_A2', s.get('Kapasite_Kaybı', 0)) or 0)
+                sa['Net_MT_A1'] += (s.get('Net_MT_A1', 0) or 0)
+                sa['Net_MT_A2'] += (s.get('Net_MT_A2', s.get('Net_MT', 0)) or 0)
+                sa['Çağrı_Kapasitesi_A1'] += (s.get('Çağrı_Kapasitesi_A1', 0) or 0)
+                sa['Çağrı_Kapasitesi_A2'] += (s.get('Çağrı_Kapasitesi_A2', s.get('Çağrı_Kapasitesi', 0)) or 0)
 
             for slot in SLOTS_30:
                 if slot not in slot_agg: continue
                 sa = slot_agg[slot]
                 rr_a2_tot = round(sa['MIP_Toplam'] / sa['Erlang'], 3) if sa['Erlang'] > 0 else None
                 rr_a1_tot = round(sa['Asama1_MIP_Toplam'] / sa['Erlang'], 3) if (has_s2_slot and sa['Erlang'] > 0) else None
-                kap_rr = round(sa['Çağrı_Kapasitesi'] / sa['Çağrı'], 3) if sa['Çağrı'] > 0 else None
+                kap_rr_a2 = round(sa['Çağrı_Kapasitesi_A2'] / sa['Çağrı'], 3) if sa['Çağrı'] > 0 else None
+                kap_rr_a1 = round(sa['Çağrı_Kapasitesi_A1'] / sa['Çağrı'], 3) if (has_s2_slot and sa['Çağrı'] > 0) else None
                 row = {
                     'Tarih': date_str, 'Gün': day_name, 'Tip': day_type_label,
                     'Kuyruk': 'TOPLAM', 'Slot': slot,
@@ -2216,21 +2157,38 @@ def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                     row['Surplus_Fark'] = sa['MIP_Toplam'] - sa['Asama1_MIP_Toplam']
                     row['Response_Rate_A1'] = rr_a1_tot
                     row['Response_Rate_A2'] = rr_a2_tot
+                    row['MIP_PartTime'] = sa['MIP_PartTime']
+                    row['Gerçek_Toplam'] = sa['Gerçek_Toplam']
+                    row['Gerçek_Inhouse'] = sa['Gerçek_Inhouse']
+                    row['Gerçek_Outsource'] = sa['Gerçek_Outsource']
+                    row['Fark_MIP_Gerçek'] = sa['MIP_Toplam'] - sa['Gerçek_Toplam']
+                    row['Çağrı'] = sa['Çağrı']
+                    row['Rapor_Etkisi_A1'] = sa['Rapor_Etkisi_A1']
+                    row['Rapor_Etkisi_A2'] = sa['Rapor_Etkisi_A2']
+                    row['Kapasite_Kaybı_A1'] = sa['Kapasite_Kaybı_A1']
+                    row['Kapasite_Kaybı_A2'] = sa['Kapasite_Kaybı_A2']
+                    row['Net_MT_A1'] = sa['Net_MT_A1']
+                    row['Net_MT_A2'] = sa['Net_MT_A2']
+                    row['Çağrı_Kapasitesi_A1'] = sa['Çağrı_Kapasitesi_A1']
+                    row['Çağrı_Kapasitesi_A2'] = sa['Çağrı_Kapasitesi_A2']
+                    row['Kapasite_RR_A1'] = kap_rr_a1
+                    row['Kapasite_RR_A2'] = kap_rr_a2
                 else:
                     row['MIP_Toplam'] = sa['MIP_Toplam']
                     row['MIP_Inhouse'] = sa['MIP_Inhouse']
                     row['MIP_Outsource'] = sa['MIP_Outsource']
                     row['Response_Rate_Slot'] = rr_a2_tot
-                row.update({
-                    'MIP_PartTime': sa['MIP_PartTime'],
-                    'Gerçek_Toplam': sa['Gerçek_Toplam'], 'Gerçek_Inhouse': sa['Gerçek_Inhouse'],
-                    'Gerçek_Outsource': sa['Gerçek_Outsource'],
-                    'Fark_MIP_Gerçek': sa['MIP_Toplam'] - sa['Gerçek_Toplam'],
-                    'Çağrı': sa['Çağrı'], 'Rapor_Etkisi': sa['Rapor_Etkisi'],
-                    'Kapasite_Kaybı': sa['Kapasite_Kaybı'], 'Net_MT': sa['Net_MT'],
-                    'Çağrı_Kapasitesi': sa['Çağrı_Kapasitesi'],
-                    'Kapasite_RR': kap_rr,
-                })
+                    row['MIP_PartTime'] = sa['MIP_PartTime']
+                    row['Gerçek_Toplam'] = sa['Gerçek_Toplam']
+                    row['Gerçek_Inhouse'] = sa['Gerçek_Inhouse']
+                    row['Gerçek_Outsource'] = sa['Gerçek_Outsource']
+                    row['Fark_MIP_Gerçek'] = sa['MIP_Toplam'] - sa['Gerçek_Toplam']
+                    row['Çağrı'] = sa['Çağrı']
+                    row['Rapor_Etkisi'] = sa['Rapor_Etkisi_A2']
+                    row['Kapasite_Kaybı'] = sa['Kapasite_Kaybı_A2']
+                    row['Net_MT'] = sa['Net_MT_A2']
+                    row['Çağrı_Kapasitesi'] = sa['Çağrı_Kapasitesi_A2']
+                    row['Kapasite_RR'] = kap_rr_a2
                 all_slots.append(row)
 
     df_assignments = pd.DataFrame(all_assignments)
