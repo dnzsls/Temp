@@ -1604,7 +1604,7 @@ def classify_shifts(df_shifts_queue, config=CONFIG):
            her biri sorted list of 'HH:MM' başlangıç saatleri
     """
     ccfg = config['company']
-    scol = ccfg['shift_columns']
+    scol = config['shift_columns']
     inhouse_value = ccfg['inhouse']['shift_value']
     outsource_value = ccfg['outsource']['shift_value']
 
