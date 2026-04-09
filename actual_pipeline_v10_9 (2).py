@@ -19,9 +19,10 @@
 #       3) Kalan inhouse kadrosu surplus mantığıyla pencerelere yayılır
 #          (sabah 2/3 + akşam 1/3) → MIP(2)
 #   - Hafta sonu çağrıldığında reddeder (v10.9 kullanılmalı)
-#   - V2 fonksiyonları: *_v2 soneki ile isimlendirildi
-#       run_queue_pipeline_v2, run_all_queues_v2, export_to_excel_v2,
-#       classify_shifts_v2, print_shift_classification
+#   - Fonksiyon isimleri v10.9 ile aynıdır: run_queue_pipeline,
+#     run_all_queues, export_to_excel. V2 ayrı bir dosyada yaşadığı için
+#     çakışma olmaz — Jupyter'da hangi dosyayı yüklersen o çalışır.
+#     V2'ye özel yeni fonksiyonlar: classify_shifts, print_shift_classification
 #
 # Config ayarı (Jupyter hücresi, V2 çağrılmadan önce manuel):
 #     CONFIG['mip']['cost_outsource'] = 10.0
@@ -1589,7 +1590,7 @@ def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, c
 # 10.6 V2 — SHIFT SAAT SINIFLANDIRMASI
 # =============================================================================
 
-def classify_shifts_v2(df_shifts_queue, config=CONFIG):
+def classify_shifts(df_shifts_queue, config=CONFIG):
     """
     Shift dosyasından her saat aralığını 3 gruba sınıflandırır:
       - inhouse_only: sadece inhouse shift başlangıcı var
@@ -1651,7 +1652,7 @@ def print_shift_classification(classification, label):
 # 11. ANA AKIŞ
 # =============================================================================
 
-def run_queue_pipeline_v2(df_calls, df_actual, df_shifts, target_date, queue,
+def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                           config=CONFIG, verbose=True):
     """
     V2 akışı — SADECE HAFTAİÇİ.
@@ -1729,7 +1730,7 @@ def run_queue_pipeline_v2(df_calls, df_actual, df_shifts, target_date, queue,
                   f"V2 için None önerilir (kısıt pasifleştirilsin).")
 
     # --- Shift sınıflandırma (V2'ye özel bilgi bloğu) ---
-    classification = classify_shifts_v2(df_shifts_queue, config)
+    classification = classify_shifts(df_shifts_queue, config)
     if verbose:
         print_shift_classification(classification, label)
 
@@ -1830,7 +1831,7 @@ def run_queue_pipeline_v2(df_calls, df_actual, df_shifts, target_date, queue,
     }
 
 
-def run_all_queues_v2(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
+def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
     """V2 versiyonu — sadece haftaiçi. Hafta sonunda ValueError fırlatır."""
     target_date_chk = pd.to_datetime(target_date)
     if target_date_chk.weekday() >= 5:
@@ -1843,7 +1844,7 @@ def run_all_queues_v2(df_calls, df_actual, df_shifts, target_date, config=CONFIG
 
     results = {}
     for queue in config['queues']:
-        result = run_queue_pipeline_v2(
+        result = run_queue_pipeline(
             df_calls, df_actual, df_shifts, target_date, queue, config=config
         )
         if result:
@@ -1916,7 +1917,7 @@ def run_all_queues_v2(df_calls, df_actual, df_shifts, target_date, config=CONFIG
 # 12. EXCEL EXPORT
 # =============================================================================
 
-def export_to_excel_v2(df_calls, df_actual, df_shifts, dates, queues=None,
+def export_to_excel(df_calls, df_actual, df_shifts, dates, queues=None,
                        output_file=None, config=CONFIG):
     """V2 Excel export — sadece haftaiçi tarihler kabul edilir."""
     if queues is None:
@@ -1961,7 +1962,7 @@ def export_to_excel_v2(df_calls, df_actual, df_shifts, dates, queues=None,
         for queue in queues:
             label = config['queues'][queue]['label']
 
-            result = run_queue_pipeline_v2(
+            result = run_queue_pipeline(
                 df_calls, df_actual, df_shifts, date, queue,
                 config=config, verbose=False
             )
