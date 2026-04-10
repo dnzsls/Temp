@@ -116,42 +116,17 @@ def is_slot_in_shift(slot, start, end):
 
 
 def get_part_time_availability(target_date, config=CONFIG):
-    target_date = pd.to_datetime(target_date)
-    day = target_date.day
-    weekday = target_date.weekday()
-    year = target_date.year
-    month = target_date.month
-
+    """
+    V2 (haftaiçi): Her haftaiçi gün için PT kadrosunun tamamı kullanılabilir.
+    Hafta sonu kontrolü run_queue_pipeline'da zaten yapıldığı için burada
+    ekstra kontrol yok — bu fonksiyon sadece haftaiçi tarihlerde çağrılır.
+    """
     pt_config = config.get('part_time', {})
     if not pt_config.get('enabled', False):
         return {q: 0 for q in config['queues']}
 
     pt_counts = pt_config.get('count', {})
-
-    if weekday < 5:
-        return {q: 0 for q in config['queues']}
-
-    last_day_of_month = calendar.monthrange(year, month)[1]
-    result = {}
-
-    for queue in config['queues']:
-        total_pt = pt_counts.get(queue, 0)
-        if total_pt == 0:
-            result[queue] = 0
-            continue
-        if day in [1, 2, 3]:
-            result[queue] = 0
-            continue
-        if day == last_day_of_month and weekday == 5:
-            result[queue] = total_pt
-            continue
-        half = total_pt // 2
-        if weekday == 5:
-            result[queue] = half
-        else:
-            result[queue] = total_pt - half
-
-    return result
+    return {q: pt_counts.get(q, 0) for q in config['queues']}
 
 
 def get_part_time_shifts(config=CONFIG):
@@ -615,17 +590,15 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
                 if covering_out:
                     prob += lpSum([x[s] for s in covering_out]) >= min_out
 
-    # ---- KADRO TAVANI (V2: total_kadro üzerinden) ----
+    # ---- KADRO TAVANI (V2: sadece inhouse) ----
     # Inhouse atama toplamı PT hariç total_kadro['inhouse']'u aşamaz.
-    # Outsource için tavan varsa o da kısıt olarak eklenir.
-    # PT tavanı zaten 'pt_available' ile eşit kısıtı olarak konuldu (satır 592).
+    # Outsource için tavan yok — outsource zaten pahalı (10x) olduğu için
+    # MIP kendiliğinden minimum kullanır, ayrıca gereksiz kısıt infeasibility
+    # riski yaratır.
     kadro_cfg = config.get('surplus_distribution', {}).get('total_kadro', {}).get(queue, {})
     kadro_in = kadro_cfg.get('inhouse', 0)
-    kadro_out = kadro_cfg.get('outsource', 0)
     if kadro_in > 0 and in_shifts:
         prob += lpSum([x[s] for s in in_shifts]) <= kadro_in
-    if kadro_out > 0 and out_shifts:
-        prob += lpSum([x[s] for s in out_shifts]) <= kadro_out
 
 
     prob.solve(PULP_CBC_CMD(msg=0))
