@@ -1,15 +1,1785 @@
-'balance_penalty': {
-    'enabled': True,
-    'penalty_per_diff': 2.0,
-    'windows': [
-        {'name': 'sabah', 'start': '07:00', 'end': '11:30', 'penalty': 2.0},
-        {'name': 'aksam', 'start': '12:00', 'end': '23:30', 'penalty': 2.0},
-    ]
-},
+# =============================================================================
+# KUYRUK BAZLI VARDIYA PİPELİNE - ACTUAL V3 (WEEKDAY)
+# =============================================================================
+#
+# V3 (sadece HAFTAİÇİ):
+#   V2 üzerine kurulu, temel farklar:
+#
+#   1) DENGELI DAĞILIM (Balans Penalty):
+#      - V2'deki outsource 10x maliyet yaklaşımı kaldırıldı
+#      - Yerine inhouse=outsource=eşit maliyet + pencere bazlı balans penalty
+#      - Her pencerede |toplam_inhouse − toplam_outsource| farkı cezalandırılır
+#      - Sonuç: MIP min ihtiyacı karşılarken inhouse/outsource'u dengeli dağıtır
+#
+#   2) CROSS-QUEUE KAPASİTE AKTARIMI:
+#      - Gold/kurumsal'ın Erlang ihtiyacından fazla atanan kapasitesi
+#        kitle'nin Erlang ihtiyacından düşülür
+#
+#   3) SURPLUS DAĞITIMI (hem inhouse hem outsource):
+#      - V2 sadece inhouse surplus dağıtıyordu
+#      - V3: surplus_inhouse = kadro_inhouse − MIP1_inhouse
+#             surplus_outsource = kadro_outsource − MIP1_outsource
+#      - Pencere oranlarıyla (2/3 sabah, 1/3 akşam) dağıtılır
+#      - Öncelik 09:00-20:00 arası (dış arama saatleri)
+#
+#   Config: config_v3_weekday.py kullanın.
+#
+# =============================================================================
 
-'cross_queue': {
-    'enabled': True,
-    'donors': ['gold', 'kurumsal'],
-    'receiver': 'kitle',
-    'transfer_ratio': 1.0,
-},
+import pandas as pd
+import numpy as np
+import math
+import calendar
+import copy
+from pulp import *
+
+# CONFIG dışarıdan gelir (Jupyter'da ayrı hücre veya import)
+
+
+# =============================================================================
+# 0. AHT YÜKLEME
+# =============================================================================
+
+def load_aht_from_df(df_aht, config=CONFIG):
+    required_cols = ['saat', 'sub_queue', 'line_based_main_group', 'weighted_avg_aht']
+    missing = [c for c in required_cols if c not in df_aht.columns]
+    if missing:
+        raise ValueError(f"df_aht'de eksik kolonlar: {missing}")
+
+    main_queue_map = {
+        qcfg['actual_name']: qkey
+        for qkey, qcfg in config['queues'].items()
+    }
+
+    sub_queues_cfg = {}
+
+    for main_group, queue_key in main_queue_map.items():
+        df_q = df_aht[df_aht['line_based_main_group'] == main_group]
+        if len(df_q) == 0:
+            print(f"   ⚠ {main_group} için AHT verisi bulunamadı")
+            continue
+
+        sub_queues_cfg[queue_key] = {'queues': [], 'aht': {}}
+
+        for sq in sorted(df_q['sub_queue'].unique()):
+            sub_queues_cfg[queue_key]['queues'].append(sq)
+            df_sq = df_q[df_q['sub_queue'] == sq].copy()
+            aht_dict = dict(zip(df_sq['saat'].astype(int), df_sq['weighted_avg_aht'].astype(int)))
+            aht_dict['default'] = int(df_sq['weighted_avg_aht'].mean())
+            sub_queues_cfg[queue_key]['aht'][sq] = aht_dict
+
+        print(f"   ✓ {queue_key}: {len(sub_queues_cfg[queue_key]['queues'])} alt kuyruk yüklendi "
+              f"({', '.join(sub_queues_cfg[queue_key]['queues'])})")
+
+    return sub_queues_cfg
+
+
+# =============================================================================
+# YARDIMCI
+# =============================================================================
+
+SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ['00', '30']]
+
+
+def get_weekends(year, month):
+    month_names = {
+        'ocak': 1, 'şubat': 2, 'mart': 3, 'nisan': 4,
+        'mayıs': 5, 'haziran': 6, 'temmuz': 7, 'ağustos': 8,
+        'eylül': 9, 'ekim': 10, 'kasım': 11, 'aralık': 12,
+        'january': 1, 'february': 2, 'march': 3, 'april': 4,
+        'may': 5, 'june': 6, 'july': 7, 'august': 8,
+        'september': 9, 'october': 10, 'november': 11, 'december': 12
+    }
+    if isinstance(month, str):
+        month_lower = month.lower().strip()
+        if month_lower not in month_names:
+            raise ValueError(f"Geçersiz ay adı: {month}")
+        month = month_names[month_lower]
+
+    weekends = []
+    cal = calendar.Calendar()
+    for day in cal.itermonthdates(year, month):
+        if day.month == month and day.weekday() >= 5:
+            weekends.append(day.strftime('%Y-%m-%d'))
+    return weekends
+
+
+def is_slot_in_shift(slot, start, end):
+    if start <= end:
+        return start <= slot < end
+    else:
+        return slot >= start or slot < end
+
+
+def get_part_time_availability(target_date, config=CONFIG):
+    pt_config = config.get('part_time', {})
+    if not pt_config.get('enabled', False):
+        return {q: 0 for q in config['queues']}
+    pt_counts = pt_config.get('count', {})
+    return {q: pt_counts.get(q, 0) for q in config['queues']}
+
+
+def get_part_time_shifts(config=CONFIG):
+    pt_config = config.get('part_time', {})
+    if not pt_config.get('enabled', False):
+        return []
+    shifts = []
+    for shift_str in pt_config.get('shifts', []):
+        start, end = shift_str.split('-')
+        slots = [slot for slot in SLOTS_30 if is_slot_in_shift(slot, start, end)]
+        shifts.append({
+            'start': start, 'end': end, 'slots': slots,
+            'key': f"pt_{start.replace(':', '')}_{end.replace(':', '')}"
+        })
+    return shifts
+
+
+def get_time_cost_multiplier(queue, company_type, start_hour, config=CONFIG):
+    time_mults_all = config.get('time_cost_multipliers', {})
+    time_mults = time_mults_all.get(queue, time_mults_all.get('default', {}))
+    return time_mults.get(company_type, {}).get(start_hour, 1.0)
+
+
+# =============================================================================
+# 1. VERİ HAZIRLAMA
+# =============================================================================
+
+def get_sub_queue_aht(queue, sub_queue, slot, config=CONFIG):
+    sub_cfg = config['sub_queues'].get(queue, {})
+    aht_cfg = sub_cfg.get('aht', {}).get(sub_queue, {})
+    hour = int(slot.split(':')[0])
+    if hour in aht_cfg:
+        return aht_cfg[hour]
+    if 'default' in aht_cfg:
+        return aht_cfg['default']
+    return config.get('default_aht', 150)
+
+
+def calculate_weighted_aht(row, queue, slot, config=CONFIG):
+    overrides = config.get('aht_overrides', {}).get(queue, {})
+    if overrides:
+        hour = int(slot[:2])
+        if hour in overrides:
+            return overrides[hour]
+
+    sub_cfg = config['sub_queues'].get(queue, {})
+    sub_queues = sub_cfg.get('queues', [])
+    total_calls = 0
+    weighted_sum = 0
+
+    for sq in sub_queues:
+        col = f"{sq}_calls"
+        if col in row.index:
+            calls = row[col]
+            if pd.notna(calls) and calls > 0:
+                aht = get_sub_queue_aht(queue, sq, slot, config)
+                weighted_sum += calls * aht
+                total_calls += calls
+
+    if total_calls > 0:
+        return round(weighted_sum / total_calls, 1)
+    else:
+        if sub_queues:
+            ahts = [get_sub_queue_aht(queue, sq, slot, config) for sq in sub_queues]
+            return round(sum(ahts) / len(ahts), 1)
+        return config.get('default_aht', 150)
+
+
+def prepare_calls_30(df_calls, config=CONFIG):
+    col = config['calls_columns']
+    sub_queues_cfg = config['sub_queues']
+    main_queue_map = {
+        qcfg['actual_name']: qkey
+        for qkey, qcfg in config['queues'].items()
+    }
+
+    df = df_calls.copy()
+    df[col['date']] = pd.to_datetime(df[col['date']])
+    time_str = df[col['time']].astype(str)
+    hour = time_str.str.split(':').str[0].astype(int)
+    minute = time_str.str.split(':').str[1].astype(int)
+    df['slot_30'] = hour.astype(str).str.zfill(2) + ':' + \
+                    ((minute // 30) * 30).astype(str).str.zfill(2)
+    df['queue_key'] = df[col['main_queue']].map(main_queue_map)
+    df = df[df['queue_key'].notna()].copy()
+
+    base = df.groupby([col['date'], 'slot_30']).size().reset_index()[[col['date'], 'slot_30']]
+    base = base.rename(columns={col['date']: 'data_date'})
+
+    for queue_key, sq_cfg in sub_queues_cfg.items():
+        actual_name = config['queues'][queue_key]['actual_name']
+        sub_queues = sq_cfg['queues']
+        df_q = df[df[col['main_queue']] == actual_name]
+        for sq in sub_queues:
+            df_sq = df_q[df_q[col['sub_queue']] == sq].copy()
+            sq_30 = df_sq.groupby([col['date'], 'slot_30'])[col['calls']].sum().reset_index()
+            sq_30 = sq_30.rename(columns={col['date']: 'data_date', col['calls']: f"{sq}_calls"})
+            base = base.merge(sq_30, on=['data_date', 'slot_30'], how='left')
+            base[f"{sq}_calls"] = base[f"{sq}_calls"].fillna(0)
+        total_30 = df_q.groupby([col['date'], 'slot_30'])[col['calls']].sum().reset_index()
+        total_30 = total_30.rename(columns={col['date']: 'data_date', col['calls']: f"{queue_key}_total"})
+        base = base.merge(total_30, on=['data_date', 'slot_30'], how='left')
+        base[f"{queue_key}_total"] = base[f"{queue_key}_total"].fillna(0)
+
+    for queue_key, qcfg in config['queues'].items():
+        total_col = f"{queue_key}_total"
+        if total_col not in base.columns:
+            actual_name = qcfg['actual_name']
+            df_q = df[df[col['main_queue']] == actual_name]
+            if len(df_q) > 0:
+                total_30 = df_q.groupby([col['date'], 'slot_30'])[col['calls']].sum().reset_index()
+                total_30 = total_30.rename(columns={col['date']: 'data_date', col['calls']: total_col})
+                base = base.merge(total_30, on=['data_date', 'slot_30'], how='left')
+                base[total_col] = base[total_col].fillna(0)
+            else:
+                base[total_col] = 0
+
+    return base.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+
+
+def add_30min(time_str):
+    h, m = int(time_str[:2]), int(time_str[3:5])
+    m += 30
+    if m >= 60:
+        m -= 60
+        h = (h + 1) % 24
+    return f"{h:02d}:{m:02d}"
+
+
+def prepare_actual(df_actual, config=CONFIG):
+    col = config['actual_columns']
+    df = df_actual.copy()
+    df[col['date']] = pd.to_datetime(df[col['date']], dayfirst=True)
+    df[col['shift_start']] = df[col['shift_start']].astype(str).str.strip().str[:5]
+    df[col['shift_end']] = df[col['shift_end']].astype(str).str.strip().str[:5]
+    mask_out = df[col['outsource']] == 1
+    df.loc[mask_out, col['shift_end']] = df.loc[mask_out, col['shift_end']].apply(add_30min)
+    return df
+
+
+# =============================================================================
+# 2. ERLANG-C
+# =============================================================================
+
+def erlang_c(agents, traffic):
+    if agents <= traffic or agents == 0:
+        return 1.0
+    eb = traffic / agents
+    for i in range(2, int(agents) + 1):
+        eb = (traffic * eb) / (i + traffic * eb)
+    return min(eb / (1 - (traffic / agents) * (1 - eb)), 1.0)
+
+
+def calc_asa(agents, traffic, aht):
+    if agents <= traffic or agents == 0:
+        return 999
+    ec = erlang_c(agents, traffic)
+    return (ec * (aht / 60)) / (agents - traffic) * 60
+
+
+def find_optimal_agents(calls, aht, slot, queue, config=CONFIG):
+    ecfg = config['queue_configs'][queue]['erlang']
+    if calls == 0:
+        return 0, 0, 0
+    traffic = (calls * (aht / 60)) / ecfg['interval_minutes']
+    if traffic == 0:
+        return 0, 0, 0
+
+    min_a = math.ceil(traffic)
+    max_a = math.ceil(traffic * 3) + 10
+    raw = max_a
+    for a in range(min_a, max_a + 1):
+        if calc_asa(a, traffic, aht) <= ecfg['target_asa']:
+            raw = a
+            break
+
+    hour = int(slot[:2])
+    shrinkage_cfg = ecfg['shrinkage']
+    if isinstance(shrinkage_cfg, dict):
+        shrinkage = shrinkage_cfg.get(hour, shrinkage_cfg.get('default', 0.10))
+    else:
+        shrinkage = shrinkage_cfg
+
+    final = math.ceil(raw / (1 - shrinkage))
+    asa = calc_asa(raw, traffic, aht)
+    return final, round(asa, 1), round(raw, 0)
+
+
+def calculate_erlang_all(df_calls_30, config=CONFIG):
+    results = []
+    for _, row in df_calls_30.iterrows():
+        date = row['data_date']
+        slot = row['slot_30']
+        for queue, qcfg in config['queues'].items():
+            total_col = f"{queue}_total"
+            calls = row.get(total_col, 0)
+            if pd.isna(calls):
+                calls = 0
+            weighted_aht = calculate_weighted_aht(row, queue, slot, config)
+            need, asa, _ = find_optimal_agents(calls, weighted_aht, slot, queue, config)
+            results.append({
+                'date': date, 'slot': slot, 'queue': queue,
+                'label': qcfg['label'], 'calls': int(calls),
+                'weighted_aht': weighted_aht, 'erlang_need': need, 'asa': asa
+            })
+    return pd.DataFrame(results)
+
+
+# =============================================================================
+# 2.5 CROSS-QUEUE KAPASİTE AKTARIMI (V3'e özel)
+# =============================================================================
+
+def apply_cross_queue_transfer(all_erlang_by_slot, all_mip_info, config=CONFIG):
+    """
+    Gold/kurumsal MIP(1) fazlasını kitle Erlang ihtiyacından düşer.
+
+    all_erlang_by_slot: {queue: {slot: erlang_need}}
+    all_mip_info: {queue: mip_info_dict}
+
+    Döner: (adjusted_erlang_dict, transfer_detail)
+    """
+    cq_cfg = config.get('cross_queue', {})
+    if not cq_cfg.get('enabled', False):
+        return all_erlang_by_slot, {}
+
+    donor_queues = cq_cfg.get('donors', [])
+    receiver_queue = cq_cfg.get('receiver', 'kitle')
+    transfer_ratio = cq_cfg.get('transfer_ratio', 1.0)
+
+    if receiver_queue not in all_erlang_by_slot:
+        return all_erlang_by_slot, {}
+
+    adjusted = {q: dict(slots) for q, slots in all_erlang_by_slot.items()}
+    total_transferred = 0
+    transfer_detail = {}
+
+    for slot in SLOTS_30:
+        slot_surplus = 0
+        for donor in donor_queues:
+            if donor not in all_mip_info or donor not in all_erlang_by_slot:
+                continue
+            mip_slot = all_mip_info[donor]['mip_by_slot'].get(slot, 0)
+            erlang_slot = all_erlang_by_slot[donor].get(slot, 0)
+            fazla = mip_slot - erlang_slot
+            if fazla > 0:
+                slot_surplus += fazla
+
+        transferable = math.floor(slot_surplus * transfer_ratio)
+        if transferable > 0:
+            current_kitle = adjusted[receiver_queue].get(slot, 0)
+            reduction = min(transferable, current_kitle)
+            adjusted[receiver_queue][slot] = current_kitle - reduction
+            total_transferred += reduction
+            if reduction > 0:
+                transfer_detail[slot] = {'surplus': slot_surplus, 'transferred': reduction}
+
+    if total_transferred > 0:
+        print(f"   🔄 Cross-queue aktarım: {total_transferred} kişi-slot "
+              f"({', '.join(donor_queues)} → {receiver_queue})")
+        print(f"      Aktif slot: {len(transfer_detail)}, ratio: {transfer_ratio}")
+
+    return adjusted, transfer_detail
+
+
+# =============================================================================
+# 3. MIP OPTİMİZASYON (V3 — Balans Penalty)
+# =============================================================================
+
+def create_shift_coverage(df_shifts, config=CONFIG):
+    scol = config['shift_columns']
+    cov = {}
+    for _, row in df_shifts.iterrows():
+        shift = row[scol['shift']]
+        start = str(row[scol['start']])[:5]
+        end = str(row[scol['end']])[:5]
+        company = row[scol['company']]
+        key = f"{shift}_{company}"
+        slots = [s for s in SLOTS_30 if is_slot_in_shift(s, start, end)]
+        cov[key] = {'shift': shift, 'company': company,
+                    'start': start, 'end': end, 'slots': slots}
+    return cov
+
+
+def optimize_queue(erlang_by_slot, df_shifts, queue,
+                   target_date=None, inhouse_min_by_slot=None,
+                   outsource_min_by_slot=None, config=None):
+    """
+    V3 MIP — eşit maliyet + pencere bazlı balans penalty.
+    """
+    if config is None:
+        config = CONFIG
+
+    qcfg = config['queues'][queue]
+    qconfigs = config['queue_configs'][queue]
+    mcfg = qconfigs['mip']
+    scol = config['shift_columns']
+    ccfg = config['company']
+
+    allowed = qcfg['companies']
+    allowed_values = [ccfg[c]['shift_value'] for c in allowed]
+    df_sf = df_shifts[df_shifts[scol['company']].isin(allowed_values)]
+    shift_cov = create_shift_coverage(df_sf, config)
+
+    only_inhouse = (allowed == ['inhouse'])
+    shifts = list(shift_cov.keys())
+    active_slots = [s for s in SLOTS_30 if erlang_by_slot.get(s, 0) > 0]
+
+    inhouse_value = ccfg['inhouse']['shift_value']
+    outsource_value = ccfg['outsource']['shift_value']
+    in_shifts = [s for s in shifts if shift_cov[s]['company'] == inhouse_value]
+    out_shifts = [s for s in shifts if shift_cov[s]['company'] == outsource_value]
+
+    if not active_slots:
+        return None, "İhtiyaç yok"
+
+    # Part-time
+    pt_available = 0
+    pt_shift_keys = []
+    if target_date is not None and config.get('part_time', {}).get('enabled', False):
+        pt_availability = get_part_time_availability(target_date, config)
+        pt_available = pt_availability.get(queue, 0)
+        if pt_available > 0:
+            pt_shifts_list = get_part_time_shifts(config)
+            for pt in pt_shifts_list:
+                pt_shift_keys.append(pt['key'])
+                shift_cov[pt['key']] = {
+                    'shift': pt['key'], 'company': 'part_time',
+                    'start': pt['start'], 'end': pt['end'], 'slots': pt['slots']
+                }
+            shifts = list(shift_cov.keys())
+
+    prob = LpProblem(f"Q_{queue}", LpMinimize)
+    x = LpVariable.dicts("x", shifts, lowBound=0, cat='Integer')
+    y = LpVariable.dicts("y", shifts, cat='Binary')
+    cost = []
+    cost_details = []
+
+    # --- Small shift penalty ---
+    ssp_cfg = qconfigs.get('small_shift_penalty', {})
+    ssp_enabled = ssp_cfg.get('enabled', False)
+    ssp_penalty = ssp_cfg.get('penalty', 3.0)
+
+    # --- RR Penalty ---
+    rr_cfg = qconfigs.get('rr_penalty', {})
+    rr_enabled = rr_cfg.get('enabled', False)
+    rr_penalty_per = rr_cfg.get('penalty_per_person', 5.0)
+    rr_peak_exempt = rr_cfg.get('peak_exempt', True)
+    rr_peak_thr = rr_cfg.get('peak_threshold', 0.70)
+    night_mult_cfg = rr_cfg.get('night_multiplier', {})
+    night_mult_enabled = night_mult_cfg.get('enabled', False)
+    night_mult_value = night_mult_cfg.get('multiplier', 3.0)
+    night_mult_start = night_mult_cfg.get('hours', {}).get('start', '22:00')
+    night_mult_end = night_mult_cfg.get('hours', {}).get('end', '08:00')
+
+    def _is_night_slot(slot):
+        return is_slot_in_shift(slot, night_mult_start, night_mult_end)
+
+    # --- Shift maliyetleri (V3: eşit maliyet) ---
+    for s in shifts:
+        start_hour = shift_cov[s]['start']
+        if s in pt_shift_keys:
+            base_cost = mcfg['cost_inhouse']
+            company_type = 'part_time'
+            multiplier = get_time_cost_multiplier(queue, 'inhouse', start_hour, config)
+        elif shift_cov[s]['company'] == inhouse_value:
+            base_cost = mcfg['cost_inhouse']
+            company_type = 'inhouse'
+            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
+        else:
+            base_cost = mcfg['cost_outsource']
+            company_type = 'outsource'
+            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
+
+        final_cost = base_cost * multiplier
+        cost.append(x[s] * final_cost)
+
+        if ssp_enabled and s not in pt_shift_keys:
+            cost.append(y[s] * ssp_penalty)
+
+        if multiplier != 1.0:
+            cost_details.append({
+                'shift': s, 'company': company_type,
+                'start': start_hour, 'base_cost': base_cost,
+                'multiplier': multiplier, 'final_cost': final_cost
+            })
+
+    # --- RR Penalty ---
+    excess = {}
+    peak_slots_rr = set()
+    if rr_enabled and active_slots:
+        max_erlang = max(erlang_by_slot.get(s, 0) for s in active_slots)
+        if rr_peak_exempt and max_erlang > 0:
+            peak_slots_rr = {s for s in active_slots
+                             if erlang_by_slot.get(s, 0) >= max_erlang * rr_peak_thr}
+        peak_penalty_per = rr_cfg.get('peak_penalty', rr_penalty_per)
+
+        for slot in active_slots:
+            erlang_need = erlang_by_slot.get(slot, 0)
+            if erlang_need <= 0:
+                continue
+            excess[slot] = LpVariable(f"excess_{slot}", lowBound=0, cat='Continuous')
+            covering = [s for s in shifts if slot in shift_cov[s]['slots']]
+            if covering:
+                prob += excess[slot] >= lpSum([x[s] for s in covering]) - erlang_need
+
+            if slot in peak_slots_rr:
+                effective_penalty = peak_penalty_per
+            elif night_mult_enabled and _is_night_slot(slot):
+                effective_penalty = rr_penalty_per * night_mult_value
+            else:
+                effective_penalty = rr_penalty_per
+            cost.append(excess[slot] * effective_penalty)
+
+    # --- Slot Cap ---
+    sc_cfg = qconfigs.get('slot_cap', {})
+    slot_cap_detail = []
+    sc_excess = {}
+    if sc_cfg.get('enabled', False):
+        bands = sc_cfg.get('bands', [])
+        for slot in active_slots:
+            erlang_need = erlang_by_slot.get(slot, 0)
+            if erlang_need <= 0:
+                continue
+            matched_band = None
+            for band in bands:
+                if is_slot_in_shift(slot, band['start'], band['end']):
+                    matched_band = band
+                    break
+            if matched_band is None:
+                continue
+            band_ratio = matched_band.get('max_ratio', 1.20)
+            band_penalty = matched_band.get('penalty', 50.0)
+            cap = max(math.ceil(erlang_need * band_ratio), 3)
+            sc_excess[slot] = LpVariable(f"sc_excess_{slot}", lowBound=0, cat='Continuous')
+            covering = [s for s in shifts if slot in shift_cov[s]['slots']]
+            if covering:
+                prob += sc_excess[slot] >= lpSum([x[s] for s in covering]) - cap
+            cost.append(sc_excess[slot] * band_penalty)
+            slot_cap_detail.append({
+                'slot': slot, 'erlang': erlang_need, 'cap': cap,
+                'ratio': band_ratio, 'penalty': band_penalty,
+                'band': f"{matched_band['start']}-{matched_band['end']}"
+            })
+
+    # =========================================================================
+    # V3 — PENCERE BAZLI BALANS PENALTY
+    # =========================================================================
+    bp_cfg = qconfigs.get('balance_penalty', config.get('balance_penalty', {}))
+    bp_enabled = bp_cfg.get('enabled', False) and not only_inhouse
+    bp_windows = bp_cfg.get('windows', [])
+    bp_penalty = bp_cfg.get('penalty_per_diff', 2.0)
+    balance_vars = {}
+
+    if bp_enabled and in_shifts and out_shifts:
+        for win in bp_windows:
+            win_name = win['name']
+            win_start = win['start']
+            win_end = win['end']
+
+            win_in = [s for s in in_shifts
+                      if win_start <= shift_cov[s]['start'] <= win_end]
+            win_out = [s for s in out_shifts
+                       if win_start <= shift_cov[s]['start'] <= win_end]
+
+            if not win_in or not win_out:
+                continue
+
+            diff_pos = LpVariable(f"bp_{win_name}_pos", lowBound=0, cat='Continuous')
+            diff_neg = LpVariable(f"bp_{win_name}_neg", lowBound=0, cat='Continuous')
+
+            in_total_expr = lpSum([x[s] for s in win_in])
+            out_total_expr = lpSum([x[s] for s in win_out])
+            prob += diff_pos - diff_neg == in_total_expr - out_total_expr
+
+            win_penalty = win.get('penalty', bp_penalty)
+            cost.append((diff_pos + diff_neg) * win_penalty)
+
+            balance_vars[win_name] = {
+                'diff_pos': diff_pos, 'diff_neg': diff_neg,
+                'in_shifts': win_in, 'out_shifts': win_out,
+                'penalty': win_penalty
+            }
+
+    # --- Amaç fonksiyonu ---
+    prob += lpSum(cost)
+
+    # --- Kısıtlar ---
+    for slot in active_slots:
+        covering = [s for s in shifts if slot in shift_cov[s]['slots']]
+        if covering:
+            prob += lpSum([x[s] for s in covering]) >= erlang_by_slot[slot]
+
+    M = 500
+    for s in shifts:
+        prob += x[s] <= M * y[s]
+        prob += x[s] >= mcfg['min_per_shift'] * y[s]
+
+    if pt_available > 0 and pt_shift_keys:
+        prob += lpSum([x[s] for s in pt_shift_keys]) == pt_available
+
+    # Outsource oran kısıtı (V3'te genelde kapalı)
+    out_cfg = config.get('outsource_ratio', {}).get(queue) if isinstance(config.get('outsource_ratio'), dict) else None
+    if not only_inhouse and out_cfg:
+        t_in = lpSum([x[s] for s in in_shifts]) + lpSum([x[s] for s in pt_shift_keys])
+        t_out = lpSum([x[s] for s in out_shifts])
+        prob += (1 - out_cfg['min']) * t_out >= out_cfg['min'] * t_in
+        prob += (1 - out_cfg['max']) * t_out <= out_cfg['max'] * t_in
+
+    if inhouse_min_by_slot:
+        for slot, min_in in inhouse_min_by_slot.items():
+            if min_in > 0:
+                covering_in = [s for s in in_shifts if slot in shift_cov[s]['slots']]
+                covering_pt = [s for s in pt_shift_keys if slot in shift_cov[s]['slots']]
+                if covering_in + covering_pt:
+                    prob += lpSum([x[s] for s in covering_in + covering_pt]) >= min_in
+
+    if outsource_min_by_slot:
+        for slot, min_out in outsource_min_by_slot.items():
+            if min_out > 0:
+                covering_out = [s for s in out_shifts if slot in shift_cov[s]['slots']]
+                if covering_out:
+                    prob += lpSum([x[s] for s in covering_out]) >= min_out
+
+    # Kadro tavanı (V3: hem inhouse hem outsource)
+    kadro_cfg = config.get('surplus_distribution', {}).get('total_kadro', {}).get(queue, {})
+    kadro_in = kadro_cfg.get('inhouse', 0)
+    kadro_out = kadro_cfg.get('outsource', 0)
+    if kadro_in > 0 and in_shifts:
+        prob += lpSum([x[s] for s in in_shifts]) <= kadro_in
+    if kadro_out > 0 and out_shifts:
+        prob += lpSum([x[s] for s in out_shifts]) <= kadro_out
+
+    # Start smoothing
+    sm_cfg = qconfigs.get('start_smoothing', {})
+    if sm_cfg.get('enabled', False):
+        sm_start = sm_cfg.get('hours', {}).get('start', '07:00')
+        sm_end = sm_cfg.get('hours', {}).get('end', '20:00')
+        sm_companies = sm_cfg.get('companies', ['inhouse', 'outsource'])
+        sm_penalty_val = sm_cfg.get('penalty_per_diff', 0.5)
+
+        for comp in sm_companies:
+            comp_shifts = in_shifts if comp == 'inhouse' else (out_shifts if comp == 'outsource' else [])
+            if not comp_shifts:
+                continue
+            starts_by_hour = {}
+            for s in comp_shifts:
+                st = shift_cov[s]['start']
+                if sm_start <= st < sm_end:
+                    starts_by_hour.setdefault(st, []).append(s)
+            sorted_hours = sorted(starts_by_hour.keys())
+            if len(sorted_hours) < 2:
+                continue
+            for i in range(1, len(sorted_hours)):
+                h_prev = sorted_hours[i - 1]
+                h_curr = sorted_hours[i]
+                d_pos = LpVariable(f"sm_{comp}_{h_curr}_pos", lowBound=0, cat='Continuous')
+                d_neg = LpVariable(f"sm_{comp}_{h_curr}_neg", lowBound=0, cat='Continuous')
+                prob += d_pos - d_neg == lpSum([x[s] for s in starts_by_hour[h_curr]]) - lpSum([x[s] for s in starts_by_hour[h_prev]])
+                cost.append((d_pos + d_neg) * sm_penalty_val)
+        prob.objective = lpSum(cost)
+
+    # --- SOLVE ---
+    prob.solve(PULP_CBC_CMD(msg=0))
+
+    if LpStatus[prob.status] != 'Optimal':
+        return None, LpStatus[prob.status]
+
+    assignments = {s: int(value(x[s])) for s in shifts if value(x[s]) and value(x[s]) > 0}
+
+    mip_by_slot = {}
+    mip_in_by_slot = {}
+    mip_out_by_slot = {}
+    mip_pt_by_slot = {}
+    for slot in SLOTS_30:
+        mip_by_slot[slot] = sum(assignments.get(s, 0) for s in shifts if slot in shift_cov[s]['slots'])
+        mip_in_by_slot[slot] = sum(assignments.get(s, 0) for s in in_shifts if slot in shift_cov[s]['slots'])
+        mip_out_by_slot[slot] = sum(assignments.get(s, 0) for s in out_shifts if slot in shift_cov[s]['slots'])
+        mip_pt_by_slot[slot] = sum(assignments.get(s, 0) for s in pt_shift_keys if slot in shift_cov[s]['slots'])
+
+    total_in = sum(assignments.get(s, 0) for s in in_shifts)
+    total_out = sum(assignments.get(s, 0) for s in out_shifts)
+    total_pt = sum(assignments.get(s, 0) for s in pt_shift_keys) if pt_shift_keys else 0
+    total = total_in + total_out + total_pt
+    out_ratio = total_out / total if total > 0 else 0
+
+    # Early starts
+    early_starts = {}
+    early_total = 0
+    early_penalty = 0
+    for s, cnt in assignments.items():
+        start_h = shift_cov[s]['start']
+        if s in pt_shift_keys:
+            mult = get_time_cost_multiplier(queue, 'inhouse', start_h, config)
+            ct = 'part_time'
+        elif shift_cov[s]['company'] == inhouse_value:
+            mult = get_time_cost_multiplier(queue, 'inhouse', start_h, config)
+            ct = 'inhouse'
+        else:
+            mult = get_time_cost_multiplier(queue, 'outsource', start_h, config)
+            ct = 'outsource'
+        if mult > 1.0:
+            early_starts[s] = {'count': cnt, 'start': start_h, 'company': ct,
+                               'multiplier': mult, 'penalty': cnt * (mult - 1.0)}
+            early_total += cnt
+            early_penalty += cnt * (mult - 1.0)
+
+    # Small shift detail
+    small_shift_count = 0
+    small_shift_total_penalty = 0
+    small_shifts_detail = []
+    if ssp_enabled:
+        for s, cnt in assignments.items():
+            if s in pt_shift_keys:
+                continue
+            small_shift_count += 1
+            small_shift_total_penalty += ssp_penalty
+            if cnt <= 5:
+                small_shifts_detail.append({
+                    'shift': s, 'count': cnt,
+                    'start': shift_cov[s]['start'],
+                    'company': shift_cov[s]['company']
+                })
+
+    # RR excess
+    rr_excess_by_slot = {}
+    rr_total_excess = rr_total_penalty_cost = rr_penalized_slots = 0
+    if rr_enabled and excess:
+        peak_penalty_per_val = rr_cfg.get('peak_penalty', rr_penalty_per)
+        for slot, exc_var in excess.items():
+            exc_val = value(exc_var) or 0
+            if exc_val > 0.5:
+                exc_int = int(round(exc_val))
+                rr_excess_by_slot[slot] = exc_int
+                rr_total_excess += exc_int
+                if slot in peak_slots_rr:
+                    rr_total_penalty_cost += exc_int * peak_penalty_per_val
+                elif night_mult_enabled and _is_night_slot(slot):
+                    rr_total_penalty_cost += exc_int * rr_penalty_per * night_mult_value
+                else:
+                    rr_total_penalty_cost += exc_int * rr_penalty_per
+                rr_penalized_slots += 1
+
+    # Slot cap excess
+    sc_total_excess = sc_total_penalty_cost = sc_penalized_slots = 0
+    if sc_cfg.get('enabled', False) and sc_excess:
+        for slot, exc_var in sc_excess.items():
+            exc_val = value(exc_var) or 0
+            if exc_val > 0.5:
+                exc_int = int(round(exc_val))
+                slot_pen = next((d['penalty'] for d in slot_cap_detail if d['slot'] == slot), 50.0)
+                sc_total_excess += exc_int
+                sc_total_penalty_cost += exc_int * slot_pen
+                sc_penalized_slots += 1
+
+    # Balans sonuçları
+    balance_result = {}
+    if bp_enabled and balance_vars:
+        for win_name, bv in balance_vars.items():
+            dp = value(bv['diff_pos']) or 0
+            dn = value(bv['diff_neg']) or 0
+            win_in_total = sum(assignments.get(s, 0) for s in bv['in_shifts'])
+            win_out_total = sum(assignments.get(s, 0) for s in bv['out_shifts'])
+            balance_result[win_name] = {
+                'inhouse': win_in_total, 'outsource': win_out_total,
+                'diff': win_in_total - win_out_total,
+                'abs_diff': abs(win_in_total - win_out_total),
+                'penalty_cost': (dp + dn) * bv['penalty'],
+            }
+
+    info = {
+        'assignments': assignments, 'shift_coverage': shift_cov,
+        'mip_by_slot': mip_by_slot, 'mip_in_by_slot': mip_in_by_slot,
+        'mip_out_by_slot': mip_out_by_slot, 'mip_pt_by_slot': mip_pt_by_slot,
+        'total_kisi': total, 'total_inhouse_kisi': total_in,
+        'total_outsource_kisi': total_out, 'total_part_time_kisi': total_pt,
+        'pt_available': pt_available, 'outsource_ratio': out_ratio,
+        'cost_details': cost_details,
+        'early_starts': early_starts, 'early_total': early_total, 'early_penalty': early_penalty,
+        'inhouse_min_by_slot': inhouse_min_by_slot or {},
+        'outsource_min_by_slot': outsource_min_by_slot or {},
+        'small_shift_penalty_enabled': ssp_enabled,
+        'small_shift_count': small_shift_count,
+        'small_shift_total_penalty': small_shift_total_penalty,
+        'small_shifts_detail': small_shifts_detail,
+        'rr_penalty_enabled': rr_enabled,
+        'rr_excess_by_slot': rr_excess_by_slot,
+        'rr_total_excess': rr_total_excess,
+        'rr_total_penalty_cost': rr_total_penalty_cost,
+        'rr_penalized_slots': rr_penalized_slots,
+        'rr_peak_slots': peak_slots_rr,
+        'slot_cap_detail': slot_cap_detail,
+        'sc_total_excess': sc_total_excess,
+        'sc_total_penalty_cost': sc_total_penalty_cost,
+        'sc_penalized_slots': sc_penalized_slots,
+        'balance_penalty_enabled': bp_enabled,
+        'balance_result': balance_result,
+    }
+
+    return assignments, info
+
+
+# =============================================================================
+# 4. GERÇEK VERİ
+# =============================================================================
+
+def get_actual_summary(df_actual, date, queue, config=CONFIG):
+    col = config['actual_columns']
+    actual_name = config['queues'][queue]['actual_name']
+    df = prepare_actual(df_actual, config)
+    df_day = df[(df[col['date']] == pd.to_datetime(date)) & (df[col['queue']] == actual_name)]
+
+    slot_total = {}; slot_in = {}; slot_out = {}
+    for slot in SLOTS_30:
+        mask = df_day.apply(
+            lambda r: is_slot_in_shift(slot, r[col['shift_start']], r[col['shift_end']]), axis=1)
+        working = df_day[mask]
+        slot_total[slot] = working[col['count']].sum()
+        slot_in[slot] = working[working[col['outsource']] == 0][col['count']].sum()
+        slot_out[slot] = working[working[col['outsource']] == 1][col['count']].sum()
+
+    kisi_in = df_day[df_day[col['outsource']] == 0][col['count']].sum()
+    kisi_out = df_day[df_day[col['outsource']] == 1][col['count']].sum()
+    kisi_total = kisi_in + kisi_out
+    return {
+        'slot_total': slot_total, 'slot_in': slot_in, 'slot_out': slot_out,
+        'kisi_total': kisi_total, 'kisi_in': kisi_in, 'kisi_out': kisi_out,
+        'outsource_ratio': kisi_out / kisi_total if kisi_total > 0 else 0
+    }
+
+
+# =============================================================================
+# 5. RAPOR (V2 ile aynı + V3 balans penalty bloğu)
+# =============================================================================
+
+def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
+                       weighted_aht_by_slot=None, total_calls_day=0,
+                       calls_by_slot=None, mip_info_stage1=None, config=CONFIG):
+
+    label = config['queues'][queue]['label']
+    date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
+
+    print(f"\n{'='*95}")
+    print(f"KUYRUK RAPORU: {label} ({queue.upper()}) - {date_str}")
+    print(f"{'='*95}")
+
+    e_peak = max(erlang_by_slot.values()) if erlang_by_slot else 0
+    m_peak = max(mip_info['mip_by_slot'].values()) if mip_info['mip_by_slot'] else 0
+    a_peak = max(actual['slot_total'].values()) if actual['slot_total'] else 0
+
+    has_s1 = mip_info_stage1 is not None
+
+    print(f"\n📊 ÖZET (KİŞİ BAZLI):")
+    if has_s1:
+        s1 = mip_info_stage1
+        print(f"   {'Metrik':<22} {'MIP(1)':>10} {'MIP(2)':>10} {'Fark':>7} {'Gerçek':>10} {'MIP2-G':>8}")
+        print(f"   {'-'*72}")
+        print(f"   {'Toplam Kişi':<22} {s1['total_kisi']:>10} {mip_info['total_kisi']:>10} "
+              f"{mip_info['total_kisi']-s1['total_kisi']:>+7} {actual['kisi_total']:>10} "
+              f"{mip_info['total_kisi']-actual['kisi_total']:>+8}")
+        print(f"   {'Inhouse Kişi':<22} {s1['total_inhouse_kisi']:>10} {mip_info['total_inhouse_kisi']:>10} "
+              f"{mip_info['total_inhouse_kisi']-s1['total_inhouse_kisi']:>+7} {actual['kisi_in']:>10} "
+              f"{mip_info['total_inhouse_kisi']-actual['kisi_in']:>+8}")
+        print(f"   {'Outsource Kişi':<22} {s1['total_outsource_kisi']:>10} {mip_info['total_outsource_kisi']:>10} "
+              f"{mip_info['total_outsource_kisi']-s1['total_outsource_kisi']:>+7} {actual['kisi_out']:>10} "
+              f"{mip_info['total_outsource_kisi']-actual['kisi_out']:>+8}")
+        if mip_info.get('total_part_time_kisi', 0) > 0:
+            print(f"   {'Part-time Kişi':<22} {s1['total_part_time_kisi']:>10} {mip_info['total_part_time_kisi']:>10} "
+                  f"{'-':>7} {'-':>10} {'-':>8}")
+        print(f"   {'Outsource %':<22} {s1['outsource_ratio']:>9.1%} {mip_info['outsource_ratio']:>10.1%} "
+              f"{'':>7} {actual['outsource_ratio']:>9.1%} {'':>8}")
+        print(f"   {'Aktif Shift':<22} {len([s for s,c in s1['assignments'].items() if c>0]):>10} "
+              f"{len([s for s,c in mip_info['assignments'].items() if c>0]):>10}")
+    else:
+        print(f"   {'Metrik':<25} {'MIP':>10} {'Gerçek':>10} {'Fark':>10}")
+        print(f"   {'-'*55}")
+        print(f"   {'Toplam Kişi':<25} {mip_info['total_kisi']:>10} {actual['kisi_total']:>10} "
+              f"{mip_info['total_kisi'] - actual['kisi_total']:>+10}")
+        print(f"   {'Inhouse Kişi':<25} {mip_info['total_inhouse_kisi']:>10} {actual['kisi_in']:>10} "
+              f"{mip_info['total_inhouse_kisi'] - actual['kisi_in']:>+10}")
+        print(f"   {'Outsource Kişi':<25} {mip_info['total_outsource_kisi']:>10} {actual['kisi_out']:>10} "
+              f"{mip_info['total_outsource_kisi'] - actual['kisi_out']:>+10}")
+        if mip_info.get('total_part_time_kisi', 0) > 0:
+            print(f"   {'Part-time Kişi':<25} {mip_info['total_part_time_kisi']:>10} {'-':>10} {'-':>10}")
+        print(f"   {'Outsource %':<25} {mip_info['outsource_ratio']:>9.1%} {actual['outsource_ratio']:>9.1%}")
+        print(f"   {'Aktif Shift Sayısı':<25} {len(mip_info['assignments']):>10}")
+
+    # EŞZAMANLI PEAK
+    if has_s1:
+        m1_peak = max(mip_info_stage1['mip_by_slot'].values()) if mip_info_stage1['mip_by_slot'] else 0
+        print(f"\n📊 EŞZAMANLI PEAK:")
+        print(f"   Erlang: {e_peak}  |  MIP1: {m1_peak}  |  MIP2: {m_peak}  |  Gerçek: {a_peak}")
+    else:
+        print(f"\n📊 EŞZAMANLI PEAK:")
+        print(f"   Erlang: {e_peak}  |  MIP: {m_peak}  |  Gerçek: {a_peak}")
+
+    # --- V3: Balans Penalty Raporu ---
+    balance_result = mip_info.get('balance_result', {})
+    if balance_result:
+        print(f"\n⚖️  BALANS PENALTY (pencere bazlı denge):")
+        print(f"   {'Pencere':<15} {'Inhouse':>8} {'Outsource':>10} {'Fark':>8} {'|Fark|':>8} {'Penalty':>10}")
+        print(f"   {'-'*65}")
+        for win_name, br in balance_result.items():
+            print(f"   {win_name:<15} {br['inhouse']:>8} {br['outsource']:>10} "
+                  f"{br['diff']:>+8} {br['abs_diff']:>8} {br['penalty_cost']:>10.1f}")
+
+    # Erken saat raporu
+    early_starts = mip_info.get('early_starts', {})
+    early_total = mip_info.get('early_total', 0)
+    early_penalty_val = mip_info.get('early_penalty', 0)
+
+    if early_starts:
+        print(f"\n⏰ ERKEN SAAT BAŞLANGIÇLARI - {label.upper()}:")
+        print(f"   {'Shift':<25} {'Saat':<8} {'Kişi':>6} {'Çarpan':>8} {'Penalty':>10}")
+        print(f"   {'-'*60}")
+        for s, info in sorted(early_starts.items(), key=lambda x: x[1]['start']):
+            print(f"   {s:<25} {info['start']:<8} {info['count']:>6} {info['multiplier']:>7.1f}x {info['penalty']:>10.2f}")
+        print(f"   {'-'*60}")
+        print(f"   {'TOPLAM':<25} {'':>8} {early_total:>6} {'':>8} {early_penalty_val:>10.2f}")
+
+    # Küçük atama raporu
+    if mip_info.get('small_shift_penalty_enabled', False):
+        small_detail = mip_info.get('small_shifts_detail', [])
+        total_shifts = len(mip_info['assignments'])
+        ssp_penalty = config['queue_configs'][queue].get('small_shift_penalty', {}).get('penalty', 3.0)
+
+        if small_detail:
+            print(f"\n🔧 KÜÇÜK ATAMALI SHIFT'LER (≤5 kişi):")
+            print(f"   {'Shift':<25} {'Saat':<8} {'Tip':<10} {'Kişi':>6}")
+            print(f"   {'-'*55}")
+            for sd in sorted(small_detail, key=lambda x: x['start']):
+                print(f"   {sd['shift']:<25} {sd['start']:<8} {sd['company']:<10} {sd['count']:>6}")
+
+    # RR penalty raporu
+    if mip_info.get('rr_penalty_enabled', False):
+        rr_excess = mip_info.get('rr_excess_by_slot', {})
+        rr_peak = mip_info.get('rr_peak_slots', set())
+        rr_total_exc = mip_info.get('rr_total_excess', 0)
+        rr_total_cost = mip_info.get('rr_total_penalty_cost', 0)
+        rr_n_penalized = mip_info.get('rr_penalized_slots', 0)
+
+        print(f"\n📈 RR PENALTY:")
+        print(f"   Peak slotlar (muaf): {len(rr_peak)} | Cezalı: {rr_n_penalized} | "
+              f"Fazla: {rr_total_exc} | Penalty: {rr_total_cost:.1f}")
+
+        if rr_excess:
+            sorted_excess = sorted(rr_excess.items(), key=lambda x: x[1], reverse=True)[:10]
+            print(f"   {'Slot':<8} {'Erlang':>7} {'MIP':>7} {'Fazla':>7} {'Penalty':>10}")
+            print(f"   {'-'*45}")
+            for slot, exc in sorted_excess:
+                e = erlang_by_slot.get(slot, 0)
+                m = mip_info['mip_by_slot'].get(slot, 0)
+                pen = exc * config['queue_configs'][queue].get('rr_penalty', {}).get('penalty_per_person', 5.0)
+                print(f"   {slot:<8} {e:>7} {m:>7} {exc:>+7} {pen:>10.1f}")
+
+    # Slot cap raporu
+    if mip_info.get('sc_penalized_slots', 0) > 0:
+        print(f"\n📊 SLOT CAP:")
+        print(f"   İhlal: {mip_info['sc_penalized_slots']} slot | "
+              f"Fazla: {mip_info['sc_total_excess']} | Penalty: {mip_info['sc_total_penalty_cost']:.1f}")
+
+    # Ek kapasite analizi
+    if weighted_aht_by_slot:
+        dis_arama_kisi = 0
+        dis_arama_cagri = 0
+        atil_kisi = 0
+        atil_cagri = 0
+
+        for slot in SLOTS_30:
+            e = erlang_by_slot.get(slot, 0)
+            m = mip_info['mip_by_slot'].get(slot, 0)
+            w_aht = weighted_aht_by_slot.get(slot, 0)
+            fazla = m - e
+            if fazla <= 0:
+                continue
+            fazla_cagri = fazla * (1800 / w_aht) if w_aht > 0 else 0
+            h = int(slot[:2])
+            if 9 <= h < 20:
+                dis_arama_kisi += fazla
+                dis_arama_cagri += fazla_cagri
+            else:
+                atil_kisi += fazla
+                atil_cagri += fazla_cagri
+
+        print(f"\n📊 EK KAPASİTE ANALİZİ:")
+        print(f"   {'Metrik':<35} {'Kişi-Slot':>12} {'Çağrı Kap.':>12}")
+        print(f"   {'-'*60}")
+        print(f"   {'Dış Arama (09:00-20:00)':<35} {dis_arama_kisi:>12} {dis_arama_cagri:>11,.0f}")
+        print(f"   {'Atıl (20:00-09:00)':<35} {atil_kisi:>12} {atil_cagri:>11,.0f}")
+
+    # Shift atamaları
+    ccfg = config['company']
+    inhouse_value = ccfg['inhouse']['shift_value']
+    sc = mip_info['shift_coverage']
+    mcfg = config['queue_configs'][queue]['mip']
+
+    print(f"\n📋 SHIFT ATAMALARI ({len(mip_info['assignments'])} shift):")
+    if has_s1:
+        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'MIP(1)':>7} {'MIP(2)':>7} {'Fark':>6} {'Maliyet':>10}")
+        print(f"   {'-'*78}")
+        s1_assigns = mip_info_stage1['assignments']
+    else:
+        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'Kişi':>6} {'Maliyet':>10}")
+        print(f"   {'-'*65}")
+        s1_assigns = None
+
+    for s, cnt in sorted(mip_info['assignments'].items(), key=lambda x: sc[x[0]]['start']):
+        info_s = sc[s]
+        if info_s['company'] == 'part_time':
+            base_cost = mcfg['cost_inhouse']
+            mult = 1.0
+        elif info_s['company'] == inhouse_value:
+            base_cost = mcfg['cost_inhouse']
+            mult = get_time_cost_multiplier(queue, 'inhouse', info_s['start'], config)
+        else:
+            base_cost = mcfg['cost_outsource']
+            mult = get_time_cost_multiplier(queue, 'outsource', info_s['start'], config)
+
+        final_cost = base_cost * mult * cnt
+        mult_str = f" ({mult}x)" if mult != 1.0 else ""
+
+        if s1_assigns is not None:
+            cnt1 = s1_assigns.get(s, 0)
+            diff = cnt - cnt1
+            diff_str = f"{diff:+d}" if diff != 0 else "-"
+            mark = " ←" if diff > 0 else "  "
+            print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} "
+                  f"{cnt1:>7} {cnt:>7} {diff_str:>6}{mark} {final_cost:>8.2f}{mult_str}")
+        else:
+            print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} {cnt:>6} {final_cost:>9.2f}{mult_str}")
+
+    in_kisi = mip_info['total_inhouse_kisi']
+    out_kisi = mip_info['total_outsource_kisi']
+    pt_kisi = mip_info.get('total_part_time_kisi', 0)
+    print(f"   {'-'*65}")
+    print(f"   {'TOPLAM':<22} {'':>12} {'inhouse':>10} {in_kisi:>6}")
+    print(f"   {'':>22} {'':>12} {'outsource':>10} {out_kisi:>6}")
+    if pt_kisi > 0:
+        print(f"   {'':>22} {'':>12} {'part_time':>10} {pt_kisi:>6}")
+    print(f"   {'':>22} {'':>12} {'TOPLAM':>10} {in_kisi + out_kisi + pt_kisi:>6}")
+
+    # Slot bazlı detay
+    peak_thr = config.get('report', {}).get('peak_threshold', 0.70)
+    if calls_by_slot:
+        max_calls = max(calls_by_slot.values()) if calls_by_slot else 0
+        peak_slots = {s for s, c in calls_by_slot.items() if c >= max_calls * peak_thr}
+    else:
+        max_erlang = max(erlang_by_slot.values()) if erlang_by_slot else 0
+        peak_slots = {s for s, e in erlang_by_slot.items() if e >= max_erlang * peak_thr}
+
+    in_only_by_slot = mip_info.get('inhouse_min_by_slot', {})
+    out_only_by_slot = mip_info.get('outsource_min_by_slot', {})
+    has_subq = bool(in_only_by_slot or out_only_by_slot)
+    s1_slot = mip_info_stage1['mip_by_slot'] if has_s1 else {}
+    s1_slot_in = mip_info_stage1['mip_in_by_slot'] if has_s1 else {}
+    s1_slot_out = mip_info_stage1.get('mip_out_by_slot', {}) if has_s1 else {}
+
+    print(f"\n📋 SLOT BAZLI (eşzamanlı çalışan)  * = peak slot")
+    if has_s1:
+        if has_subq:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+                  f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
+                  f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'':>6} {'':>6} {'':>6}  {'':>7}")
+            sep_len = 148
+        else:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+                  f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
+                  f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'':>6} {'':>6} {'':>6}  {'':>7}")
+            sep_len = 134
+        print(f"   {'-'*sep_len}")
+    else:
+        if has_subq:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+                  f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
+            sep_len = 115
+        else:
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+                  f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
+            print(f"   {'':>8} {'':>6} {'':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
+                  f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
+            sep_len = 106
+        print(f"   {'-'*sep_len}")
+
+    e_slot_sum = m_slot_sum = a_slot_sum = m1_slot_sum = 0
+
+    for slot in SLOTS_30:
+        e = erlang_by_slot.get(slot, 0)
+        m = mip_info['mip_by_slot'].get(slot, 0)
+        mi = mip_info['mip_in_by_slot'].get(slot, 0)
+        mo = mip_info['mip_out_by_slot'].get(slot, 0)
+        at = actual['slot_total'].get(slot, 0)
+        ai = actual['slot_in'].get(slot, 0)
+        ao = actual['slot_out'].get(slot, 0)
+
+        e_slot_sum += e
+        m_slot_sum += m
+        a_slot_sum += at
+
+        if has_s1:
+            m1 = s1_slot.get(slot, 0)
+            m1i = s1_slot_in.get(slot, 0)
+            m1o = s1_slot_out.get(slot, 0)
+            m1_slot_sum += m1
+        else:
+            m1 = m1i = m1o = 0
+
+        if e > 0 or m > 0 or at > 0:
+            w_aht = weighted_aht_by_slot.get(slot, 0) if weighted_aht_by_slot else 0
+            fark = m - at
+            peak_mark = "*" if slot in peak_slots else " "
+            e_fark = m - e
+
+            if has_s1:
+                rr1_v = (m1 / e) if e > 0 else 0
+                rr2_v = (m / e) if e > 0 else 0
+                rr1_str = f"{rr1_v:.0%}" if e > 0 else "-"
+                rr2_arrow = "↑" if e > 0 and rr2_v > rr1_v else " "
+                rr2_str = f"{rr2_v:.0%}{rr2_arrow}" if e > 0 else "- "
+                if has_subq:
+                    in_min = in_only_by_slot.get(slot, 0)
+                    out_min = out_only_by_slot.get(slot, 0)
+                    in_min_str = str(in_min) if in_min > 0 else "-"
+                    out_min_str = str(out_min) if out_min > 0 else "-"
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                          f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
+                          f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
+                else:
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                          f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
+                          f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
+            else:
+                rr_str = f"{m/e:.0%}" if e > 0 else "-"
+                if has_subq:
+                    in_min = in_only_by_slot.get(slot, 0)
+                    out_min = out_only_by_slot.get(slot, 0)
+                    in_min_str = str(in_min) if in_min > 0 else "-"
+                    out_min_str = str(out_min) if out_min > 0 else "-"
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                          f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
+                else:
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                          f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
+
+    sep = '-' * sep_len
+    print(f"   {sep}")
+    e_m_fark = m_slot_sum - e_slot_sum
+    if has_s1:
+        trr1_v = (m1_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
+        trr2_v = (m_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
+        trr1 = f"{trr1_v:.0%}" if e_slot_sum > 0 else "-"
+        trr2 = f"{trr2_v:.0%}" if e_slot_sum > 0 else "-"
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+              f"{m1_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum:>7} {'':>7} {'':>7}  "
+              f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {trr1:>6} {trr2:>6}  {e_m_fark:>+7}")
+    else:
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+              f"{m_slot_sum:>7} {'':>7} {'':>7}  "
+              f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {'':>7} {e_m_fark:>+7}")
+
+    legend = "Fark = MIP-Gerçek  |  RR = MIP/Erlang  |  E.Fark = MIP-Erlang  |  * = Peak"
+    if has_s1:
+        legend = "MIP(1)=min  |  MIP(2)=MIP(1)+surplus  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  ↑ = RR2>RR1  |  " + legend
+    print(f"\n   {legend}")
+
+    # Slot bazlı kapasite raporu (30dk)
+    hr_cfg = config['queue_configs'][queue].get('hourly_report', {})
+    if hr_cfg and weighted_aht_by_slot and calls_by_slot:
+        rapor_etkisi_cfg = hr_cfg.get('rapor_etkisi', {})
+        kap_kaybi_cfg = hr_cfg.get('kapasite_kaybi', {})
+        cagri_adedi_cfg = hr_cfg.get('cagri_adedi', {})
+
+        print(f"\n📋 SLOT BAZLI KAPASİTE RAPORU (30dk)")
+        if has_s1:
+            print(f"   {'Slot':<6} {'Çağrı':>6} {'Erlng':>6} "
+                  f"{'MIP1':>5} {'MIP2':>5} {'Fark':>5}  "
+                  f"{'R.Et1':>5} {'R.Et2':>5}  "
+                  f"{'K.Ka1':>5} {'K.Ka2':>5}  "
+                  f"{'NMT1':>5} {'NMT2':>5} {'FNMT':>5}  "
+                  f"{'Ç.Kp1':>6} {'Ç.Kp2':>6}  "
+                  f"{'KpRR1':>6} {'KpRR2':>6}")
+            print(f"   {'-'*115}")
+        else:
+            print(f"   {'Slot':<7} {'Çağrı':>7} {'Erlang':>7} {'Kap.':>6} "
+                  f"{'R.Etk':>6} {'K.Kay':>6} {'NetMT':>6} {'Ç.Kap':>7} {'Kap_RR':>7}")
+            print(f"   {'-'*70}")
+
+        t_cagri = t_erl = 0
+        t_m1 = t_m2 = 0
+        t_re1 = t_re2 = 0
+        t_kk1 = t_kk2 = 0
+        t_nmt1 = t_nmt2 = 0
+        t_ck1 = t_ck2 = 0
+
+        for slot in SLOTS_30:
+            h = int(slot[:2])
+            cagri = int(calls_by_slot.get(slot, 0))
+            kap2 = mip_info['mip_by_slot'].get(slot, 0)
+            kap1 = mip_info_stage1['mip_by_slot'].get(slot, 0) if has_s1 else kap2
+            erl = erlang_by_slot.get(slot, 0)
+
+            if cagri == 0 and kap2 == 0:
+                continue
+
+            re_oran = rapor_etkisi_cfg.get(h, rapor_etkisi_cfg.get('default', 0))
+            kk_oran = kap_kaybi_cfg.get(h, kap_kaybi_cfg.get('default', 0))
+            ca = cagri_adedi_cfg.get(h, cagri_adedi_cfg.get('default', 15))
+
+            re1 = round(kap1 * re_oran)
+            kk1 = round(kap1 * kk_oran)
+            nmt1 = kap1 - re1 - kk1
+            ck1 = nmt1 * (ca / 2)
+            rr1 = ck1 / cagri if cagri > 0 else 0
+
+            re2 = round(kap2 * re_oran)
+            kk2 = round(kap2 * kk_oran)
+            nmt2 = kap2 - re2 - kk2
+            ck2 = nmt2 * (ca / 2)
+            rr2 = ck2 / cagri if cagri > 0 else 0
+
+            t_cagri += cagri; t_erl += erl
+            t_m1 += kap1; t_m2 += kap2
+            t_re1 += re1; t_re2 += re2
+            t_kk1 += kk1; t_kk2 += kk2
+            t_nmt1 += nmt1; t_nmt2 += nmt2
+            t_ck1 += ck1; t_ck2 += ck2
+
+            if has_s1:
+                arrow = "↑" if rr2 > rr1 else " "
+                warn = " ⚠" if rr2 < 1.0 and cagri > 0 else ""
+                print(f"   {slot:<6} {cagri:>6} {erl:>6} "
+                      f"{kap1:>5} {kap2:>5} {kap2-kap1:>+5}  "
+                      f"{re1:>5} {re2:>5}  "
+                      f"{kk1:>5} {kk2:>5}  "
+                      f"{nmt1:>5} {nmt2:>5} {nmt2-nmt1:>+5}  "
+                      f"{ck1:>6.0f} {ck2:>6.0f}  "
+                      f"{rr1:>5.0%} {rr2:>5.0%}{arrow}{warn}")
+            else:
+                warn = " ⚠" if rr2 < 1.0 and cagri > 0 else ""
+                print(f"   {slot:<7} {cagri:>7} {erl:>7} {kap2:>6} "
+                      f"{re2:>6} {kk2:>6} {nmt2:>6} {ck2:>7.0f} {rr2:>6.0%}{warn}")
+
+        if has_s1:
+            print(f"   {'-'*115}")
+            trr1 = t_ck1 / t_cagri if t_cagri > 0 else 0
+            trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
+            arrow = "↑" if trr2 > trr1 else " "
+            print(f"   {'TOPLAM':<6} {t_cagri:>6} {t_erl:>6} "
+                  f"{t_m1:>5} {t_m2:>5} {t_m2-t_m1:>+5}  "
+                  f"{t_re1:>5} {t_re2:>5}  "
+                  f"{t_kk1:>5} {t_kk2:>5}  "
+                  f"{t_nmt1:>5} {t_nmt2:>5} {t_nmt2-t_nmt1:>+5}  "
+                  f"{t_ck1:>6.0f} {t_ck2:>6.0f}  "
+                  f"{trr1:>5.0%} {trr2:>5.0%}{arrow}")
+            print(f"\n   Kap_RR = Çağrı_Kapasitesi / Gelen_Çağrı (MIP1 ve MIP2 ayrı hesap)  |  ↑ = KpRR2>KpRR1")
+        else:
+            print(f"   {'-'*70}")
+            trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
+            print(f"   {'TOPLAM':<7} {t_cagri:>7} {t_erl:>7} {t_m2:>6} "
+                  f"{t_re2:>6} {t_kk2:>6} {t_nmt2:>6} {t_ck2:>7.0f} {trr2:>6.0%}")
+
+
+# =============================================================================
+# 6. SURPLUS DAĞITIMI (V3 — hem inhouse hem outsource)
+# =============================================================================
+
+def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=True):
+    """
+    V3 surplus: hem inhouse hem outsource kadrosundan kalan kişileri dağıtır.
+    Pencere oranları (2/3 sabah, 1/3 akşam) uygulanır.
+    """
+    sd_cfg = config.get('surplus_distribution', {})
+    if not sd_cfg.get('enabled', False):
+        return mip_info
+
+    kadro_cfg = sd_cfg.get('total_kadro', {}).get(queue, {})
+    total_inhouse_kadro = kadro_cfg.get('inhouse', 0)
+    total_outsource_kadro = kadro_cfg.get('outsource', 0)
+
+    current_inhouse = mip_info['total_inhouse_kisi']
+    current_outsource = mip_info['total_outsource_kisi']
+
+    surplus_in = max(0, total_inhouse_kadro - current_inhouse)
+    surplus_out = max(0, total_outsource_kadro - current_outsource) if sd_cfg.get('outsource_enabled', True) else 0
+    total_surplus = surplus_in + surplus_out
+
+    if total_surplus <= 0:
+        if verbose:
+            print(f"   ℹ Surplus: fazla yok (in: {total_inhouse_kadro}-{current_inhouse}={surplus_in}, "
+                  f"out: {total_outsource_kadro}-{current_outsource}={surplus_out})")
+        return mip_info
+
+    ccfg = config['company']
+    inhouse_value = ccfg['inhouse']['shift_value']
+    outsource_value = ccfg['outsource']['shift_value']
+    shift_cov = mip_info['shift_coverage']
+    assignments = mip_info['assignments']
+
+    only_assigned = sd_cfg.get('only_assigned_shifts', True)
+    fallback = sd_cfg.get('fallback_all_inhouse', True)
+    method = sd_cfg.get('method', 'rr_first')
+    windows = sd_cfg.get('windows', [])
+
+    if not windows:
+        if verbose:
+            print(f"   ⚠ Surplus: pencere tanımı yok.")
+        return mip_info
+
+    inhouse_shifts = [s for s in shift_cov if shift_cov[s]['company'] == inhouse_value]
+    outsource_shifts = [s for s in shift_cov if shift_cov[s]['company'] == outsource_value]
+
+    if only_assigned:
+        eligible_in = [s for s in inhouse_shifts if assignments.get(s, 0) > 0]
+        eligible_out = [s for s in outsource_shifts if assignments.get(s, 0) > 0]
+    else:
+        eligible_in = inhouse_shifts
+        eligible_out = outsource_shifts
+
+    def _window_candidates(win, eligible):
+        return [s for s in eligible if win['start'] <= shift_cov[s]['start'] <= win['end']]
+
+    if verbose:
+        print(f"   ➕ Surplus V3: in={surplus_in}, out={surplus_out}, method={method}")
+
+    added_total = {}
+    local_mip_by_slot = dict(mip_info['mip_by_slot'])
+    by_window_log = {}
+
+    for company_label, surplus, eligible in [
+        ('inhouse', surplus_in, eligible_in),
+        ('outsource', surplus_out, eligible_out),
+    ]:
+        if surplus <= 0 or not eligible:
+            continue
+
+        win_cands = {win['name']: _window_candidates(win, eligible) for win in windows}
+
+        if all(len(c) == 0 for c in win_cands.values()):
+            if fallback and eligible:
+                windows_eff = [{'name': 'fallback', 'start': '00:00', 'end': '23:59', 'ratio': 1.0}]
+                win_cands = {'fallback': eligible}
+            else:
+                continue
+        else:
+            windows_eff = windows
+
+        active_windows = [w for w in windows_eff if win_cands.get(w['name'])]
+        active_ratio_sum = sum(w['ratio'] for w in active_windows)
+        if active_ratio_sum == 0:
+            continue
+
+        raw_shares = {w['name']: surplus * (w['ratio'] / active_ratio_sum) for w in active_windows}
+        floor_shares = {n: int(v) for n, v in raw_shares.items()}
+        leftover = surplus - sum(floor_shares.values())
+        fracs = sorted(((n, raw_shares[n] - floor_shares[n]) for n in floor_shares),
+                       key=lambda x: x[1], reverse=True)
+        for i in range(leftover):
+            floor_shares[fracs[i % len(fracs)][0]] += 1
+        window_shares = floor_shares
+
+        if verbose:
+            share_str = ", ".join(f"{w['name']}={window_shares[w['name']]}" for w in active_windows)
+            print(f"      [{company_label}] surplus={surplus}, pencereler: {share_str}")
+
+        for win in active_windows:
+            name = win['name']
+            share = window_shares[name]
+            if share <= 0:
+                continue
+            candidates = win_cands[name]
+            added_w, used_rr, used_prop = _allocate_within_pool(
+                share, candidates, shift_cov, erlang_by_slot,
+                assignments, local_mip_by_slot, method
+            )
+            for s, n in added_w.items():
+                added_total[s] = added_total.get(s, 0) + n
+            log_key = f"{company_label}_{name}"
+            by_window_log[log_key] = {
+                'company': company_label, 'share': share,
+                'rr_fix': used_rr, 'proportional': used_prop, 'added': added_w,
+            }
+
+    # mip_info güncelle
+    total_added = sum(added_total.values())
+    if total_added == 0:
+        return mip_info
+
+    for s, n in added_total.items():
+        if n > 0:
+            assignments[s] = assignments.get(s, 0) + n
+
+    in_all = [s for s in shift_cov if shift_cov[s]['company'] == inhouse_value]
+    out_all = [s for s in shift_cov if shift_cov[s]['company'] == outsource_value]
+
+    for slot in mip_info['mip_by_slot']:
+        mip_info['mip_by_slot'][slot] = sum(assignments.get(s, 0) for s in shift_cov if slot in shift_cov[s]['slots'])
+        mip_info['mip_in_by_slot'][slot] = sum(assignments.get(s, 0) for s in in_all if slot in shift_cov[s]['slots'])
+        mip_info['mip_out_by_slot'][slot] = sum(assignments.get(s, 0) for s in out_all if slot in shift_cov[s]['slots'])
+
+    added_in = sum(added_total.get(s, 0) for s in in_all)
+    added_out = sum(added_total.get(s, 0) for s in out_all)
+
+    mip_info['total_inhouse_kisi'] = current_inhouse + added_in
+    mip_info['total_outsource_kisi'] = current_outsource + added_out
+    mip_info['total_kisi'] = mip_info['total_inhouse_kisi'] + mip_info['total_outsource_kisi'] + mip_info.get('total_part_time_kisi', 0)
+    total_for_ratio = mip_info['total_inhouse_kisi'] + mip_info['total_outsource_kisi']
+    mip_info['outsource_ratio'] = mip_info['total_outsource_kisi'] / total_for_ratio if total_for_ratio > 0 else 0
+
+    mip_info['surplus_added'] = added_total
+    mip_info['surplus_total_added'] = total_added
+    mip_info['surplus_by_window'] = by_window_log
+
+    if verbose:
+        print(f"      ✓ Eklenen: {total_added} (in:{added_in}, out:{added_out}) → "
+              f"toplam in={mip_info['total_inhouse_kisi']}, out={mip_info['total_outsource_kisi']}, "
+              f"oran={mip_info['outsource_ratio']:.1%}")
+
+    return mip_info
+
+
+def _allocate_within_pool(share, candidates, shift_cov, erlang_by_slot,
+                          assignments, mip_by_slot_state, method):
+    added = {s: 0 for s in candidates}
+    remaining = share
+    used_rr = 0
+    used_prop = 0
+
+    if not candidates or share <= 0:
+        return added, used_rr, used_prop
+
+    if method == 'rr_first' and remaining > 0:
+        candidate_slots = set()
+        for s in candidates:
+            candidate_slots.update(shift_cov[s]['slots'])
+
+        def _open_deficits():
+            return {
+                slot: erlang_by_slot[slot] - mip_by_slot_state.get(slot, 0)
+                for slot in candidate_slots
+                if slot in erlang_by_slot
+                and erlang_by_slot[slot] - mip_by_slot_state.get(slot, 0) > 0
+            }
+
+        deficits = _open_deficits()
+        guard = 0
+        while remaining > 0 and deficits and guard < 10000:
+            guard += 1
+            best_shift = None
+            best_score = 0
+            for s in candidates:
+                score = sum(1 for slot in shift_cov[s]['slots'] if slot in deficits)
+                if score > best_score:
+                    best_score = score
+                    best_shift = s
+            if best_shift is None or best_score == 0:
+                break
+            added[best_shift] += 1
+            remaining -= 1
+            used_rr += 1
+            for slot in shift_cov[best_shift]['slots']:
+                mip_by_slot_state[slot] = mip_by_slot_state.get(slot, 0) + 1
+            deficits = _open_deficits()
+
+    if remaining > 0:
+        n = len(candidates)
+        base = remaining // n
+        extra = remaining - base * n
+        sorted_cands = sorted(candidates, key=lambda s: assignments.get(s, 0))
+        for i, s in enumerate(sorted_cands):
+            inc = base + (1 if i < extra else 0)
+            if inc > 0:
+                added[s] += inc
+                for slot in shift_cov[s]['slots']:
+                    mip_by_slot_state[slot] = mip_by_slot_state.get(slot, 0) + inc
+        used_prop += remaining
+
+    return added, used_rr, used_prop
+
+
+# =============================================================================
+# 6. SHIFT SAAT SINIFLANDIRMASI
+# =============================================================================
+
+def classify_shifts(df_shifts_queue, config=CONFIG):
+    ccfg = config['company']
+    scol = config['shift_columns']
+    inhouse_value = ccfg['inhouse']['shift_value']
+    outsource_value = ccfg['outsource']['shift_value']
+    in_starts = set()
+    out_starts = set()
+    for _, row in df_shifts_queue.iterrows():
+        start = str(row[scol['start']])[:5]
+        company = row[scol['company']]
+        if company == inhouse_value:
+            in_starts.add(start)
+        elif company == outsource_value:
+            out_starts.add(start)
+    return {
+        'inhouse_only': sorted(in_starts - out_starts),
+        'outsource_only': sorted(out_starts - in_starts),
+        'kesisim': sorted(in_starts & out_starts),
+    }
+
+
+def print_shift_classification(classification, label):
+    print(f"\n📋 SHIFT SAAT SINIFLANDIRMASI ({label}):")
+    io = classification.get('inhouse_only', [])
+    oo = classification.get('outsource_only', [])
+    ks = classification.get('kesisim', [])
+    _fmt = lambda lst: ", ".join(lst) if lst else "(yok)"
+    print(f"   Inhouse-only  ({len(io):>2}): {_fmt(io)}")
+    print(f"   Outsource-only({len(oo):>2}): {_fmt(oo)}")
+    print(f"   Kesişim       ({len(ks):>2}): {_fmt(ks)}")
+
+
+# =============================================================================
+# 7. SUBQUEUE MİNİMUM HESAPLAMA
+# =============================================================================
+
+def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, config):
+    target_date = pd.to_datetime(target_date)
+    df_day = df_calls_30[df_calls_30['data_date'] == target_date]
+    if len(df_day) == 0:
+        return {}, {}
+
+    inhouse_min_by_slot = {}
+    outsource_min_by_slot = {}
+
+    for item in config.get('inhouse_only_subqueues', {}).get(queue, []):
+        sq_name = item if isinstance(item, str) else item['sub_queue']
+        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
+        sq_col = f"{sq_name}_calls"
+        total_col = f"{queue}_total"
+        for _, row in df_day.iterrows():
+            slot = row['slot_30']
+            erlang = erlang_by_slot.get(slot, 0)
+            if erlang <= 0:
+                continue
+            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
+            total_calls = row.get(total_col, 0) if total_col in row.index else 0
+            if total_calls > 0 and sq_calls > 0:
+                call_ratio = sq_calls / total_calls
+                min_need = math.ceil(erlang * call_ratio * min_ratio)
+                inhouse_min_by_slot[slot] = inhouse_min_by_slot.get(slot, 0) + min_need
+
+    for item in config.get('outsource_only_subqueues', {}).get(queue, []):
+        sq_name = item if isinstance(item, str) else item['sub_queue']
+        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
+        hours = None if isinstance(item, str) else item.get('hours')
+        sq_col = f"{sq_name}_calls"
+        total_col = f"{queue}_total"
+        for _, row in df_day.iterrows():
+            slot = row['slot_30']
+            erlang = erlang_by_slot.get(slot, 0)
+            if erlang <= 0:
+                continue
+            if hours and not is_slot_in_shift(slot, hours['start'], hours['end']):
+                continue
+            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
+            total_calls = row.get(total_col, 0) if total_col in row.index else 0
+            if total_calls > 0 and sq_calls > 0:
+                call_ratio = sq_calls / total_calls
+                min_need = math.ceil(erlang * call_ratio * min_ratio)
+                outsource_min_by_slot[slot] = outsource_min_by_slot.get(slot, 0) + min_need
+
+    return inhouse_min_by_slot, outsource_min_by_slot
+
+
+# =============================================================================
+# 8. ANA AKIŞ
+# =============================================================================
+
+def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
+                       config=CONFIG, verbose=True, adjusted_erlang=None):
+    """V3 akışı — SADECE HAFTAİÇİ."""
+    target_date = pd.to_datetime(target_date)
+    date_str = target_date.strftime('%Y-%m-%d')
+
+    if target_date.weekday() >= 5:
+        raise ValueError(f"V3 sadece haftaiçi. {date_str} için v10.9 kullanın.")
+
+    if queue not in config.get('queue_configs', {}):
+        raise ValueError(f"'{queue}' için queue_configs bulunamadı.")
+
+    label = config['queues'][queue]['label']
+    df_shifts_queue = df_shifts.get(queue) if isinstance(df_shifts, dict) else df_shifts
+    if df_shifts_queue is None:
+        raise ValueError(f"'{queue}' için shift verisi bulunamadı.")
+
+    if verbose:
+        print(f"\n{'='*95}")
+        print(f"PİPELİNE V3 WEEKDAY: {label} ({queue.upper()}) - {date_str} [Haftaiçi]")
+        print(f"{'='*95}")
+
+    classification = classify_shifts(df_shifts_queue, config)
+    if verbose:
+        print_shift_classification(classification, label)
+
+    if verbose: print(f"\n[1/4] Veri hazırlama...")
+    df_calls_30 = prepare_calls_30(df_calls, config)
+
+    if verbose: print(f"[2/4] Erlang hesaplama...")
+    df_erlang = calculate_erlang_all(df_calls_30, config)
+    df_erlang_day = df_erlang[(df_erlang['date'] == target_date) & (df_erlang['queue'] == queue)].copy()
+
+    erlang_by_slot = dict(zip(df_erlang_day['slot'], df_erlang_day['erlang_need']))
+    weighted_aht_by_slot = dict(zip(df_erlang_day['slot'], df_erlang_day['weighted_aht']))
+
+    if adjusted_erlang is not None:
+        original_total = sum(erlang_by_slot.values())
+        erlang_by_slot = adjusted_erlang
+        if verbose:
+            print(f"   🔄 Cross-queue aktarım: {original_total} → {sum(erlang_by_slot.values())}")
+
+    if verbose:
+        e_total = sum(erlang_by_slot.values())
+        e_peak = max(erlang_by_slot.values()) if erlang_by_slot else 0
+        print(f"   Erlang: toplam={e_total}, peak={e_peak}")
+
+    inhouse_min_by_slot, outsource_min_by_slot = _build_subqueue_min_slots(
+        df_calls_30, queue, target_date, erlang_by_slot, config)
+
+    if verbose: print(f"[3/4] MIP optimizasyon (V3: balans penalty)...")
+    assignments, mip_info = optimize_queue(
+        erlang_by_slot, df_shifts_queue, queue,
+        target_date=target_date,
+        inhouse_min_by_slot=inhouse_min_by_slot,
+        outsource_min_by_slot=outsource_min_by_slot,
+        config=config)
+
+    if assignments is None:
+        print(f"   ⚠ Çözüm bulunamadı: {mip_info}")
+        return None
+
+    if verbose:
+        print(f"   MIP(1): {mip_info['total_kisi']} kişi "
+              f"(In:{mip_info['total_inhouse_kisi']}, Out:{mip_info['total_outsource_kisi']}, "
+              f"Oran:{mip_info['outsource_ratio']:.1%})")
+
+    mip_info_stage1 = None
+    if config.get('surplus_distribution', {}).get('enabled', False):
+        mip_info_stage1 = copy.deepcopy(mip_info)
+        distribute_surplus(mip_info, queue, erlang_by_slot, config=config, verbose=verbose)
+
+    if verbose: print(f"[4/4] Rapor...")
+    actual = get_actual_summary(df_actual, target_date, queue, config)
+
+    df_calls_30_day = df_calls_30[df_calls_30['data_date'] == target_date]
+    calls_by_slot = {}
+    if f"{queue}_total" in df_calls_30_day.columns:
+        calls_by_slot = dict(zip(df_calls_30_day['slot_30'], df_calls_30_day[f"{queue}_total"]))
+    total_calls_day = int(sum(calls_by_slot.values())) if calls_by_slot else 0
+
+    print_queue_report(target_date, queue, erlang_by_slot, mip_info, actual,
+                       weighted_aht_by_slot=weighted_aht_by_slot,
+                       total_calls_day=total_calls_day,
+                       calls_by_slot=calls_by_slot,
+                       mip_info_stage1=mip_info_stage1,
+                       config=config)
+
+    return {
+        'date': target_date, 'queue': queue, 'label': label,
+        'day_type': 'haftalici',
+        'erlang_by_slot': erlang_by_slot,
+        'weighted_aht_by_slot': weighted_aht_by_slot,
+        'mip_info': mip_info, 'mip_info_stage1': mip_info_stage1,
+        'actual': actual,
+        'total_calls_day': total_calls_day, 'calls_by_slot': calls_by_slot,
+        'inhouse_min_by_slot': inhouse_min_by_slot,
+        'outsource_min_by_slot': outsource_min_by_slot,
+        'shift_classification': classification,
+    }
+
+
+def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
+    """V3 — tüm kuyruklar, cross-queue aktarım ile."""
+    target_date_chk = pd.to_datetime(target_date)
+    if target_date_chk.weekday() >= 5:
+        raise ValueError(f"V3 sadece haftaiçi. v10.9 kullanın.")
+
+    cq_cfg = config.get('cross_queue', {})
+    cq_enabled = cq_cfg.get('enabled', False)
+    donor_queues = cq_cfg.get('donors', [])
+    receiver_queue = cq_cfg.get('receiver', 'kitle')
+
+    results = {}
+
+    if cq_enabled and donor_queues:
+        # Faz 1: Donor kuyruklar için Erlang + MIP
+        df_calls_30 = prepare_calls_30(df_calls, config)
+        df_erlang = calculate_erlang_all(df_calls_30, config)
+
+        all_erlang = {}
+        for queue in config['queues']:
+            df_eq = df_erlang[(df_erlang['date'] == target_date_chk) & (df_erlang['queue'] == queue)]
+            all_erlang[queue] = dict(zip(df_eq['slot'], df_eq['erlang_need']))
+
+        donor_mip = {}
+        for dq in donor_queues:
+            if dq not in config['queues']:
+                continue
+            result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, dq,
+                                        config=config, verbose=False)
+            if result:
+                donor_mip[dq] = result['mip_info']
+                results[dq] = result
+
+        adjusted_receiver = None
+        if donor_mip and receiver_queue in all_erlang:
+            adjusted_erlang, _ = apply_cross_queue_transfer(all_erlang, donor_mip, config)
+            adjusted_receiver = adjusted_erlang.get(receiver_queue)
+
+        for queue in config['queues']:
+            if queue in results:
+                continue
+            adj = adjusted_receiver if queue == receiver_queue else None
+            result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
+                                        config=config, adjusted_erlang=adj)
+            if result:
+                results[queue] = result
+    else:
+        for queue in config['queues']:
+            result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue, config=config)
+            if result:
+                results[queue] = result
+
+    # Toplam rapor
+    target_date = pd.to_datetime(target_date)
+    print(f"\n{'='*95}")
+    print(f"TÜM KUYRUKLAR - {target_date.strftime('%Y-%m-%d')} [Haftaiçi V3]")
+    print(f"{'='*95}")
+    print(f"{'Kuyruk':<12} {'MIP':>8} {'Grç':>8} {'Fark':>6} "
+          f"{'In':>6} {'Out':>6} {'PT':>5} {'MIP%':>7} {'Grç%':>7} {'Shift':>6}")
+    print(f"{'-'*77}")
+
+    for q, r in results.items():
+        mi = r['mip_info']; a = r['actual']
+        fark = mi['total_kisi'] - a['kisi_total']
+        pt = mi.get('total_part_time_kisi', 0)
+        print(f"{r['label']:<12} {mi['total_kisi']:>8} {a['kisi_total']:>8} {fark:>+6} "
+              f"{mi['total_inhouse_kisi']:>6} {mi['total_outsource_kisi']:>6} {pt:>5} "
+              f"{mi['outsource_ratio']:>6.1%} {a['outsource_ratio']:>6.1%} {len(mi['assignments']):>6}")
+
+    t_mip = sum(r['mip_info']['total_kisi'] for r in results.values())
+    t_grc = sum(r['actual']['kisi_total'] for r in results.values())
+    t_in = sum(r['mip_info']['total_inhouse_kisi'] for r in results.values())
+    t_out = sum(r['mip_info']['total_outsource_kisi'] for r in results.values())
+    t_out_pct = t_out / t_mip if t_mip > 0 else 0
+
+    print(f"{'-'*77}")
+    print(f"{'TOPLAM':<12} {t_mip:>8} {t_grc:>8} {t_mip-t_grc:>+6} "
+          f"{t_in:>6} {t_out:>6} {'':>5} {t_out_pct:>6.1%}")
+
+    return results
