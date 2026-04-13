@@ -1,15 +1,3 @@
-# V3: Overflow ayarları
-'overflow': {
-    'donors': ['gold', 'kurumsal'],   # fazlalığını kitleye veren kuyruklar
-    'receiver': 'kitle',               # overflow alan kuyruk
-},
-
-
-from actual_pipeline_v3_weekday import *
-
-results = run_all_queues(df_calls, df_actual, df_shifts_dict, '2025-02-17', config=CONFIG)
-
-
 # =============================================================================
 # KUYRUK BAZLI VARDIYA PİPELİNE - ACTUAL V3 (WEEKDAY)
 # =============================================================================
@@ -585,11 +573,15 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
                 if covering_out:
                     prob += lpSum([x[s] for s in covering_out]) >= min_out
 
-    # ---- KADRO TAVANI ----
+    # ---- KADRO TAVANI (hard constraint) ----
     kadro_cfg = config.get('surplus_distribution', {}).get('total_kadro', {}).get(queue, {})
     kadro_in = kadro_cfg.get('inhouse', 0)
     if kadro_in > 0 and in_shifts:
         prob += lpSum([x[s] for s in in_shifts]) <= kadro_in
+
+    kadro_out = kadro_cfg.get('outsource', 0)
+    if kadro_out > 0 and out_shifts:
+        prob += lpSum([x[s] for s in out_shifts]) <= kadro_out
 
     # ---- START SMOOTHING ----
     sm_cfg = qconfigs.get('start_smoothing', {})
@@ -862,12 +854,28 @@ def distribute_surplus(mip_info, queue, erlang_by_slot, config=CONFIG, verbose=T
         return mip_info
 
     current_inhouse = mip_info['total_inhouse_kisi']
-    surplus = total_inhouse_kadro - current_inhouse
+    current_outsource = mip_info.get('total_outsource_kisi', 0)
+    total_outsource_kadro = kadro_cfg.get('outsource', 0)
+
+    # Inhouse surplus hesabı
+    surplus_inhouse = total_inhouse_kadro - current_inhouse
+
+    # Toplam kadro kontrolü: inhouse + outsource toplamı aşmamalı
+    if total_outsource_kadro > 0:
+        max_total = total_inhouse_kadro + total_outsource_kadro
+        current_total = current_inhouse + current_outsource
+        max_surplus_by_total = max_total - current_total
+        surplus = min(surplus_inhouse, max_surplus_by_total)
+    else:
+        surplus = surplus_inhouse
+
+    surplus = max(0, surplus)
 
     if surplus <= 0:
         if verbose:
-            print(f"   ℹ Surplus: kadro={total_inhouse_kadro}, MIP inhouse={current_inhouse} → "
-                  f"fazla yok ({surplus})")
+            print(f"   ℹ Surplus: kadro_in={total_inhouse_kadro}, kadro_out={total_outsource_kadro}, "
+                  f"MIP in={current_inhouse}, MIP out={current_outsource} → "
+                  f"fazla yok (in_surplus={surplus_inhouse}, toplam_limit={max_surplus_by_total if total_outsource_kadro > 0 else 'N/A'})")
         return mip_info
 
     ccfg = config['company']
