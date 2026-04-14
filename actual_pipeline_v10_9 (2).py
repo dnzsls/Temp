@@ -853,7 +853,8 @@ def get_actual_summary(df_actual, date, queue, config=CONFIG):
 
 def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                        weighted_aht_by_slot=None, total_calls_day=0,
-                       calls_by_slot=None, mip_info_stage1=None, config=CONFIG):
+                       calls_by_slot=None, mip_info_stage1=None,
+                       erlang_by_slot_original=None, config=CONFIG):
 
     label = config['queues'][queue]['label']
     date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
@@ -1074,27 +1075,36 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     s1_slot_out = mip_info_stage1.get('mip_out_by_slot', {}) if has_s1 else {}
 
     print(f"\n📋 SLOT BAZLI (eşzamanlı çalışan)  * = peak slot")
+
+    # Cross-queue düşümü aktif mi? (orijinal Erlang verildiyse ve fark varsa)
+    has_xq = (erlang_by_slot_original is not None
+              and any(erlang_by_slot_original.get(s, 0) != erlang_by_slot.get(s, 0)
+                      for s in SLOTS_30))
+    xq_header = f" {'E_orj':>6} {'XQ':>5} " if has_xq else ""
+    xq_pad = f" {'':>6} {'':>5} " if has_xq else ""
+    xq_extra = 13 if has_xq else 0
+
     if has_s1:
         if has_subq:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{xq_header}{'InMin':>6} {'OutMin':>7}  "
                   f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
                   f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{xq_pad}{'':>6} {'':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'':>6} {'':>6} {'':>6}  {'':>7}")
-            sep_len = 148
+            sep_len = 148 + xq_extra
         else:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{xq_header} "
                   f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
                   f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{xq_pad} "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'':>6} {'':>6} {'':>6}  {'':>7}")
-            sep_len = 134
+            sep_len = 134 + xq_extra
         print(f"   {'-'*sep_len}")
     else:
         if has_subq:
@@ -1142,6 +1152,14 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
             peak_mark = "*" if slot in peak_slots else " "
             e_fark = m - e
 
+            # XQ bilgisi (cross-queue düşümü)
+            e_orj = erlang_by_slot_original.get(slot, 0) if erlang_by_slot_original else e
+            xq_red = e_orj - e
+            if has_xq:
+                xq_cell = f" {e_orj:>6} {xq_red:>5} " if xq_red != 0 else f" {e_orj:>6} {'':>5} "
+            else:
+                xq_cell = ""
+
             if has_s1:
                 rr1_v = (m1 / e) if e > 0 else 0
                 rr2_v = (m / e) if e > 0 else 0
@@ -1153,11 +1171,11 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                     out_min = out_only_by_slot.get(slot, 0)
                     in_min_str = str(in_min) if in_min > 0 else "-"
                     out_min_str = str(out_min) if out_min > 0 else "-"
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{xq_cell}{in_min_str:>6} {out_min_str:>7}  "
                           f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
                           f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
                 else:
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{xq_cell} "
                           f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
                           f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
             else:
@@ -1192,6 +1210,8 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     legend = "Fark = MIP-Gerçek  |  RR = MIP/Erlang  |  E.Fark = MIP-Erlang  |  * = Peak"
     if has_s1:
         legend = "MIP(1)=min  |  MIP(2)=MIP(1)+surplus  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  ↑ = RR2>RR1  |  " + legend
+    if has_xq:
+        legend += "  |  E_orj = Cross-queue öncesi Erlang  |  XQ = düşülen kapasite"
     print(f"\n   {legend}")
 
     # Slot bazlı kapasite raporu (30dk)
@@ -1202,15 +1222,17 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         cagri_adedi_cfg = hr_cfg.get('cagri_adedi', {})
 
         print(f"\n📋 SLOT BAZLI KAPASİTE RAPORU (30dk)")
+        xq_cap_header = f" {'E_orj':>6} {'XQ':>5}" if has_xq else ""
+        xq_cap_sep_extra = 13 if has_xq else 0
         if has_s1:
-            print(f"   {'Slot':<6} {'Çağrı':>6} {'Erlng':>6} "
+            print(f"   {'Slot':<6} {'Çağrı':>6} {'Erlng':>6}{xq_cap_header} "
                   f"{'MIP1':>5} {'MIP2':>5} {'Fark':>5}  "
                   f"{'R.Et1':>5} {'R.Et2':>5}  "
                   f"{'K.Ka1':>5} {'K.Ka2':>5}  "
                   f"{'NMT1':>5} {'NMT2':>5} {'FNMT':>5}  "
                   f"{'Ç.Kp1':>6} {'Ç.Kp2':>6}  "
                   f"{'KpRR1':>6} {'KpRR2':>6}")
-            print(f"   {'-'*115}")
+            print(f"   {'-'*(115 + xq_cap_sep_extra)}")
         else:
             print(f"   {'Slot':<7} {'Çağrı':>7} {'Erlang':>7} {'Kap.':>6} "
                   f"{'R.Etk':>6} {'K.Kay':>6} {'NetMT':>6} {'Ç.Kap':>7} {'Kap_RR':>7}")
@@ -1259,7 +1281,14 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
             if has_s1:
                 arrow = "↑" if rr2 > rr1 else " "
                 warn = " ⚠" if rr2 < 1.0 and cagri > 0 else ""
-                print(f"   {slot:<6} {cagri:>6} {erl:>6} "
+                # XQ cell
+                e_orj_c = erlang_by_slot_original.get(slot, 0) if erlang_by_slot_original else erl
+                xq_red_c = e_orj_c - erl
+                if has_xq:
+                    xq_cap_cell = f" {e_orj_c:>6} {xq_red_c:>5}" if xq_red_c != 0 else f" {e_orj_c:>6} {'':>5}"
+                else:
+                    xq_cap_cell = ""
+                print(f"   {slot:<6} {cagri:>6} {erl:>6}{xq_cap_cell} "
                       f"{kap1:>5} {kap2:>5} {kap2-kap1:>+5}  "
                       f"{re1:>5} {re2:>5}  "
                       f"{kk1:>5} {kk2:>5}  "
@@ -1272,18 +1301,26 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                       f"{re2:>6} {kk2:>6} {nmt2:>6} {ck2:>7.0f} {rr2:>6.0%}{warn}")
 
         if has_s1:
-            print(f"   {'-'*115}")
+            print(f"   {'-'*(115 + xq_cap_sep_extra)}")
             trr1 = t_ck1 / t_cagri if t_cagri > 0 else 0
             trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
             arrow = "↑" if trr2 > trr1 else " "
-            print(f"   {'TOPLAM':<6} {t_cagri:>6} {t_erl:>6} "
+            # Toplam XQ
+            if has_xq and erlang_by_slot_original:
+                t_eorj = sum(erlang_by_slot_original.values())
+                t_xq = t_eorj - t_erl
+                xq_tot_cell = f" {t_eorj:>6} {t_xq:>5}"
+            else:
+                xq_tot_cell = ""
+            print(f"   {'TOPLAM':<6} {t_cagri:>6} {t_erl:>6}{xq_tot_cell} "
                   f"{t_m1:>5} {t_m2:>5} {t_m2-t_m1:>+5}  "
                   f"{t_re1:>5} {t_re2:>5}  "
                   f"{t_kk1:>5} {t_kk2:>5}  "
                   f"{t_nmt1:>5} {t_nmt2:>5} {t_nmt2-t_nmt1:>+5}  "
                   f"{t_ck1:>6.0f} {t_ck2:>6.0f}  "
                   f"{trr1:>5.0%} {trr2:>5.0%}{arrow}")
-            print(f"\n   Kap_RR = Çağrı_Kapasitesi / Gelen_Çağrı (MIP1 ve MIP2 ayrı hesap)  |  ↑ = KpRR2>KpRR1")
+            legend_xq = "  |  E_orj = Cross-queue öncesi Erlang  |  XQ = Gold+Kurumsal fazlası düşümü" if has_xq else ""
+            print(f"\n   Kap_RR = Çağrı_Kapasitesi / Gelen_Çağrı (MIP1 ve MIP2 ayrı hesap)  |  ↑ = KpRR2>KpRR1{legend_xq}")
         else:
             print(f"   {'-'*70}")
             trr2 = t_ck2 / t_cagri if t_cagri > 0 else 0
@@ -1637,6 +1674,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     erlang_by_slot = dict(zip(df_erlang_day['slot'], df_erlang_day['erlang_need']))
     weighted_aht_by_slot = dict(zip(df_erlang_day['slot'], df_erlang_day['weighted_aht']))
 
+    # Orijinal Erlang'ı (cross-queue düşümü öncesi) sakla — raporlarda göstereceğiz
+    erlang_by_slot_original = dict(erlang_by_slot)
+
     if adjusted_erlang is not None:
         original_total = sum(erlang_by_slot.values())
         erlang_by_slot = adjusted_erlang
@@ -1687,12 +1727,14 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                        total_calls_day=total_calls_day,
                        calls_by_slot=calls_by_slot,
                        mip_info_stage1=mip_info_stage1,
+                       erlang_by_slot_original=erlang_by_slot_original,
                        config=config)
 
     return {
         'date': target_date, 'queue': queue, 'label': label,
         'day_type': 'haftalici',
         'erlang_by_slot': erlang_by_slot,
+        'erlang_by_slot_original': erlang_by_slot_original,
         'weighted_aht_by_slot': weighted_aht_by_slot,
         'mip_info': mip_info, 'mip_info_stage1': mip_info_stage1,
         'actual': actual,
