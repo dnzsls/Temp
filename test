@@ -1,0 +1,17 @@
+# 1. O slottaki gerçek çağrı sayısını gör
+df_calls_30 = prepare_forecast_calls_30(df_forecast, config=CONFIG)
+target_date = pd.to_datetime('2026-XX-XX')  # tarihini yaz
+df_day = df_calls_30[df_calls_30['data_date'] == target_date]
+print(df_day[df_day['slot_30'] == '03:30'][['slot_30', 'kurumsal_total']])
+
+# 2. O slottaki AHT'yi gör
+row = df_day[df_day['slot_30'] == '03:30'].iloc[0]
+aht = calculate_weighted_aht(row, 'kurumsal', '03:30', config=CONFIG)
+print(f"Weighted AHT: {aht} sn")
+
+# 3. Erlang hesabını adım adım gör
+calls = row['kurumsal_total']
+final, asa, raw = find_optimal_agents(calls, aht, '03:30', config=CONFIG)
+print(f"Calls={calls}, AHT={aht}, Traffic={(calls * aht/60)/30:.3f}")
+print(f"Raw={raw}, Shrinkage={CONFIG['erlang']['shrinkage'].get(3, CONFIG['erlang']['shrinkage'].get('default', 0))}")
+print(f"Final={final}, ASA={asa}")
