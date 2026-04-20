@@ -551,9 +551,13 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
             prob += lpSum([x[s] for s in covering]) >= erlang_by_slot[slot]
 
     M = 500
+    min_per_shift_default = mcfg['min_per_shift']
+    min_per_shift_overrides = mcfg.get('min_per_shift_overrides', {})
     for s in shifts:
         prob += x[s] <= M * y[s]
-        prob += x[s] >= mcfg['min_per_shift'] * y[s]
+        start_hour = shift_cov[s]['start']
+        min_for_shift = min_per_shift_overrides.get(start_hour, min_per_shift_default)
+        prob += x[s] >= min_for_shift * y[s]
 
     if pt_available > 0 and pt_shift_keys:
         prob += lpSum([x[s] for s in pt_shift_keys]) == pt_available
