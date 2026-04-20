@@ -812,7 +812,7 @@ def get_actual_summary(df_actual, date, queue, config=CONFIG):
 def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                        weighted_aht_by_slot=None, total_calls_day=0,
                        calls_by_slot=None, mip_info_stage1=None,
-                       config=CONFIG):
+                       e_sup_by_slot=None, config=CONFIG):
 
     label = config['queues'][queue]['label']
     date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
@@ -1034,43 +1034,49 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
 
     print(f"\n📋 SLOT BAZLI (eşzamanlı çalışan)  * = peak slot")
 
+    # E_orj / E_sup kolonları (sadece kitle, e_sup verildiğinde gösterilir)
+    has_esup = e_sup_by_slot is not None
+    esup_header = f" {'E_orj':>6} {'E_sup':>6}" if has_esup else ""
+    esup_pad = f" {'':>6} {'':>6}" if has_esup else ""
+    esup_extra = 14 if has_esup else 0
+
     if has_s1:
         if has_subq:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{esup_header} {'InMin':>6} {'OutMin':>7}  "
                   f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
                   f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{esup_pad} {'':>6} {'':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'':>6} {'':>6} {'':>6}  {'':>7}")
-            sep_len = 148
+            sep_len = 148 + esup_extra
         else:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{esup_header}  "
                   f"{'---- MIP(1) ----':^23}  {'---- MIP(2) ----':^23}  "
                   f"{'---- GERÇEK ----':^23}  {'Fark':>6} {'RR1':>6} {'RR2':>6}  {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{esup_pad}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'':>6} {'':>6} {'':>6}  {'':>7}")
-            sep_len = 134
+            sep_len = 134 + esup_extra
         print(f"   {'-'*sep_len}")
     else:
         if has_subq:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7} {'InMin':>6} {'OutMin':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{esup_header} {'InMin':>6} {'OutMin':>7}  "
                   f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{esup_pad} {'':>6} {'':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
-            sep_len = 115
+            sep_len = 115 + esup_extra
         else:
-            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}  "
+            print(f"   {'Slot':<8} {'W_AHT':>6} {'Erlang':>7}{esup_header}  "
                   f"{'---- MIP ----':^23}  {'---- GERÇEK ----':^23}  {'Fark':>6} {'RR':>7} {'E.Fark':>7}")
-            print(f"   {'':>8} {'':>6} {'':>7}  "
+            print(f"   {'':>8} {'':>6} {'':>7}{esup_pad}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  "
                   f"{'Toplam':>7} {'Inhouse':>7} {'Outsrc':>7}  {'':>6} {'':>7} {'':>7}")
-            sep_len = 106
+            sep_len = 106 + esup_extra
         print(f"   {'-'*sep_len}")
 
     e_slot_sum = m_slot_sum = a_slot_sum = m1_slot_sum = 0
@@ -1102,6 +1108,12 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
             peak_mark = "*" if slot in peak_slots else " "
             e_fark = m - e
 
+            if has_esup:
+                e_sup_v = e_sup_by_slot.get(slot, 0)
+                esup_cell = f" {e:>6} {e_sup_v:>6}"
+            else:
+                esup_cell = ""
+
             if has_s1:
                 rr1_v = (m1 / e) if e > 0 else 0
                 rr2_v = (m / e) if e > 0 else 0
@@ -1113,11 +1125,11 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                     out_min = out_only_by_slot.get(slot, 0)
                     in_min_str = str(in_min) if in_min > 0 else "-"
                     out_min_str = str(out_min) if out_min > 0 else "-"
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{esup_cell} {in_min_str:>6} {out_min_str:>7}  "
                           f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
                           f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
                 else:
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{esup_cell}  "
                           f"{m1:>7} {m1i:>7} {m1o:>7}  {m:>7} {mi:>7} {mo:>7}  "
                           f"{at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr1_str:>6} {rr2_str:>6}  {e_fark:>+7}")
             else:
@@ -1127,31 +1139,38 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                     out_min = out_only_by_slot.get(slot, 0)
                     in_min_str = str(in_min) if in_min > 0 else "-"
                     out_min_str = str(out_min) if out_min > 0 else "-"
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7} {in_min_str:>6} {out_min_str:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{esup_cell} {in_min_str:>6} {out_min_str:>7}  "
                           f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
                 else:
-                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}  "
+                    print(f"   {slot}{peak_mark:<2} {w_aht:>6.0f} {e:>7}{esup_cell}  "
                           f"{m:>7} {mi:>7} {mo:>7}  {at:>7} {ai:>7} {ao:>7}  {fark:>+6} {rr_str:>7} {e_fark:>+7}")
 
     sep = '-' * sep_len
     print(f"   {sep}")
     e_m_fark = m_slot_sum - e_slot_sum
+    if has_esup:
+        esup_tot = sum(e_sup_by_slot.get(s, 0) for s in SLOTS_30)
+        esup_tot_cell = f" {e_slot_sum:>6} {esup_tot:>6}"
+    else:
+        esup_tot_cell = ""
     if has_s1:
         trr1_v = (m1_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
         trr2_v = (m_slot_sum / e_slot_sum) if e_slot_sum > 0 else 0
         trr1 = f"{trr1_v:.0%}" if e_slot_sum > 0 else "-"
         trr2 = f"{trr2_v:.0%}" if e_slot_sum > 0 else "-"
-        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}{esup_tot_cell}  "
               f"{m1_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum:>7} {'':>7} {'':>7}  "
               f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {trr1:>6} {trr2:>6}  {e_m_fark:>+7}")
     else:
-        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}  "
+        print(f"   {'SLOT TOP':<15} {e_slot_sum:>7}{esup_tot_cell}  "
               f"{m_slot_sum:>7} {'':>7} {'':>7}  "
               f"{a_slot_sum:>7} {'':>7} {'':>7}  {m_slot_sum - a_slot_sum:>+6} {'':>7} {e_m_fark:>+7}")
 
     legend = "Fark = MIP-Gerçek  |  RR = MIP/Erlang  |  E.Fark = MIP-Erlang  |  * = Peak"
     if has_s1:
         legend = "MIP(1)=min  |  MIP(2)=MIP(1)+surplus  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  ↑ = RR2>RR1  |  " + legend
+    if has_esup:
+        legend += "\n   E_orj = orijinal Erlang  |  E_sup = diğer kuyruklardan gelebilecek fazla kapasite (bilgi notu, MIP'e dahil değil)"
     print(f"\n   {legend}")
 
     # Slot bazlı kapasite raporu (30dk)
@@ -1562,7 +1581,7 @@ def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, c
 # =============================================================================
 
 def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
-                       config=CONFIG, verbose=True):
+                       e_sup_by_slot=None, config=CONFIG, verbose=True):
     """V4 akışı — SADECE HAFTAİÇİ. Cross-queue kaldırıldı."""
     target_date = pd.to_datetime(target_date)
     date_str = target_date.strftime('%Y-%m-%d')
@@ -1641,6 +1660,7 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                        total_calls_day=total_calls_day,
                        calls_by_slot=calls_by_slot,
                        mip_info_stage1=mip_info_stage1,
+                       e_sup_by_slot=e_sup_by_slot,
                        config=config)
 
     return {
@@ -1664,8 +1684,20 @@ def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
         raise ValueError(f"V4 sadece haftaiçi. v10.9 kullanın.")
 
     results = {}
-    for queue in config['queues']:
-        result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue, config=config)
+    # Önce donor kuyruklar (kitle dışındakiler), sonra kitle — e_sup bilgi notu için
+    queue_order = [q for q in config['queues'] if q != 'kitle'] + (['kitle'] if 'kitle' in config['queues'] else [])
+    for queue in queue_order:
+        e_sup_by_slot = None
+        if queue == 'kitle':
+            e_sup_by_slot = {}
+            for _, donor_r in results.items():
+                donor_mip = donor_r['mip_info']['mip_by_slot']
+                donor_erl = donor_r['erlang_by_slot']
+                for s in set(donor_mip) | set(donor_erl):
+                    surplus = max(0, donor_mip.get(s, 0) - donor_erl.get(s, 0))
+                    e_sup_by_slot[s] = e_sup_by_slot.get(s, 0) + surplus
+        result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
+                                     e_sup_by_slot=e_sup_by_slot, config=config)
         if result:
             results[queue] = result
 
