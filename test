@@ -812,7 +812,8 @@ def get_actual_summary(df_actual, date, queue, config=CONFIG):
 def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
                        weighted_aht_by_slot=None, total_calls_day=0,
                        calls_by_slot=None, mip_info_stage1=None,
-                       e_sup_by_slot=None, config=CONFIG):
+                       e_sup1_by_slot=None, e_sup2_by_slot=None,
+                       config=CONFIG):
 
     label = config['queues'][queue]['label']
     date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
@@ -1034,9 +1035,11 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
 
     print(f"\n📋 SLOT BAZLI (eşzamanlı çalışan)  * = peak slot")
 
-    # E_orj / E_sup kolonları (sadece kitle, e_sup verildiğinde gösterilir)
-    has_esup = e_sup_by_slot is not None
-    esup_header = f" {'E_orj':>6} {'E_sup':>6}" if has_esup else ""
+    # E_sup1 / E_sup2 kolonları (sadece kitle, verildiğinde gösterilir)
+    # E_sup1 = donor MIP2 - donor Erlang (pozitif)
+    # E_sup2 = donor MIP2 - donor MIP1 (sadece surplus dağıtımı)
+    has_esup = e_sup1_by_slot is not None or e_sup2_by_slot is not None
+    esup_header = f" {'E_sup1':>6} {'E_sup2':>6}" if has_esup else ""
     esup_pad = f" {'':>6} {'':>6}" if has_esup else ""
     esup_extra = 14 if has_esup else 0
 
@@ -1109,8 +1112,9 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
             e_fark = m - e
 
             if has_esup:
-                e_sup_v = e_sup_by_slot.get(slot, 0)
-                esup_cell = f" {e:>6} {e_sup_v:>6}"
+                e_sup1_v = e_sup1_by_slot.get(slot, 0) if e_sup1_by_slot else 0
+                e_sup2_v = e_sup2_by_slot.get(slot, 0) if e_sup2_by_slot else 0
+                esup_cell = f" {e_sup1_v:>6} {e_sup2_v:>6}"
             else:
                 esup_cell = ""
 
@@ -1149,8 +1153,9 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     print(f"   {sep}")
     e_m_fark = m_slot_sum - e_slot_sum
     if has_esup:
-        esup_tot = sum(e_sup_by_slot.get(s, 0) for s in SLOTS_30)
-        esup_tot_cell = f" {e_slot_sum:>6} {esup_tot:>6}"
+        esup1_tot = sum(e_sup1_by_slot.get(s, 0) for s in SLOTS_30) if e_sup1_by_slot else 0
+        esup2_tot = sum(e_sup2_by_slot.get(s, 0) for s in SLOTS_30) if e_sup2_by_slot else 0
+        esup_tot_cell = f" {esup1_tot:>6} {esup2_tot:>6}"
     else:
         esup_tot_cell = ""
     if has_s1:
@@ -1170,7 +1175,7 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     if has_s1:
         legend = "MIP(1)=min  |  MIP(2)=MIP(1)+surplus  |  RR1=MIP1/Erlang  |  RR2=MIP2/Erlang  |  ↑ = RR2>RR1  |  " + legend
     if has_esup:
-        legend += "\n   E_orj = orijinal Erlang  |  E_sup = diğer kuyruklardan gelebilecek fazla kapasite (bilgi notu, MIP'e dahil değil)"
+        legend += "\n   E_sup1 = diğer kuyrukların MIP2 - Erlang pozitif farkı  |  E_sup2 = diğer kuyruklarda surplus ile eklenenler (MIP2 - MIP1)  |  bilgi notu, MIP'e dahil değil"
     print(f"\n   {legend}")
 
     # Slot bazlı kapasite raporu (30dk)
@@ -1581,7 +1586,8 @@ def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, c
 # =============================================================================
 
 def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
-                       e_sup_by_slot=None, config=CONFIG, verbose=True):
+                       e_sup1_by_slot=None, e_sup2_by_slot=None,
+                       config=CONFIG, verbose=True):
     """V4 akışı — SADECE HAFTAİÇİ. Cross-queue kaldırıldı."""
     target_date = pd.to_datetime(target_date)
     date_str = target_date.strftime('%Y-%m-%d')
@@ -1660,7 +1666,8 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                        total_calls_day=total_calls_day,
                        calls_by_slot=calls_by_slot,
                        mip_info_stage1=mip_info_stage1,
-                       e_sup_by_slot=e_sup_by_slot,
+                       e_sup1_by_slot=e_sup1_by_slot,
+                       e_sup2_by_slot=e_sup2_by_slot,
                        config=config)
 
     return {
@@ -1687,17 +1694,22 @@ def run_all_queues(df_calls, df_actual, df_shifts, target_date, config=CONFIG):
     # Önce donor kuyruklar (kitle dışındakiler), sonra kitle — e_sup bilgi notu için
     queue_order = [q for q in config['queues'] if q != 'kitle'] + (['kitle'] if 'kitle' in config['queues'] else [])
     for queue in queue_order:
-        e_sup_by_slot = None
+        e_sup1_by_slot = None
+        e_sup2_by_slot = None
         if queue == 'kitle':
-            e_sup_by_slot = {}
+            e_sup1_by_slot = {}
+            e_sup2_by_slot = {}
             for _, donor_r in results.items():
-                donor_mip = donor_r['mip_info']['mip_by_slot']
+                donor_mip2 = donor_r['mip_info']['mip_by_slot']
                 donor_erl = donor_r['erlang_by_slot']
-                for s in set(donor_mip) | set(donor_erl):
-                    surplus = max(0, donor_mip.get(s, 0) - donor_erl.get(s, 0))
-                    e_sup_by_slot[s] = e_sup_by_slot.get(s, 0) + surplus
+                donor_s1 = donor_r.get('mip_info_stage1')
+                donor_mip1 = donor_s1['mip_by_slot'] if donor_s1 else donor_mip2
+                for s in set(donor_mip2) | set(donor_erl) | set(donor_mip1):
+                    e_sup1_by_slot[s] = e_sup1_by_slot.get(s, 0) + max(0, donor_mip2.get(s, 0) - donor_erl.get(s, 0))
+                    e_sup2_by_slot[s] = e_sup2_by_slot.get(s, 0) + max(0, donor_mip2.get(s, 0) - donor_mip1.get(s, 0))
         result = run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
-                                     e_sup_by_slot=e_sup_by_slot, config=config)
+                                     e_sup1_by_slot=e_sup1_by_slot,
+                                     e_sup2_by_slot=e_sup2_by_slot, config=config)
         if result:
             results[queue] = result
 
