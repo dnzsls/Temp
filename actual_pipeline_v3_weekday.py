@@ -600,9 +600,6 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
                 'penalty': win_penalty
             }
 
-    # --- Amaç fonksiyonu ---
-    prob += lpSum(cost)
-
     # --- Kısıtlar ---
     for slot in active_slots:
         covering = [s for s in shifts if slot in shift_cov[s]['slots']]
@@ -683,15 +680,17 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
             for i in range(1, len(sorted_hours)):
                 h_prev = sorted_hours[i - 1]
                 h_curr = sorted_hours[i]
-                d_pos = LpVariable(f"sm_{comp}_{h_curr}_pos", lowBound=0, cat='Continuous')
-                d_neg = LpVariable(f"sm_{comp}_{h_curr}_neg", lowBound=0, cat='Continuous')
+                d_pos = LpVariable(f"sm_{comp}_{h_curr.replace(':', '')}_pos", lowBound=0, cat='Continuous')
+                d_neg = LpVariable(f"sm_{comp}_{h_curr.replace(':', '')}_neg", lowBound=0, cat='Continuous')
                 sum_curr = lpSum([x[s] for s in starts_by_hour[h_curr]])
                 sum_prev = lpSum([x[s] for s in starts_by_hour[h_prev]])
                 slack = M_sm * (2 - yh[h_prev] - yh[h_curr])
                 prob += d_pos >= sum_curr - sum_prev - slack
                 prob += d_neg >= sum_prev - sum_curr - slack
                 cost.append((d_pos + d_neg) * sm_penalty_val)
-        prob.objective = lpSum(cost)
+
+    # --- Amaç fonksiyonu (tüm cost eklemeleri bittikten sonra) ---
+    prob += lpSum(cost)
 
     # --- SOLVE ---
     prob.solve(PULP_CBC_CMD(msg=0))
