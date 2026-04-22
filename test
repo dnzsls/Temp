@@ -1,28 +1,22 @@
 # =============================================================================
-# KUYRUK BAZLI VARDIYA PİPELİNE - ACTUAL V3 (WEEKDAY)
+# KUYRUK BAZLI VARDIYA PİPELİNE - ACTUAL V5 (WEEKDAY)
 # =============================================================================
 #
-# V3 (sadece HAFTAİÇİ):
-#   V2 üzerine kurulu, temel farklar:
+# V5 (sadece HAFTAİÇİ):
+#   V4 üzerine kurulu, tek fark:
 #
-#   1) DENGELI DAĞILIM (Balans Penalty):
-#      - V2'deki outsource 10x maliyet yaklaşımı kaldırıldı
-#      - Yerine inhouse=outsource=eşit maliyet + pencere bazlı balans penalty
-#      - Her pencerede |toplam_inhouse − toplam_outsource| farkı cezalandırılır
-#      - Sonuç: MIP min ihtiyacı karşılarken inhouse/outsource'u dengeli dağıtır
+#   1) MIN_PER_SHIFT FALLBACK:
+#      - optimize_queue infeasible döndürdüğünde min_per_shift azaltılarak yeniden denenir
+#      - Config'te min_per_shift_fallback.enabled=True ise
+#        default değerden 'floor' değerine kadar 'step' aralığıyla düşürülerek denenir
+#      - min_per_shift_overrides (saat-özel) değişmez, sadece default ezilir
 #
-#   2) CROSS-QUEUE KAPASİTE AKTARIMI:
-#      - Gold/kurumsal'ın Erlang ihtiyacından fazla atanan kapasitesi
-#        kitle'nin Erlang ihtiyacından düşülür
+#   V4'ten kalan özellikler (değişmedi):
+#   - Pencere bazlı balans penalty
+#   - Surplus dağıtımı (inhouse + outsource)
+#   - Start smoothing (ardışık aktif komşu saatler, bridge-binary)
 #
-#   3) SURPLUS DAĞITIMI (hem inhouse hem outsource):
-#      - V2 sadece inhouse surplus dağıtıyordu
-#      - V3: surplus_inhouse = kadro_inhouse − MIP1_inhouse
-#             surplus_outsource = kadro_outsource − MIP1_outsource
-#      - Pencere oranlarıyla (2/3 sabah, 1/3 akşam) dağıtılır
-#      - Öncelik 09:00-20:00 arası (dış arama saatleri)
-#
-#   Config: config_v3_weekday.py kullanın.
+#   Config: config_v5_weekday.py kullanın.
 #
 # =============================================================================
 
@@ -346,9 +340,13 @@ def create_shift_coverage(df_shifts, config=CONFIG):
 
 def optimize_queue(erlang_by_slot, df_shifts, queue,
                    target_date=None, inhouse_min_by_slot=None,
-                   outsource_min_by_slot=None, config=None):
+                   outsource_min_by_slot=None, config=None,
+                   min_per_shift_override=None):
     """
-    V3 MIP — eşit maliyet + pencere bazlı balans penalty.
+    V5 MIP — eşit maliyet + pencere bazlı balans penalty.
+    min_per_shift_override: None ise config'teki default kullanılır, aksi halde
+    mcfg['min_per_shift'] yerine bu değer geçerli olur. Overrides dict (saat-özel)
+    yine kendi değerlerini korur.
     """
     if config is None:
         config = CONFIG
@@ -551,7 +549,7 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
             prob += lpSum([x[s] for s in covering]) >= erlang_by_slot[slot]
 
     M = 500
-    min_per_shift_default = mcfg['min_per_shift']
+    min_per_shift_default = min_per_shift_override if min_per_shift_override is not None else mcfg['min_per_shift']
     min_per_shift_overrides = mcfg.get('min_per_shift_overrides', {})
     for s in shifts:
         prob += x[s] <= M * y[s]
@@ -1644,17 +1642,49 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     inhouse_min_by_slot, outsource_min_by_slot = _build_subqueue_min_slots(
         df_calls_30, queue, target_date, erlang_by_slot, config)
 
-    if verbose: print(f"[3/4] MIP optimizasyon (V3: balans penalty)...")
-    assignments, mip_info = optimize_queue(
-        erlang_by_slot, df_shifts_queue, queue,
-        target_date=target_date,
-        inhouse_min_by_slot=inhouse_min_by_slot,
-        outsource_min_by_slot=outsource_min_by_slot,
-        config=config)
+    if verbose: print(f"[3/4] MIP optimizasyon (V5: balans penalty + min_per_shift fallback)...")
+
+    mcfg = config['queue_configs'][queue]['mip']
+    default_min = mcfg['min_per_shift']
+    fb_cfg = mcfg.get('min_per_shift_fallback', {})
+    fb_enabled = fb_cfg.get('enabled', False)
+    fb_floor = fb_cfg.get('floor', 1)
+    fb_step = max(1, fb_cfg.get('step', 1))
+
+    try_values = [default_min]
+    if fb_enabled and default_min > fb_floor:
+        v = default_min - fb_step
+        while v >= fb_floor:
+            try_values.append(v)
+            v -= fb_step
+        if try_values[-1] != fb_floor:
+            try_values.append(fb_floor)
+
+    assignments = None
+    mip_info = None
+    used_min = default_min
+    last_status = None
+    for try_min in try_values:
+        assignments, mip_info = optimize_queue(
+            erlang_by_slot, df_shifts_queue, queue,
+            target_date=target_date,
+            inhouse_min_by_slot=inhouse_min_by_slot,
+            outsource_min_by_slot=outsource_min_by_slot,
+            config=config,
+            min_per_shift_override=try_min)
+        if assignments is not None:
+            used_min = try_min
+            if try_min != default_min and verbose:
+                print(f"   ⚠ min_per_shift {default_min} ile çözülemedi → {try_min} ile çözüldü")
+            break
+        last_status = mip_info
 
     if assignments is None:
-        print(f"   ⚠ Çözüm bulunamadı: {mip_info}")
+        print(f"   ⚠ Çözüm bulunamadı (fallback denemeleri {try_values} tükendi): {last_status}")
         return None
+
+    mip_info['min_per_shift_used'] = used_min
+    mip_info['min_per_shift_default'] = default_min
 
     if verbose:
         print(f"   MIP(1): {mip_info['total_kisi']} kişi "
