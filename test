@@ -1642,7 +1642,7 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     inhouse_min_by_slot, outsource_min_by_slot = _build_subqueue_min_slots(
         df_calls_30, queue, target_date, erlang_by_slot, config)
 
-    if verbose: print(f"[3/4] MIP optimizasyon (V5: balans penalty + min_per_shift fallback)...")
+    if verbose: print(f"[3/4] MIP optimizasyon (V5: fallback + capacity-loss adjustment)...")
 
     mcfg = config['queue_configs'][queue]['mip']
     default_min = mcfg['min_per_shift']
@@ -1650,6 +1650,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     fb_enabled = fb_cfg.get('enabled', False)
     fb_floor = fb_cfg.get('floor', 1)
     fb_step = max(1, fb_cfg.get('step', 1))
+
+    cl_cfg = mcfg.get('capacity_loss_fallback', {})
+    cl_enabled = cl_cfg.get('enabled', False)
 
     try_values = [default_min]
     if fb_enabled and default_min > fb_floor:
@@ -1663,7 +1666,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     assignments = None
     mip_info = None
     used_min = default_min
+    solution_stage = None
     last_status = None
+
     for try_min in try_values:
         assignments, mip_info = optimize_queue(
             erlang_by_slot, df_shifts_queue, queue,
@@ -1674,17 +1679,58 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             min_per_shift_override=try_min)
         if assignments is not None:
             used_min = try_min
+            solution_stage = 'default' if try_min == default_min else f'min_fallback={try_min}'
             if try_min != default_min and verbose:
                 print(f"   ⚠ min_per_shift {default_min} ile çözülemedi → {try_min} ile çözüldü")
             break
         last_status = mip_info
 
+    # Kademe 3: shrinkage'i kapasite_kaybi ile değiştir, Erlang'ı YENİDEN hesapla, default min ile dene
+    if assignments is None and cl_enabled:
+        hr_cfg = config['queue_configs'][queue].get('hourly_report', {})
+        kk_dict = hr_cfg.get('kapasite_kaybi', {})
+
+        # Config'i derin kopyala ve sadece bu queue'nun shrinkage'ini kapasite_kaybi ile değiştir
+        config_cl = copy.deepcopy(config)
+        config_cl['queue_configs'][queue]['erlang']['shrinkage'] = kk_dict
+
+        # Erlang'ı yeniden hesapla (yeni shrinkage ile)
+        df_erlang_cl = calculate_erlang_all(df_calls_30, config_cl)
+        df_erlang_cl_day = df_erlang_cl[(df_erlang_cl['date'] == target_date) &
+                                         (df_erlang_cl['queue'] == queue)].copy()
+        erlang_cl = dict(zip(df_erlang_cl_day['slot'], df_erlang_cl_day['erlang_need']))
+
+        if verbose:
+            delta = sum(erlang_cl.values()) - sum(erlang_by_slot.values())
+            print(f"   ⚠ Tüm min fallback'ler tükendi → shrinkage kapasite_kaybi ile değiştirilerek "
+                  f"Erlang yeniden hesaplandı (toplam Δ={delta:+}), min={default_min} ile deneniyor")
+
+        assignments, mip_info = optimize_queue(
+            erlang_cl, df_shifts_queue, queue,
+            target_date=target_date,
+            inhouse_min_by_slot=inhouse_min_by_slot,
+            outsource_min_by_slot=outsource_min_by_slot,
+            config=config,
+            min_per_shift_override=default_min)
+        if assignments is not None:
+            used_min = default_min
+            solution_stage = 'capacity_loss_adjusted'
+            # Raporda doğru Erlang görünsün diye üst scope'taki erlang_by_slot'u da güncelle
+            erlang_by_slot = erlang_cl
+        else:
+            last_status = mip_info
+
     if assignments is None:
-        print(f"   ⚠ Çözüm bulunamadı (fallback denemeleri {try_values} tükendi): {last_status}")
+        print(f"   ⚠ Çözüm bulunamadı (tüm kademeler tükendi): {last_status}")
         return None
 
     mip_info['min_per_shift_used'] = used_min
     mip_info['min_per_shift_default'] = default_min
+    mip_info['solution_stage'] = solution_stage
+    mip_info['erlang_recomputed_with_kapasite_kaybi'] = (solution_stage == 'capacity_loss_adjusted')
+
+    if verbose:
+        print(f"   ✓ Çözüm aşaması: {solution_stage} (min_per_shift={used_min})")
 
     if verbose:
         print(f"   MIP(1): {mip_info['total_kisi']} kişi "
