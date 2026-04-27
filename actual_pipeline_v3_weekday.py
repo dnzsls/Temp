@@ -167,6 +167,12 @@ CONFIG = {
                     'floor': 1,
                     'step': 1,
                 },
+                # Son kademe: min fallback de başaramazsa, shrinkage parametresini
+                # hourly_report.kapasite_kaybi değerleriyle değiştirip Erlang'ı
+                # yeniden hesapla ve default min ile dene.
+                'capacity_loss_fallback': {
+                    'enabled': True,
+                },
             },
             'rr_penalty': {
                 'enabled': True,
@@ -252,6 +258,12 @@ CONFIG = {
                     'floor': 1,
                     'step': 1,
                 },
+                # Son kademe: min fallback de başaramazsa, shrinkage parametresini
+                # hourly_report.kapasite_kaybi değerleriyle değiştirip Erlang'ı
+                # yeniden hesapla ve default min ile dene.
+                'capacity_loss_fallback': {
+                    'enabled': True,
+                },
             },
             'rr_penalty': {
                 'enabled': True,
@@ -313,6 +325,12 @@ CONFIG = {
                     'enabled': True,
                     'floor': 1,
                     'step': 1,
+                },
+                # Son kademe: min fallback de başaramazsa, shrinkage parametresini
+                # hourly_report.kapasite_kaybi değerleriyle değiştirip Erlang'ı
+                # yeniden hesapla ve default min ile dene.
+                'capacity_loss_fallback': {
+                    'enabled': True,
                 },
             },
             'rr_penalty': {
