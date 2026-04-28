@@ -1710,7 +1710,8 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
         return dict(zip(df_alt_day['slot'], df_alt_day['erlang_need']))
 
     def _scan_min_with_erlang(erl_dict, stage_label):
-        """try_values üzerinden tarama yapar. (assignments, mip_info, used_min, solution_stage) döner."""
+        """try_values üzerinden tarama yapar. Subqueue min'leri de erl_dict'e göre yeniden hesaplanır."""
+        in_min, out_min = _build_subqueue_min_slots(df_calls_30, queue, target_date, erl_dict, config)
         a = None
         m = None
         um = default_min
@@ -1720,8 +1721,8 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             a, m = optimize_queue(
                 erl_dict, df_shifts_queue, queue,
                 target_date=target_date,
-                inhouse_min_by_slot=inhouse_min_by_slot,
-                outsource_min_by_slot=outsource_min_by_slot,
+                inhouse_min_by_slot=in_min,
+                outsource_min_by_slot=out_min,
                 config=config,
                 min_per_shift_override=tm)
             if a is not None:
@@ -1732,9 +1733,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                     ss = 'zero_shrinkage' if tm == default_min else f'zero_shrinkage_min_fallback={tm}'
                 else:
                     ss = 'default' if tm == default_min else f'min_fallback={tm}'
-                return a, m, um, ss, None
+                return a, m, um, ss, None, in_min, out_min
             ls = m
-        return None, None, um, ss, ls
+        return None, None, um, ss, ls, in_min, out_min
 
     # Kademe 3: shrinkage = kapasite_kaybi, min taraması da yap
     if assignments is None and cl_enabled:
@@ -1747,10 +1748,11 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             print(f"   ⚠ Tüm min fallback'ler tükendi → shrinkage = kapasite_kaybi "
                   f"(Erlang Δ={delta:+}), min taraması başlıyor")
 
-        a3, m3, um3, ss3, ls3 = _scan_min_with_erlang(erlang_cl, 'capacity_loss')
+        a3, m3, um3, ss3, ls3, im3, om3 = _scan_min_with_erlang(erlang_cl, 'capacity_loss')
         if a3 is not None:
             assignments, mip_info, used_min, solution_stage = a3, m3, um3, ss3
             erlang_by_slot = erlang_cl
+            inhouse_min_by_slot, outsource_min_by_slot = im3, om3
         else:
             last_status = ls3
 
@@ -1763,10 +1765,11 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             print(f"   ⚠ Kapasite kaybı taraması da başarısız → shrinkage = 0 "
                   f"(Erlang Δ={delta:+}), son min taraması")
 
-        a4, m4, um4, ss4, ls4 = _scan_min_with_erlang(erlang_zero, 'zero_shrinkage')
+        a4, m4, um4, ss4, ls4, im4, om4 = _scan_min_with_erlang(erlang_zero, 'zero_shrinkage')
         if a4 is not None:
             assignments, mip_info, used_min, solution_stage = a4, m4, um4, ss4
             erlang_by_slot = erlang_zero
+            inhouse_min_by_slot, outsource_min_by_slot = im4, om4
         else:
             last_status = ls4
 
