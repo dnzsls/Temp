@@ -889,12 +889,16 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     if sol_stage:
         used_min = mip_info.get('min_per_shift_used', '?')
         default_min = mip_info.get('min_per_shift_default', '?')
-        recomputed = mip_info.get('erlang_recomputed_with_kapasite_kaybi', False)
-        shrinkage_src = "kapasite_kaybi" if recomputed else "default (config.erlang.shrinkage)"
+        src = mip_info.get('shrinkage_source', 'default')
+        src_label = {
+            'default': 'default (config.erlang.shrinkage)',
+            'kapasite_kaybi': 'kapasite_kaybi (hourly_report.kapasite_kaybi)',
+            'zero': 'zero (shrinkage=0)',
+        }.get(src, src)
         print(f"\n🧭 ÇÖZÜM AŞAMASI:")
         print(f"   Aşama: {sol_stage}")
         print(f"   min_per_shift: kullanılan={used_min}  (default={default_min})")
-        print(f"   Erlang shrinkage kaynağı: {shrinkage_src}")
+        print(f"   Erlang shrinkage kaynağı: {src_label}")
 
     # --- V3: Balans Penalty Raporu ---
     balance_result = mip_info.get('balance_result', {})
@@ -1697,40 +1701,74 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             break
         last_status = mip_info
 
-    # Kademe 3: shrinkage'i kapasite_kaybi ile değiştir, Erlang'ı YENİDEN hesapla, default min ile dene
+    def _recompute_erlang_with_shrinkage(shrinkage_value):
+        """Verilen shrinkage (dict veya skaler) ile Erlang'ı yeniden hesaplar."""
+        cfg_alt = copy.deepcopy(config)
+        cfg_alt['queue_configs'][queue]['erlang']['shrinkage'] = shrinkage_value
+        df_alt = calculate_erlang_all(df_calls_30, cfg_alt)
+        df_alt_day = df_alt[(df_alt['date'] == target_date) & (df_alt['queue'] == queue)].copy()
+        return dict(zip(df_alt_day['slot'], df_alt_day['erlang_need']))
+
+    def _scan_min_with_erlang(erl_dict, stage_label):
+        """try_values üzerinden tarama yapar. (assignments, mip_info, used_min, solution_stage) döner."""
+        a = None
+        m = None
+        um = default_min
+        ss = None
+        ls = None
+        for tm in try_values:
+            a, m = optimize_queue(
+                erl_dict, df_shifts_queue, queue,
+                target_date=target_date,
+                inhouse_min_by_slot=inhouse_min_by_slot,
+                outsource_min_by_slot=outsource_min_by_slot,
+                config=config,
+                min_per_shift_override=tm)
+            if a is not None:
+                um = tm
+                if stage_label == 'capacity_loss':
+                    ss = 'capacity_loss_adjusted' if tm == default_min else f'capacity_loss_min_fallback={tm}'
+                elif stage_label == 'zero_shrinkage':
+                    ss = 'zero_shrinkage' if tm == default_min else f'zero_shrinkage_min_fallback={tm}'
+                else:
+                    ss = 'default' if tm == default_min else f'min_fallback={tm}'
+                return a, m, um, ss, None
+            ls = m
+        return None, None, um, ss, ls
+
+    # Kademe 3: shrinkage = kapasite_kaybi, min taraması da yap
     if assignments is None and cl_enabled:
         hr_cfg = config['queue_configs'][queue].get('hourly_report', {})
         kk_dict = hr_cfg.get('kapasite_kaybi', {})
-
-        # Config'i derin kopyala ve sadece bu queue'nun shrinkage'ini kapasite_kaybi ile değiştir
-        config_cl = copy.deepcopy(config)
-        config_cl['queue_configs'][queue]['erlang']['shrinkage'] = kk_dict
-
-        # Erlang'ı yeniden hesapla (yeni shrinkage ile)
-        df_erlang_cl = calculate_erlang_all(df_calls_30, config_cl)
-        df_erlang_cl_day = df_erlang_cl[(df_erlang_cl['date'] == target_date) &
-                                         (df_erlang_cl['queue'] == queue)].copy()
-        erlang_cl = dict(zip(df_erlang_cl_day['slot'], df_erlang_cl_day['erlang_need']))
+        erlang_cl = _recompute_erlang_with_shrinkage(kk_dict)
 
         if verbose:
             delta = sum(erlang_cl.values()) - sum(erlang_by_slot.values())
-            print(f"   ⚠ Tüm min fallback'ler tükendi → shrinkage kapasite_kaybi ile değiştirilerek "
-                  f"Erlang yeniden hesaplandı (toplam Δ={delta:+}), min={default_min} ile deneniyor")
+            print(f"   ⚠ Tüm min fallback'ler tükendi → shrinkage = kapasite_kaybi "
+                  f"(Erlang Δ={delta:+}), min taraması başlıyor")
 
-        assignments, mip_info = optimize_queue(
-            erlang_cl, df_shifts_queue, queue,
-            target_date=target_date,
-            inhouse_min_by_slot=inhouse_min_by_slot,
-            outsource_min_by_slot=outsource_min_by_slot,
-            config=config,
-            min_per_shift_override=default_min)
-        if assignments is not None:
-            used_min = default_min
-            solution_stage = 'capacity_loss_adjusted'
-            # Raporda doğru Erlang görünsün diye üst scope'taki erlang_by_slot'u da güncelle
+        a3, m3, um3, ss3, ls3 = _scan_min_with_erlang(erlang_cl, 'capacity_loss')
+        if a3 is not None:
+            assignments, mip_info, used_min, solution_stage = a3, m3, um3, ss3
             erlang_by_slot = erlang_cl
         else:
-            last_status = mip_info
+            last_status = ls3
+
+    # Kademe 4: shrinkage = 0, min taraması yap
+    if assignments is None and cl_enabled:
+        erlang_zero = _recompute_erlang_with_shrinkage(0)
+
+        if verbose:
+            delta = sum(erlang_zero.values()) - sum(erlang_by_slot.values())
+            print(f"   ⚠ Kapasite kaybı taraması da başarısız → shrinkage = 0 "
+                  f"(Erlang Δ={delta:+}), son min taraması")
+
+        a4, m4, um4, ss4, ls4 = _scan_min_with_erlang(erlang_zero, 'zero_shrinkage')
+        if a4 is not None:
+            assignments, mip_info, used_min, solution_stage = a4, m4, um4, ss4
+            erlang_by_slot = erlang_zero
+        else:
+            last_status = ls4
 
     if assignments is None:
         print(f"   ⚠ Çözüm bulunamadı (tüm kademeler tükendi): {last_status}")
@@ -1739,7 +1777,12 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     mip_info['min_per_shift_used'] = used_min
     mip_info['min_per_shift_default'] = default_min
     mip_info['solution_stage'] = solution_stage
-    mip_info['erlang_recomputed_with_kapasite_kaybi'] = (solution_stage == 'capacity_loss_adjusted')
+    if solution_stage and solution_stage.startswith('capacity_loss'):
+        mip_info['shrinkage_source'] = 'kapasite_kaybi'
+    elif solution_stage and solution_stage.startswith('zero_shrinkage'):
+        mip_info['shrinkage_source'] = 'zero'
+    else:
+        mip_info['shrinkage_source'] = 'default'
 
     if verbose:
         print(f"   ✓ Çözüm aşaması: {solution_stage} (min_per_shift={used_min})")
