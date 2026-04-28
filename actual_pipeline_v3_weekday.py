@@ -1685,6 +1685,12 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     solution_stage = None
     last_status = None
 
+    if verbose:
+        in_min_total = sum(inhouse_min_by_slot.values()) if inhouse_min_by_slot else 0
+        out_min_total = sum(outsource_min_by_slot.values()) if outsource_min_by_slot else 0
+        print(f"      [original] Erlang toplam={sum(erlang_by_slot.values())} peak={max(erlang_by_slot.values()) if erlang_by_slot else 0} | "
+              f"InMin toplam={in_min_total}, OutMin toplam={out_min_total}")
+
     for try_min in try_values:
         assignments, mip_info = optimize_queue(
             erlang_by_slot, df_shifts_queue, queue,
@@ -1693,6 +1699,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             outsource_min_by_slot=outsource_min_by_slot,
             config=config,
             min_per_shift_override=try_min)
+        if verbose:
+            status = 'OPTIMAL' if assignments is not None else (str(mip_info) if mip_info else 'UNKNOWN')
+            print(f"      [original] min={try_min:>3} → {status}")
         if assignments is not None:
             used_min = try_min
             solution_stage = 'default' if try_min == default_min else f'min_fallback={try_min}'
@@ -1712,6 +1721,13 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
     def _scan_min_with_erlang(erl_dict, stage_label):
         """try_values üzerinden tarama yapar. Subqueue min'leri de erl_dict'e göre yeniden hesaplanır."""
         in_min, out_min = _build_subqueue_min_slots(df_calls_30, queue, target_date, erl_dict, config)
+        if verbose:
+            erl_total = sum(erl_dict.values())
+            erl_peak = max(erl_dict.values()) if erl_dict else 0
+            in_min_total = sum(in_min.values()) if in_min else 0
+            out_min_total = sum(out_min.values()) if out_min else 0
+            print(f"      [{stage_label}] Erlang toplam={erl_total} peak={erl_peak} | "
+                  f"InMin toplam={in_min_total}, OutMin toplam={out_min_total}")
         a = None
         m = None
         um = default_min
@@ -1725,6 +1741,9 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
                 outsource_min_by_slot=out_min,
                 config=config,
                 min_per_shift_override=tm)
+            if verbose:
+                status = 'OPTIMAL' if a is not None else (str(m) if m else 'UNKNOWN')
+                print(f"      [{stage_label}] min={tm:>3} → {status}")
             if a is not None:
                 um = tm
                 if stage_label == 'capacity_loss':
