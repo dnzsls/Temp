@@ -134,6 +134,19 @@ def get_time_cost_multiplier(queue, company_type, start_hour, config=CONFIG):
     return time_mults.get(company_type, {}).get(start_hour, 1.0)
 
 
+def _classify_shift(s, shift_cov, queue, pt_shift_keys, inhouse_value, mcfg, config):
+    """Bir vardiya için (company_type, base_cost, multiplier, start_hour) döner."""
+    start_h = shift_cov[s]['start']
+    if s in pt_shift_keys:
+        return ('part_time', mcfg['cost_inhouse'],
+                get_time_cost_multiplier(queue, 'inhouse', start_h, config), start_h)
+    if shift_cov[s]['company'] == inhouse_value:
+        return ('inhouse', mcfg['cost_inhouse'],
+                get_time_cost_multiplier(queue, 'inhouse', start_h, config), start_h)
+    return ('outsource', mcfg['cost_outsource'],
+            get_time_cost_multiplier(queue, 'outsource', start_h, config), start_h)
+
+
 # =============================================================================
 # 1. VERİ HAZIRLAMA
 # =============================================================================
@@ -418,19 +431,8 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
 
     # --- Shift maliyetleri (V3: eşit maliyet) ---
     for s in shifts:
-        start_hour = shift_cov[s]['start']
-        if s in pt_shift_keys:
-            base_cost = mcfg['cost_inhouse']
-            company_type = 'part_time'
-            multiplier = get_time_cost_multiplier(queue, 'inhouse', start_hour, config)
-        elif shift_cov[s]['company'] == inhouse_value:
-            base_cost = mcfg['cost_inhouse']
-            company_type = 'inhouse'
-            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
-        else:
-            base_cost = mcfg['cost_outsource']
-            company_type = 'outsource'
-            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
+        company_type, base_cost, multiplier, start_hour = _classify_shift(
+            s, shift_cov, queue, pt_shift_keys, inhouse_value, mcfg, config)
 
         final_cost = base_cost * multiplier
         cost.append(x[s] * final_cost)
@@ -677,16 +679,8 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
     early_total = 0
     early_penalty = 0
     for s, cnt in assignments.items():
-        start_h = shift_cov[s]['start']
-        if s in pt_shift_keys:
-            mult = get_time_cost_multiplier(queue, 'inhouse', start_h, config)
-            ct = 'part_time'
-        elif shift_cov[s]['company'] == inhouse_value:
-            mult = get_time_cost_multiplier(queue, 'inhouse', start_h, config)
-            ct = 'inhouse'
-        else:
-            mult = get_time_cost_multiplier(queue, 'outsource', start_h, config)
-            ct = 'outsource'
+        ct, _base, mult, start_h = _classify_shift(
+            s, shift_cov, queue, pt_shift_keys, inhouse_value, mcfg, config)
         if mult > 1.0:
             early_starts[s] = {'count': cnt, 'start': start_h, 'company': ct,
                                'multiplier': mult, 'penalty': cnt * (mult - 1.0)}
@@ -1010,18 +1004,11 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         print(f"   {'-'*65}")
         s1_assigns = None
 
+    pt_shift_keys = [s for s in sc if sc[s]['company'] == 'part_time']
     for s, cnt in sorted(mip_info['assignments'].items(), key=lambda x: sc[x[0]]['start']):
         info_s = sc[s]
-        if info_s['company'] == 'part_time':
-            base_cost = mcfg['cost_inhouse']
-            mult = 1.0
-        elif info_s['company'] == inhouse_value:
-            base_cost = mcfg['cost_inhouse']
-            mult = get_time_cost_multiplier(queue, 'inhouse', info_s['start'], config)
-        else:
-            base_cost = mcfg['cost_outsource']
-            mult = get_time_cost_multiplier(queue, 'outsource', info_s['start'], config)
-
+        _ct, base_cost, mult, _start = _classify_shift(
+            s, sc, queue, pt_shift_keys, inhouse_value, mcfg, config)
         final_cost = base_cost * mult * cnt
         mult_str = f" ({mult}x)" if mult != 1.0 else ""
 
@@ -1756,41 +1743,28 @@ def run_queue_pipeline(df_calls, df_actual, df_shifts, target_date, queue,
             ls = m
         return None, None, um, ss, ls, in_min, out_min
 
-    # Kademe 3: shrinkage = kapasite_kaybi, min taraması da yap
-    if assignments is None and cl_enabled:
+    # Kademe 3-4: shrinkage'i alternatif kaynaklarla değiştir, Erlang yenile, min tara
+    if cl_enabled and assignments is None:
         hr_cfg = config['queue_configs'][queue].get('hourly_report', {})
         kk_dict = hr_cfg.get('kapasite_kaybi', {})
-        erlang_cl = _recompute_erlang_with_shrinkage(kk_dict)
-
-        if verbose:
-            delta = sum(erlang_cl.values()) - sum(erlang_by_slot.values())
-            print(f"   ⚠ Tüm min fallback'ler tükendi → shrinkage = kapasite_kaybi "
-                  f"(Erlang Δ={delta:+}), min taraması başlıyor")
-
-        a3, m3, um3, ss3, ls3, im3, om3 = _scan_min_with_erlang(erlang_cl, 'capacity_loss')
-        if a3 is not None:
-            assignments, mip_info, used_min, solution_stage = a3, m3, um3, ss3
-            erlang_by_slot = erlang_cl
-            inhouse_min_by_slot, outsource_min_by_slot = im3, om3
-        else:
-            last_status = ls3
-
-    # Kademe 4: shrinkage = 0, min taraması yap
-    if assignments is None and cl_enabled:
-        erlang_zero = _recompute_erlang_with_shrinkage(0)
-
-        if verbose:
-            delta = sum(erlang_zero.values()) - sum(erlang_by_slot.values())
-            print(f"   ⚠ Kapasite kaybı taraması da başarısız → shrinkage = 0 "
-                  f"(Erlang Δ={delta:+}), son min taraması")
-
-        a4, m4, um4, ss4, ls4, im4, om4 = _scan_min_with_erlang(erlang_zero, 'zero_shrinkage')
-        if a4 is not None:
-            assignments, mip_info, used_min, solution_stage = a4, m4, um4, ss4
-            erlang_by_slot = erlang_zero
-            inhouse_min_by_slot, outsource_min_by_slot = im4, om4
-        else:
-            last_status = ls4
+        fallback_shrinkages = [
+            ('capacity_loss', kk_dict, "shrinkage = kapasite_kaybi"),
+            ('zero_shrinkage', 0, "shrinkage = 0"),
+        ]
+        for stage_label, shrinkage_value, msg in fallback_shrinkages:
+            if assignments is not None:
+                break
+            erl_alt = _recompute_erlang_with_shrinkage(shrinkage_value)
+            if verbose:
+                delta = sum(erl_alt.values()) - sum(erlang_by_slot.values())
+                print(f"   ⚠ {msg} (Erlang Δ={delta:+}), min taraması başlıyor")
+            a, m, um, ss, ls, im, om = _scan_min_with_erlang(erl_alt, stage_label)
+            if a is not None:
+                assignments, mip_info, used_min, solution_stage = a, m, um, ss
+                erlang_by_slot = erl_alt
+                inhouse_min_by_slot, outsource_min_by_slot = im, om
+            else:
+                last_status = ls
 
     if assignments is None:
         print(f"   ⚠ Çözüm bulunamadı (tüm kademeler tükendi): {last_status}")
