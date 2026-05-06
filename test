@@ -1,10 +1,45 @@
-print(f"Toplam gün: {len(results)}")
-print(f"Başarılı: {sum(1 for r in results.values() if r is not None)}")
-print(f"Başarısız: {sum(1 for r in results.values() if r is None)}")
+WEEKEND_BUDGET = {
+    'kitle':    1200,
+    'gold':     300,
+    'kurumsal': 120,
+}
 
-# Bir hafta sonu örneği:
-import datetime
-sample_date = '2025-02-01'  # bir cumartesi
-if sample_date in results and results[sample_date] is not None:
-    sample = results[sample_date]
-    print(f"\n{sample_date} key'leri: {list(sample.keys())}")
+# Hafta sonu günlerini topla
+weekend_days = []
+for date_str in sorted(results.keys()):
+    d = pd.to_datetime(date_str)
+    if d.weekday() >= 5:  # Cmt veya Pzr
+        weekend_days.append((date_str, d.weekday()))
+
+print(f"\n{'='*100}")
+print(f"HAFTA SONU İNHOUSE BÜTÇE KONTROLÜ — {YEAR}/{MONTH:02d}")
+print(f"{'='*100}")
+
+# Tablo başlığı
+print(f"{'Kuyruk':<10} ", end='')
+for date_str, wd in weekend_days:
+    label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]   # CmtXX
+    print(f"{label:>7}", end=' ')
+print(f"{'Toplam':>8} {'Bütçe':>7} {'Durum':>10}")
+print('-' * 100)
+
+for queue, budget in WEEKEND_BUDGET.items():
+    inhouse_per_day = []
+    for date_str, _ in weekend_days:
+        r = results.get(date_str)
+        if r and queue in r and r[queue] is not None:
+            inhouse = r[queue]['mip_info']['total_inhouse_kisi']
+        else:
+            inhouse = 0
+        inhouse_per_day.append(inhouse)
+    
+    total = sum(inhouse_per_day)
+    diff = total - budget
+    status = f"+{diff} AŞIM ✗" if diff > 0 else f"{diff:+d} OK ✓"
+    
+    print(f"{queue:<10} ", end='')
+    for v in inhouse_per_day:
+        print(f"{v:>7}", end=' ')
+    print(f"{total:>8} {budget:>7} {status:>10}")
+
+print('-' * 100)
