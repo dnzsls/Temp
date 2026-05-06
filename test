@@ -1,6 +1,46 @@
-from pulp import PULP_CBC_CMD
-import subprocess
+def run_month(year, month, df_calls, df_actual, df_shifts,
+              cfg_weekday, cfg_weekend, verbose=False):
+    """Bir ayın tüm günlerini koşar, results dict döner."""
+    results = {}
+    cal = calendar.Calendar()
+    
+    for day in cal.itermonthdates(year, month):
+        if day.month != month:
+            continue
+        date_str = day.strftime('%Y-%m-%d')
+        
+        try:
+            if day.weekday() >= 5:  # cumartesi/pazar
+                r = run_weekend_all(df_calls, df_actual, df_shifts,
+                                     date_str, config=cfg_weekend)
+            else:
+                r = run_weekday_all(df_calls, df_actual, df_shifts,
+                                     date_str, config=cfg_weekday)
+            results[date_str] = r
+            print(f"✓ {date_str} ({['Pzt','Sal','Çar','Per','Cum','Cmt','Pzr'][day.weekday()]}) tamamlandı")
+        except Exception as e:
+            print(f"✗ {date_str} hata: {e}")
+            results[date_str] = None
+    
+    return results
 
-s = PULP_CBC_CMD()
-result = subprocess.run([s.path], input="version\nquit\n", capture_output=True, text=True)
-print(result.stdout)
+
+
+
+
+
+YEAR = 2026
+MONTH = 5
+CACHE_FILE = f"monthly_{YEAR}_{MONTH:02d}.pkl"
+
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, 'rb') as f:
+        results = pickle.load(f)
+    print(f"Cache'ten yüklendi: {len(results)} gün")
+else:
+    results = run_month(YEAR, MONTH, df_calls, df_actual, df_shifts,
+                        CONFIG_WEEKDAY, CONFIG_WEEKEND)
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(results, f)
+    print(f"Kaydedildi: {CACHE_FILE}")
+
