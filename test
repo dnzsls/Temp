@@ -115,17 +115,18 @@ def gercek_vs_model_raporu(date_str, gercek_vardiyalar, df_calls,
         if queue in model_day and model_day[queue]:
             model_by_slot = model_day[queue]['mip_info']['mip_by_slot']
 
-        print(f"\n{'='*125}")
+        line_w = 110
+        print(f"\n{'='*line_w}")
         print(f"GERÇEK vs MODEL — {queue.upper()} — {date_str} ({gun_adi})")
-        print(f"{'='*125}")
+        print(f"{'='*line_w}")
         print(f"  {'Slot':<6} {'Çağrı':>6} {'Erl':>5} | "
-              f"{'─────── GERÇEK ───────':^32} | {'─────── MODEL ────────':^32} | "
-              f"{'──── FARK ────':^15}")
+              f"{'─── GERÇEK ───':^24} | {'─── MODEL ────':^24} | "
+              f"{'─ FARK ─':^11}")
         print(f"  {'':>6} {'':>6} {'':>5} | "
-              f"{'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>6} | "
-              f"{'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>6} | "
-              f"{'NMT':>4} {'RR':>6}")
-        print('-' * 125)
+              f"{'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
+              f"{'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
+              f"{'NMT':>4} {'RR':>5}")
+        print('-' * line_w)
 
         t_g_kap = t_g_nmt = t_g_ck = 0
         t_m_kap = t_m_nmt = t_m_ck = 0
@@ -155,7 +156,7 @@ def gercek_vs_model_raporu(date_str, gercek_vardiyalar, df_calls,
 
         t_g_rr = t_g_ck / t_cagri if t_cagri > 0 else 0
         t_m_rr = t_m_ck / t_cagri if t_cagri > 0 else 0
-        print('-' * 125)
+        print('-' * line_w)
         print(f"  {'TOPLAM':<6} {t_cagri:>6} {t_erl:>5} | "
               f"{t_g_kap:>4} {t_g_nmt:>4} {t_g_ck:>7.0f} {t_g_rr:>5.0%} | "
               f"{t_m_kap:>4} {t_m_nmt:>4} {t_m_ck:>7.0f} {t_m_rr:>5.0%} | "
