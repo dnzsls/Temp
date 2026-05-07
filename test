@@ -22,6 +22,8 @@ from actual_pipeline_v5_weekday import (
     prepare_calls_30,
     calculate_erlang_all,
     is_slot_in_shift,
+    add_30min,
+    load_aht_from_df,
     SLOTS_30,
 )
 
@@ -46,14 +48,19 @@ from actual_pipeline_v5_weekday import (
 
 # %% [HÜCRE 4] — Karşılaştırma fonksiyonu
 def _aggregate_shifts_to_slots(shifts_dict):
-    """{'08:00-17:00': {'inhouse': 10, 'outsource': 5}, ...} → {slot: total_kisi}"""
+    """{'08:00-17:00': {'inhouse': 10, 'outsource': 5}, ...} → {slot: total_kisi}.
+    Outsource bitiş saatine +30dk eklenir (pipeline'daki add_30min kuralına uygun)."""
     by_slot = {s: 0 for s in SLOTS_30}
     for shift_str, counts in shifts_dict.items():
-        start, end = shift_str.split('-')
-        total = counts.get('inhouse', 0) + counts.get('outsource', 0)
+        start, raw_end = shift_str.split('-')
+        in_kisi = counts.get('inhouse', 0)
+        out_kisi = counts.get('outsource', 0)
+        out_end = add_30min(raw_end)   # outsource için bitiş +30dk
         for s in SLOTS_30:
-            if is_slot_in_shift(s, start, end):
-                by_slot[s] += total
+            if in_kisi and is_slot_in_shift(s, start, raw_end):
+                by_slot[s] += in_kisi
+            if out_kisi and is_slot_in_shift(s, start, out_end):
+                by_slot[s] += out_kisi
     return by_slot
 
 
