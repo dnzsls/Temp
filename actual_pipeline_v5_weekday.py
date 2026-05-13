@@ -1,140 +1,220 @@
 # =============================================================================
-# KİTLE — gerçek (iş birimi) dağılımına yakın çıktı için config override önerisi
+# GERÇEK VS MODEL — RUNNER (TEK DOSYA)
 # =============================================================================
-# Kullanım (notebook hücresinde):
+# Manuel girilen vardiya planını alıp aylık model çıktısıyla yan yana karşılaştırır.
+# Aynı çağrı verisi + aynı hourly_report config'iyle adil karşılaştırma yapar.
 #
-#     from config_v6_weekday import CONFIG as CONFIG_WEEKDAY
-#     from kitle_config_overrides import apply_kitle_overrides
-#     apply_kitle_overrides(CONFIG_WEEKDAY)
+# Yeni notebook'ta hücre hücre kullanılacak. # %% [HÜCRE N] satırları her hücre
+# başlangıcını gösterir.
 #
-# Sonra normal aylık akışına devam et.
-#
-# Dayanak (Şubat 9-13 gerçek kitle dağılımı):
-#   - 460 inhouse + 450 outsource = 910 kişi, ~16 farklı vardiya saati aktif
-#   - İki büyük inhouse bloğu: 09:00 (97 in) ve 15:00 (128 in) — sabah + ikindi
-#   - Outsource gün boyu yayılı (07:00, 09:00, 10-13, 17-18, gece)
-#   - Bitişik saatler arası BÜYÜK sıçramalar var (örn. 09:00=187 ↔ 09:30=33)
-#   → Smoothing baskısı agresif olamaz, yoksa real-life sıçramaları siler
-#   → slot_cap geniş tutulmalı, gerçekte erlang'in %50 üstüne çıkılıyor
-#   → time_cost_multipliers ile 09:00 ve 15:00 saatlerini hafifçe TEŞVİK et
-#     ki MIP doğal olarak buralara yığsın
+# Önkoşul:
+# - monthly_2026_XX.pkl dosyası (aylık model koşturulmuş)
+# - df_calls erişilebilir
+# - CONFIG_WEEKDAY, CONFIG_WEEKEND tanımlı
 # =============================================================================
 
 
-def apply_kitle_overrides(config):
-    """config_v6_weekday içindeki 'kitle' queue'sunu gerçek-dağılıma yakın
-    parametrelerle ezer. Diğer kuyruklara dokunmaz."""
+# %% [HÜCRE 1] — Importlar
+import pandas as pd
+import pickle
 
-    qc = config['queue_configs']['kitle']
-
-    # --- min_per_shift = 13 (kullanıcı zorunluluğu) ----------------------------
-    qc['mip']['min_per_shift'] = 13
-    qc['mip']['min_per_shift_fallback'] = {
-        'enabled': True, 'floor': 5, 'step': 2,
-    }
-
-    # --- RR penalty: ılımlı, RR ~110% hedef ------------------------------------
-    # penalty_per_person=4 → her ekstra ajan 4 birim ceza
-    # peak_penalty=2 → peak slotlarda daha gevşek (over-coverage'a izin)
-    qc['rr_penalty'] = {
-        'enabled': True,
-        'peak_exempt': False,
-        'penalty_per_person': 4.0,
-        'peak_penalty': 2.0,
-        'peak_threshold': 0.70,
-        'night_multiplier': {
-            'enabled': True,
-            'hours': {'start': '00:00', 'end': '07:00'},
-            'multiplier': 100.0,
-        },
-    }
-
-    # --- slot_cap: gerçeğin gözlemlenen oranlarına göre genişletildi ----------
-    # Gerçek: slot 09:00 erlang ~200, toplam coverage ~305 → ratio 1.5
-    # Bu yüzden 09-11 bantı 1.55, 15-18 bantı 1.50 kullanıyoruz.
-    # Gece sıkı (yığılma istenmez), öğle peak orta sıkı.
-    qc['slot_cap'] = {
-        'enabled': True,
-        'bands': [
-            {'start': '05:00', 'end': '07:00', 'max_ratio': 1.30, 'penalty': 80.0},
-            {'start': '07:00', 'end': '09:00', 'max_ratio': 1.30, 'penalty': 50.0},
-            {'start': '09:00', 'end': '11:00', 'max_ratio': 1.55, 'penalty': 50.0},
-            {'start': '11:00', 'end': '15:00', 'max_ratio': 1.25, 'penalty': 80.0},
-            {'start': '15:00', 'end': '18:00', 'max_ratio': 1.50, 'penalty': 50.0},
-            {'start': '18:00', 'end': '22:00', 'max_ratio': 1.30, 'penalty': 80.0},
-            {'start': '22:00', 'end': '05:00', 'max_ratio': 1.20, 'penalty': 120.0},
-        ],
-    }
-
-    # --- start_smoothing: pencere bazlı, GERÇEKTEKİ sıçramalara izin verir ----
-    # sabah (07-10): gerçekte 30/58/30/187/33 — büyük varyans → düşük penalty
-    # ogle  (10-15): gerçekte 73/87/32/60/60/30 — daha düz → orta penalty
-    # aksam (15-20): gerçekte 128/0/50/40 — varyans → düşük penalty
-    qc['start_smoothing'] = {
-        'enabled': True,
-        'companies': ['inhouse', 'outsource'],
-        'windows': [
-            {'name': 'sabah', 'start': '07:00', 'end': '10:00', 'penalty': 2.0},
-            {'name': 'ogle',  'start': '10:00', 'end': '15:00', 'penalty': 8.0},
-            {'name': 'aksam', 'start': '15:00', 'end': '20:00', 'penalty': 3.0},
-        ],
-    }
-
-    # --- balance_penalty: düşük tut (gerçekte outsource > inhouse var) --------
-    qc['balance_penalty'] = {
-        'enabled': True,
-        'penalty_per_diff': 1.0,
-        'windows': [
-            {'name': 'sabah', 'start': '07:00', 'end': '11:59', 'penalty': 1.0},
-            {'name': 'aksam', 'start': '12:00', 'end': '23:30', 'penalty': 1.0},
-        ],
-    }
-
-    # --- time_cost_multipliers: iki ana inhouse bloğunu TEŞVİK et -------------
-    # Gerçekte 09:00 ve 15:00 ana yığılma noktaları. Diğer saatleri hafifçe
-    # pahalı tutarak MIP'in oraya tercih etmesini sağlarız.
-    # 1.00 = teşvikli (en ucuz), 1.05 = nötr+, 1.10 = hafif caydırıcı
-    config['time_cost_multipliers']['kitle'] = {
-        'inhouse': {
-            # Çok erken: caydırıcı (mevcut)
-            '07:00': 25.0, '07:30': 10.0,
-            # Sabah ana blok başlangıçları — 09:00 EN UCUZ
-            '08:00': 1.05, '08:30': 1.05, '09:00': 1.00, '09:30': 1.05,
-            '10:00': 1.05, '10:30': 1.05,
-            # Öğle — caydırıcı (inhouse genelde 09:00'da girer)
-            '11:00': 1.10, '11:30': 1.10, '12:00': 1.10, '13:00': 1.10,
-            '14:00': 1.10,
-            # İkindi-akşam ana blok — 15:00 EN UCUZ
-            '15:00': 1.00,
-            # Akşam-gece: gerçekte çok az inhouse var, caydırıcı
-            '17:00': 1.15, '18:00': 1.15, '19:00': 1.20, '22:00': 1.30,
-        },
-        'outsource': {
-            # Outsource'da multiplier yok (default 1.0) — outsource gün boyu yayılı
-            '07:00': 2.0, '07:30': 2.0,
-        },
-    }
+from actual_pipeline_v5_weekday import (
+    prepare_calls_30,
+    calculate_erlang_all,
+    is_slot_in_shift,
+    add_30min,
+    load_aht_from_df,
+    SLOTS_30,
+)
 
 
-# Hızlı doğrulama: parametreyi gerçek değerlerle karşılaştır
-def print_overrides_summary(config):
-    qc = config['queue_configs']['kitle']
-    print("KİTLE override özet:")
-    print(f"  min_per_shift: {qc['mip']['min_per_shift']}")
-    print(f"  rr_penalty (normal/peak): "
-          f"{qc['rr_penalty']['penalty_per_person']}/{qc['rr_penalty']['peak_penalty']}")
-    print(f"  slot_cap bantları: {len(qc['slot_cap']['bands'])}")
-    for b in qc['slot_cap']['bands']:
-        print(f"    {b['start']}-{b['end']}: max_ratio={b['max_ratio']}, "
-              f"penalty={b['penalty']}")
-    print(f"  start_smoothing pencereleri:")
-    for w in qc['start_smoothing']['windows']:
-        print(f"    {w['name']} {w['start']}-{w['end']}: penalty={w['penalty']}")
-    print(f"  time_cost_multipliers (inhouse): "
-          f"{len(config['time_cost_multipliers']['kitle']['inhouse'])} saat tanımlı")
+# %% [HÜCRE 2] — Veri çekme
+# Mevcut aylık notebook'undaki veri çekme kodunu BURAYA YAPIŞTIR.
+# En azından df_calls lazım. df_aht da gerekirse (sub_queues için).
+#
+# Örnek:
+# df_calls = pd.read_sql("SELECT ... FROM ...", conn)
+# df_aht   = pd.read_sql("SELECT ... FROM ...", conn)
 
 
-if __name__ == '__main__':
-    from config_v6_weekday import CONFIG
-    apply_kitle_overrides(CONFIG)
-    print_overrides_summary(CONFIG)
+# %% [HÜCRE 3] — Configler (haftaiçi + haftasonu)
+# Mevcut aylık notebook'undaki CONFIG_WEEKDAY ve CONFIG_WEEKEND tanımlarını
+# BURAYA YAPIŞTIR. AHT yükleme satırlarını da unutma:
+#
+# from actual_pipeline_v5_weekday import load_aht_from_df
+# CONFIG_WEEKDAY['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKDAY)
+# CONFIG_WEEKEND['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKEND)
+
+
+# %% [HÜCRE 4] — Karşılaştırma fonksiyonu
+def _aggregate_shifts_to_slots(shifts_dict):
+    """{'08:00-17:00': {'inhouse': 10, 'outsource': 5}, ...} →
+    (by_slot_in, by_slot_out, by_slot_total) ayrı dict'ler.
+    Outsource bitiş saatine +30dk eklenir (pipeline'daki add_30min kuralına uygun)."""
+    by_slot_in = {s: 0 for s in SLOTS_30}
+    by_slot_out = {s: 0 for s in SLOTS_30}
+    for shift_str, counts in shifts_dict.items():
+        start, raw_end = shift_str.split('-')
+        in_kisi = counts.get('inhouse', 0)
+        out_kisi = counts.get('outsource', 0)
+        out_end = add_30min(raw_end)   # outsource için bitiş +30dk
+        for s in SLOTS_30:
+            if in_kisi and is_slot_in_shift(s, start, raw_end):
+                by_slot_in[s] += in_kisi
+            if out_kisi and is_slot_in_shift(s, start, out_end):
+                by_slot_out[s] += out_kisi
+    by_slot_total = {s: by_slot_in[s] + by_slot_out[s] for s in SLOTS_30}
+    return by_slot_in, by_slot_out, by_slot_total
+
+
+def _capacity_calc(kap, hour, cagri, re_cfg, kk_cfg, ca_cfg):
+    re_oran = re_cfg.get(hour, re_cfg.get('default', 0))
+    kk_oran = kk_cfg.get(hour, kk_cfg.get('default', 0))
+    ca = ca_cfg.get(hour, ca_cfg.get('default', 15))
+    re = round(kap * re_oran)
+    kk = round(kap * kk_oran)
+    nmt = kap - re - kk
+    ck = nmt * (ca / 2)
+    rr = ck / cagri if cagri > 0 else 0
+    return re, kk, nmt, ck, rr
+
+
+def _get_hourly_report_cfg(cfg, queue, is_weekend):
+    if is_weekend and 'hourly_report' in cfg:
+        return cfg['hourly_report']
+    return cfg.get('queue_configs', {}).get(queue, {}).get('hourly_report', {})
+
+
+def gercek_vs_model_raporu(date_str, gercek_vardiyalar, df_calls,
+                           cfg_weekday, cfg_weekend, model_results,
+                           queues=('kitle', 'kurumsal', 'gold')):
+    d = pd.to_datetime(date_str)
+    is_weekend = d.weekday() >= 5
+    cfg = cfg_weekend if is_weekend else cfg_weekday
+    gun_adi = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr'][d.weekday()]
+
+    df_calls_30 = prepare_calls_30(df_calls, config=cfg)
+    df_erlang = calculate_erlang_all(df_calls_30, config=cfg)
+    df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
+    model_day = model_results.get(date_str, {}) or {}
+
+    for queue in queues:
+        df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
+        erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
+        calls_col = f"{queue}_total"
+        calls_by_slot = (
+            dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
+            if calls_col in df_calls_day.columns else {}
+        )
+
+        gercek_in_by_slot, gercek_out_by_slot, gercek_by_slot = \
+            _aggregate_shifts_to_slots(gercek_vardiyalar.get(queue, {}))
+
+        hr_cfg = _get_hourly_report_cfg(cfg, queue, is_weekend)
+        re_cfg = hr_cfg.get('rapor_etkisi', {})
+        kk_cfg = hr_cfg.get('kapasite_kaybi', {})
+        ca_cfg = hr_cfg.get('cagri_adedi', {})
+
+        model_by_slot = {}
+        model_in_by_slot = {}
+        model_out_by_slot = {}
+        if queue in model_day and model_day[queue]:
+            mi = model_day[queue]['mip_info']
+            model_by_slot = mi.get('mip_by_slot', {})
+            model_in_by_slot = mi.get('mip_in_by_slot', {})
+            model_out_by_slot = mi.get('mip_out_by_slot', {})
+
+        line_w = 130
+        print(f"\n{'='*line_w}")
+        print(f"GERÇEK vs MODEL — {queue.upper()} — {date_str} ({gun_adi})")
+        print(f"{'='*line_w}")
+        print(f"  {'Slot':<6} {'Çağrı':>6} {'Erl':>5} | "
+              f"{'──────── GERÇEK ────────':^34} | "
+              f"{'──────── MODEL ─────────':^34} | "
+              f"{'─ FARK ─':^11}")
+        print(f"  {'':>6} {'':>6} {'':>5} | "
+              f"{'In':>4} {'Out':>4} {'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
+              f"{'In':>4} {'Out':>4} {'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
+              f"{'NMT':>4} {'RR':>5}")
+        print('-' * line_w)
+
+        t_g_in = t_g_out = t_g_kap = t_g_nmt = t_g_ck = 0
+        t_m_in = t_m_out = t_m_kap = t_m_nmt = t_m_ck = 0
+        t_cagri = t_erl = 0
+
+        for slot in SLOTS_30:
+            cagri = int(calls_by_slot.get(slot, 0))
+            erl = erlang_by_slot.get(slot, 0)
+            g_in = gercek_in_by_slot.get(slot, 0)
+            g_out = gercek_out_by_slot.get(slot, 0)
+            g_kap = gercek_by_slot.get(slot, 0)
+            m_in = model_in_by_slot.get(slot, 0)
+            m_out = model_out_by_slot.get(slot, 0)
+            m_kap = model_by_slot.get(slot, 0)
+
+            if cagri == 0 and g_kap == 0 and m_kap == 0:
+                continue
+
+            h = int(slot[:2])
+            _, _, g_nmt, g_ck, g_rr = _capacity_calc(g_kap, h, cagri, re_cfg, kk_cfg, ca_cfg)
+            _, _, m_nmt, m_ck, m_rr = _capacity_calc(m_kap, h, cagri, re_cfg, kk_cfg, ca_cfg)
+
+            t_cagri += cagri; t_erl += erl
+            t_g_in += g_in; t_g_out += g_out
+            t_g_kap += g_kap; t_g_nmt += g_nmt; t_g_ck += g_ck
+            t_m_in += m_in; t_m_out += m_out
+            t_m_kap += m_kap; t_m_nmt += m_nmt; t_m_ck += m_ck
+
+            print(f"  {slot:<6} {cagri:>6} {erl:>5} | "
+                  f"{g_in:>4} {g_out:>4} {g_kap:>4} {g_nmt:>4} {g_ck:>7.0f} {g_rr:>5.0%} | "
+                  f"{m_in:>4} {m_out:>4} {m_kap:>4} {m_nmt:>4} {m_ck:>7.0f} {m_rr:>5.0%} | "
+                  f"{m_nmt - g_nmt:>+4} {(m_rr - g_rr):>+5.0%}")
+
+        t_g_rr = t_g_ck / t_cagri if t_cagri > 0 else 0
+        t_m_rr = t_m_ck / t_cagri if t_cagri > 0 else 0
+        print('-' * line_w)
+        print(f"  {'TOPLAM':<6} {t_cagri:>6} {t_erl:>5} | "
+              f"{t_g_in:>4} {t_g_out:>4} {t_g_kap:>4} {t_g_nmt:>4} {t_g_ck:>7.0f} {t_g_rr:>5.0%} | "
+              f"{t_m_in:>4} {t_m_out:>4} {t_m_kap:>4} {t_m_nmt:>4} {t_m_ck:>7.0f} {t_m_rr:>5.0%} | "
+              f"{t_m_nmt - t_g_nmt:>+4} {(t_m_rr - t_g_rr):>+5.0%}")
+
+
+# %% [HÜCRE 5] — Aylık model sonuçlarını pickle'dan yükle
+YEAR = 2026
+MONTH = 2
+PKL_FILE = f"monthly_{YEAR}_{MONTH:02d}.pkl"
+
+with open(PKL_FILE, 'rb') as f:
+    results = pickle.load(f)
+
+print(f"{PKL_FILE} yüklendi: {len(results)} gün")
+
+
+# %% [HÜCRE 6] — MANUEL GİRİŞ (her çalıştırmada burayı düzenle)
+GUN = '2026-02-09'   # raporu istediğin gün
+
+GERCEK_VARDIYALAR = {
+    'kitle': {
+        '08:00-17:00': {'inhouse': 10, 'outsource': 5},
+        '09:00-18:00': {'inhouse': 20, 'outsource': 8},
+        '14:00-23:00': {'inhouse': 12, 'outsource': 6},
+    },
+    'kurumsal': {
+        '09:00-18:00': {'inhouse': 5, 'outsource': 0},
+    },
+    'gold': {
+        '08:00-17:00': {'inhouse': 8, 'outsource': 0},
+        '14:00-23:00': {'inhouse': 6, 'outsource': 0},
+    },
+}
+
+
+# %% [HÜCRE 7] — Raporu çalıştır
+gercek_vs_model_raporu(
+    GUN,
+    GERCEK_VARDIYALAR,
+    df_calls,
+    CONFIG_WEEKDAY,
+    CONFIG_WEEKEND,
+    results,
+)
