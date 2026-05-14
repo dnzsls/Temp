@@ -2391,6 +2391,181 @@ def optimize_week(erlang_by_slot_per_day, df_shifts, queue, target_dates, config
     return stable_assignments, day_specific_assignments, info_per_day
 
 
+def _distribute_surplus_per_day(stable_assignments, day_specific_assignments,
+                                 info_per_day, erlang_by_slot_per_day, queue,
+                                 config, verbose=True):
+    """Her gün için ayrı surplus dağıtımı (v7 weekly).
+
+    v6 daily distribute_surplus mantığı, haftaiçi her güne ayrı uygulanır:
+      - O günün toplam inhouse / outsource'una göre fazlayı hesapla
+      - v6 pencere oranları + rr_first yöntemi
+      - Stable atamalara DOKUNULMAZ — eklenen kişiler day_specific olarak
+        günün assignment'una yazılır (Pzt-Cum'a yayılmaması için).
+
+    Her gün için info_per_day[d]'ye 'mip_info_stage1' eklenir (surplus öncesi
+    snapshot) ve info güncellenir.
+
+    Returns: güncellenmiş (stable_assignments, day_specific_assignments, info_per_day)
+    """
+    sd_cfg = config.get('surplus_distribution', {})
+    if not sd_cfg.get('enabled', False):
+        return stable_assignments, day_specific_assignments, info_per_day
+
+    kadro_cfg = sd_cfg.get('total_kadro', {}).get(queue, {})
+    total_in_kadro = kadro_cfg.get('inhouse', 0)
+    total_out_kadro = kadro_cfg.get('outsource', 0)
+
+    if total_in_kadro <= 0 and total_out_kadro <= 0:
+        return stable_assignments, day_specific_assignments, info_per_day
+
+    method = sd_cfg.get('method', 'rr_first')
+    only_assigned = sd_cfg.get('only_assigned_shifts', True)
+    fallback = sd_cfg.get('fallback_all_inhouse', True)
+    windows = sd_cfg.get('windows', [])
+    out_enabled = sd_cfg.get('outsource_enabled', True)
+
+    ccfg = config['company']
+    inhouse_value = ccfg['inhouse']['shift_value']
+    outsource_value = ccfg['outsource']['shift_value']
+
+    # shift_cov tüm günlerde aynı
+    sample_info = next(iter(info_per_day.values()))
+    shift_cov = sample_info['shift_coverage']
+
+    for d_label, info in info_per_day.items():
+        # 1) surplus öncesi snapshot — v6 ile uyumlu rapor için
+        info['mip_info_stage1'] = copy.deepcopy(info)
+
+        current_in = info['total_inhouse_kisi']
+        current_out = info['total_outsource_kisi']
+        surplus_in = max(0, total_in_kadro - current_in)
+        surplus_out = max(0, total_out_kadro - current_out) if out_enabled else 0
+
+        if verbose:
+            print(f"   ➕ Surplus [{d_label}]: in={surplus_in} (kadro {total_in_kadro}-{current_in}), "
+                  f"out={surplus_out} (kadro {total_out_kadro}-{current_out})")
+
+        if surplus_in <= 0 and surplus_out <= 0:
+            continue
+        if not windows:
+            if verbose:
+                print(f"      ⚠ pencere tanımı yok, atlanıyor")
+            continue
+
+        # 2) Eligible shift'ler: o gün aktif olan TÜM shift'ler (stable +
+        #    day-specific). Stable'a eklersek bile day-specific olarak yazacağız.
+        day_specific_today = day_specific_assignments.get(d_label, {})
+        current_assigns_today = dict(stable_assignments)
+        for s, v in day_specific_today.items():
+            current_assigns_today[s] = current_assigns_today.get(s, 0) + v
+
+        in_shifts = [s for s, sc in shift_cov.items()
+                     if sc['company'] == inhouse_value]
+        out_shifts = [s for s, sc in shift_cov.items()
+                      if sc['company'] == outsource_value]
+
+        if only_assigned:
+            eligible_in = [s for s in in_shifts if current_assigns_today.get(s, 0) > 0]
+            eligible_out = [s for s in out_shifts if current_assigns_today.get(s, 0) > 0]
+        else:
+            eligible_in = in_shifts
+            eligible_out = out_shifts
+
+        erlang_by_slot = erlang_by_slot_per_day.get(d_label, {})
+        local_mip_by_slot = dict(info['mip_by_slot'])
+        added_today = {}
+
+        for company_label, surplus, eligible in [
+            ('inhouse', surplus_in, eligible_in),
+            ('outsource', surplus_out, eligible_out),
+        ]:
+            if surplus <= 0 or not eligible:
+                continue
+
+            win_cands = {win['name']: [s for s in eligible
+                                       if win['start'] <= shift_cov[s]['start'] <= win['end']]
+                         for win in windows}
+            if all(len(c) == 0 for c in win_cands.values()):
+                if fallback and eligible:
+                    windows_eff = [{'name': 'fallback', 'start': '00:00', 'end': '23:59', 'ratio': 1.0}]
+                    win_cands = {'fallback': eligible}
+                else:
+                    continue
+            else:
+                windows_eff = windows
+
+            active_windows = [w for w in windows_eff if win_cands.get(w['name'])]
+            ratio_sum = sum(w['ratio'] for w in active_windows)
+            if ratio_sum == 0:
+                continue
+
+            raw_shares = {w['name']: surplus * (w['ratio'] / ratio_sum)
+                          for w in active_windows}
+            floor_shares = {n: int(v) for n, v in raw_shares.items()}
+            leftover = surplus - sum(floor_shares.values())
+            fracs = sorted(((n, raw_shares[n] - floor_shares[n]) for n in floor_shares),
+                           key=lambda x: x[1], reverse=True)
+            for i in range(leftover):
+                floor_shares[fracs[i % len(fracs)][0]] += 1
+
+            if verbose:
+                share_str = ", ".join(f"{w['name']}={floor_shares[w['name']]}"
+                                       for w in active_windows)
+                print(f"      [{company_label}] surplus={surplus}, pencereler: {share_str}")
+
+            for win in active_windows:
+                share = floor_shares[win['name']]
+                if share <= 0:
+                    continue
+                cands = win_cands[win['name']]
+                added_w, _used_rr, _used_prop = _allocate_within_pool(
+                    share, cands, shift_cov, erlang_by_slot,
+                    current_assigns_today, local_mip_by_slot, method
+                )
+                for s, n in added_w.items():
+                    if n > 0:
+                        added_today[s] = added_today.get(s, 0) + n
+
+        if not added_today:
+            continue
+
+        # 3) Eklenen kişileri day_specific'e yaz (stable bozulmasın)
+        for s, n in added_today.items():
+            day_specific_today[s] = day_specific_today.get(s, 0) + n
+            info['assignments'][s] = info['assignments'].get(s, 0) + n
+        day_specific_assignments[d_label] = day_specific_today
+
+        # 4) info'nun aggregate'lerini yeniden hesapla
+        in_all = [s for s, sc in shift_cov.items() if sc['company'] == inhouse_value]
+        out_all = [s for s, sc in shift_cov.items() if sc['company'] == outsource_value]
+        for slot in info['mip_by_slot']:
+            info['mip_by_slot'][slot] = sum(info['assignments'].get(s, 0)
+                                            for s in shift_cov if slot in shift_cov[s]['slots'])
+            info['mip_in_by_slot'][slot] = sum(info['assignments'].get(s, 0)
+                                               for s in in_all if slot in shift_cov[s]['slots'])
+            info['mip_out_by_slot'][slot] = sum(info['assignments'].get(s, 0)
+                                                for s in out_all if slot in shift_cov[s]['slots'])
+
+        added_in = sum(n for s, n in added_today.items()
+                       if shift_cov[s]['company'] == inhouse_value)
+        added_out = sum(n for s, n in added_today.items()
+                        if shift_cov[s]['company'] == outsource_value)
+        info['total_inhouse_kisi'] = current_in + added_in
+        info['total_outsource_kisi'] = current_out + added_out
+        info['total_kisi'] = info['total_inhouse_kisi'] + info['total_outsource_kisi']
+        info['outsource_ratio'] = (info['total_outsource_kisi'] / info['total_kisi']
+                                    if info['total_kisi'] > 0 else 0)
+        info['surplus_added'] = added_today
+        info['surplus_total_added'] = sum(added_today.values())
+
+        if verbose:
+            print(f"      ✓ [{d_label}] eklenen: in={added_in}, out={added_out} "
+                  f"→ yeni toplam in={info['total_inhouse_kisi']}, "
+                  f"out={info['total_outsource_kisi']}")
+
+    return stable_assignments, day_specific_assignments, info_per_day
+
+
 def print_weekly_summary(stable_assignments, day_specific_assignments,
                          shift_cov, queue, target_dates):
     """Haftanın stable inhouse vardiya listesi + günlük outsource + day-specific."""
@@ -2581,6 +2756,16 @@ def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
             info_per_day[d_label]['shrinkage_source'] = (
                 'default' if used_decrement == 0.0 else 'weekly_decrement')
             info_per_day[d_label]['shrinkage_trial_log'] = trial_log
+
+        # Per-day surplus dağıtımı — her gün kendi dinamiğine göre fazlayı dağıtır.
+        # Stable atamalar bozulmaz; eklenen kişiler day_specific olarak yazılır.
+        if config.get('surplus_distribution', {}).get('enabled', False):
+            if verbose:
+                print(f"\n  ➤ Per-day surplus dağıtımı başlıyor ({queue})…")
+            stable, day_specific, info_per_day = _distribute_surplus_per_day(
+                stable, day_specific, info_per_day,
+                erlang_by_slot_per_day, queue, config, verbose=verbose,
+            )
 
         # Kullanıcı isteği: kademeli denemenin tüm adımlarını raporda görelim
         if verbose:
