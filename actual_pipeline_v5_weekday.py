@@ -565,7 +565,7 @@ def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
         df_shifts = df_shifts_by_queue.get(queue)
         if df_shifts is None or df_shifts.empty:
             if verbose:
-                print(f"  {queue}: vardiya yok, atlandı.")
+                print(f"  {queue}: vardiya yok, atlandı.") 
             continue
 
         stable, day_specific, info_per_day = optimize_week(
