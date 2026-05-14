@@ -2429,25 +2429,44 @@ def print_weekly_summary(stable_assignments, day_specific_assignments,
                 print(f"    {s:<32} {saat:<14} {sc['company']:<10} {v:>6}")
 
 
+def _decrement_shrinkage_cfg(shrinkage_cfg, decrement):
+    """Option A — saatlik dict shrinkage'da her değerden `decrement` çıkar, 0'da kıs.
+
+    Skaler ise tek değerden çıkar. Profili kabaca korur; düşük olanlar erken sıfırlanır.
+    """
+    if isinstance(shrinkage_cfg, dict):
+        return {k: max(0.0, float(v) - decrement) for k, v in shrinkage_cfg.items()}
+    return max(0.0, float(shrinkage_cfg) - decrement)
+
+
+def _build_erlang_per_day(df_calls_30, queue, target_dates, config):
+    """Verilen config ile Erlang hesapla, gün bazlı {day_label: {slot: need}} döndür."""
+    df_erl = calculate_erlang_all(df_calls_30, config=config)
+    out = {}
+    for date_str in target_dates:
+        d = pd.to_datetime(date_str)
+        day_label = _date_to_day_label(date_str)
+        df_q = df_erl[(df_erl['date'] == d) & (df_erl['queue'] == queue)]
+        out[day_label] = dict(zip(df_q['slot'], df_q['erlang_need']))
+    return out
+
+
 def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
                         queues=('kitle', 'kurumsal', 'gold'), verbose=True):
     """5 günlük df_calls'tan erlang hesapla, her queue için optimize_week çağır.
 
+    Infeasible olursa `weekly_shrinkage_fallback` config'i aktifse,
+    shrinkage değerlerini kademeli olarak `step` kadar (0'da kısarak) azaltıp
+    tüm günler için Erlang'ı yeniden hesaplayıp tekrar çözmeyi dener.
+
     Returns: {queue: {'stable': dict, 'day_specific': dict, 'info_per_day': dict}}
     """
     df_calls_30 = prepare_calls_30(df_calls, config=config)
-    df_erlang = calculate_erlang_all(df_calls_30, config=config)
 
     results = {}
     for queue in queues:
         if verbose:
             print(f"\n{'#'*80}\n# {queue.upper()} HAFTALIK MIP\n{'#'*80}")
-        erlang_by_slot_per_day = {}
-        for date_str in target_dates:
-            d = pd.to_datetime(date_str)
-            day_label = _date_to_day_label(date_str)
-            df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-            erlang_by_slot_per_day[day_label] = dict(zip(df_q['slot'], df_q['erlang_need']))
 
         df_shifts = df_shifts_by_queue.get(queue)
         if df_shifts is None or df_shifts.empty:
@@ -2455,21 +2474,96 @@ def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
                 print(f"  {queue}: vardiya yok, atlandı.")
             continue
 
-        # Tek sefer MIP — min_per_shift azaltma fallback'i YOK.
-        # Config'teki min_per_shift değeri ile çözülemezse infeasible kabul edilir.
+        # 1) Orijinal shrinkage ile dene
+        erlang_by_slot_per_day = _build_erlang_per_day(
+            df_calls_30, queue, target_dates, config)
+
+        if verbose:
+            tot = sum(sum(v.values()) for v in erlang_by_slot_per_day.values())
+            print(f"  [original] haftalık Erlang toplam={tot}")
+
         stable, day_specific, info_per_day = optimize_week(
             erlang_by_slot_per_day, df_shifts, queue, target_dates,
             config, verbose=verbose,
         )
+
+        solution_stage = 'default' if stable is not None else None
+        used_decrement = 0.0
+
+        # 2) Infeasible ise kademeli shrinkage azaltma fallback'i
+        wsf_cfg = (config['queue_configs'][queue]['mip']
+                   .get('weekly_shrinkage_fallback', {}))
+        wsf_enabled = wsf_cfg.get('enabled', False)
+        if stable is None and wsf_enabled:
+            step = float(wsf_cfg.get('step', 0.10))
+            floor = float(wsf_cfg.get('floor', 0.0))
+            original_shrinkage = config['queue_configs'][queue]['erlang']['shrinkage']
+
+            if isinstance(original_shrinkage, dict):
+                max_shr = max((float(v) for v in original_shrinkage.values()), default=0.0)
+            else:
+                max_shr = float(original_shrinkage)
+
+            decrements = []
+            d_val = step
+            while d_val < max_shr:
+                decrements.append(round(d_val, 4))
+                d_val += step
+            # Son adım: tüm değerleri kesin floor (0)'a indir
+            decrements.append(round(max(d_val, max_shr), 4))
+
+            for decrement in decrements:
+                new_shrinkage = _decrement_shrinkage_cfg(original_shrinkage, decrement)
+                # floor parametresi ileride 0'dan farklı olursa diye:
+                if isinstance(new_shrinkage, dict):
+                    new_shrinkage = {k: max(floor, v) for k, v in new_shrinkage.items()}
+                else:
+                    new_shrinkage = max(floor, new_shrinkage)
+
+                cfg_alt = copy.deepcopy(config)
+                cfg_alt['queue_configs'][queue]['erlang']['shrinkage'] = new_shrinkage
+                erlang_by_slot_per_day = _build_erlang_per_day(
+                    df_calls_30, queue, target_dates, cfg_alt)
+
+                if verbose:
+                    tot = sum(sum(v.values()) for v in erlang_by_slot_per_day.values())
+                    print(f"   ⚠ shrinkage -{decrement:.2f} (floor={floor}) → "
+                          f"haftalık Erlang toplam={tot}, yeniden çözülüyor")
+
+                stable, day_specific, info_per_day = optimize_week(
+                    erlang_by_slot_per_day, df_shifts, queue, target_dates,
+                    cfg_alt, verbose=verbose,
+                )
+                if stable is not None:
+                    used_decrement = decrement
+                    solution_stage = f'shrinkage_decrement={decrement:.2f}'
+                    if verbose:
+                        print(f"   ✓ Çözüm bulundu: shrinkage -{decrement:.2f}")
+                    break
+
         if stable is None:
             if verbose:
                 mn = config['queue_configs'][queue]['mip']['min_per_shift']
-                print(f"  ✗ {queue}: MIP infeasible (min_per_shift={mn} ile çözülemedi)")
+                if wsf_enabled:
+                    print(f"  ✗ {queue}: MIP infeasible — shrinkage fallback de "
+                          f"çözmedi (min_per_shift={mn})")
+                else:
+                    print(f"  ✗ {queue}: MIP infeasible (min_per_shift={mn} ile "
+                          f"çözülemedi, weekly_shrinkage_fallback kapalı)")
             continue
+
+        # Meta bilgiyi her günün info'sune ekle (raporlar için)
+        for d_label in info_per_day:
+            info_per_day[d_label]['solution_stage'] = solution_stage
+            info_per_day[d_label]['shrinkage_decrement_used'] = used_decrement
+            info_per_day[d_label]['shrinkage_source'] = (
+                'default' if used_decrement == 0.0 else 'weekly_decrement')
 
         results[queue] = {
             'stable': stable, 'day_specific': day_specific,
             'info_per_day': info_per_day,
+            'solution_stage': solution_stage,
+            'shrinkage_decrement_used': used_decrement,
         }
         if verbose:
             sample_info = next(iter(info_per_day.values()))
