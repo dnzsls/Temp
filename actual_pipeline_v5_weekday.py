@@ -1,591 +1,416 @@
 # =============================================================================
-# HAFTALIK MIP — ACTUAL V7 (WEEKLY, HAFTAİÇİ)
+# HAFTALIK MIP V7 — KOŞTURMA + CONFIG (TEK DOSYA)
 # =============================================================================
+# Pzt-Cum (5 haftaiçi gün) için TEK MIP çözer:
+#   - Stable vardiya: Pzt-Cum aynı kişi sayısı (agent ataması doğrudan)
+#   - Cuma-özel ek vardiyalar (örn. 14:00-23:00 inhouse)
+#   - Her gün için v6 ile uyumlu mip_info (mevcut günlük raporlar çalışır)
 #
-# V7 amacı: Bir agent'ın Pzt-Cum aynı vardiyada olmasını GARANTİLEMEK.
+# DOSYALAR:
+#   - actual_pipeline_v7_weekly.py  → MIP motoru (elleme)
+#   - run_weekly_v7.py              → BU DOSYA: config + akış
 #
-# V6 günlük MIP'i her günü bağımsız çözüyordu → günler arası vardiya
-# atamaları kayıyordu. V7 ise **tek bir MIP'i 5 gün için** çözer:
-#
-#   - x[shift]            → stabil vardiyalar (Pzt-Cum boyunca aynı kişi sayısı)
-#   - x_day[shift, day]   → güne-özel vardiyalar (örn. Cuma-özel 14-23 inhouse)
-#   - Coverage kısıtları her gün × her slot için ayrı uygulanır
-#   - min_per_shift, RR penalty, slot_cap her gün için ayrı hesaplanır
-#
-# Gün-özel vardiya tanımı:
-#   df_shifts'e opsiyonel 'available_days' kolonu eklenir.
-#   Değer: ['Mon','Tue','Wed','Thu','Fri'] (default), veya alt küme.
-#   Örnek: {'shift': '14:00-23:00_inhouse_fri', ..., 'available_days': ['Fri']}
-#
-# v6'dan yeniden kullanılan tüm yardımcılar (load_aht, prepare_calls_30,
-# calculate_erlang_all, is_slot_in_shift, create_shift_coverage, vs.) buraya
-# import edilerek geri-uyumluluk korunur.
-#
-# Config: config_v6_weekday.py kullanılabilir; queue_configs altında ek
-# 'weekly_mip' bloğu yoksa default davranış geçerli.
+# Hücre hücre çalıştır (# %% [HÜCRE N] ile işaretli).
 # =============================================================================
 
+
+# %% [HÜCRE 1] — Importlar
 import pandas as pd
-import math
-from pulp import (
-    LpProblem, LpMinimize, LpVariable, lpSum, value,
-    PULP_CBC_CMD, LpStatus,
-)
+import pickle
 
-from actual_pipeline_v6_weekday import (
-    SLOTS_30,
-    is_slot_in_shift,
-    add_30min,
-    prepare_calls_30,
-    calculate_erlang_all,
-    create_shift_coverage,
+from actual_pipeline_v7_weekly import (
+    run_week_all_queues,
+    optimize_week,
+    print_weekly_summary,
     load_aht_from_df,
-    _classify_shift,
-    get_time_cost_multiplier,
+)
+# v6'dan günlük detay raporu için
+from actual_pipeline_v6_weekday import (
+    print_queue_report, get_actual_summary,
+    prepare_calls_30, calculate_erlang_all,
 )
 
-DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+
+# %% [HÜCRE 2] — Veri çekme
+# Mevcut aylık notebook'undaki veri çekme kodunu BURAYA YAPIŞTIR.
+# Gereken:
+#   - df_calls (en az hafta tarihlerini içermeli)
+#   - df_aht
+#   - df_shifts_dict = {'kitle': df, 'kurumsal': df, 'gold': df}
+#   - df_actual (opsiyonel — gerçek karşılaştırması için)
+#
+# Örnek:
+#   df_calls = pd.read_sql("SELECT ... FROM ...", conn)
+#   df_aht   = pd.read_sql("SELECT ... FROM ...", conn)
+#   df_shifts_dict = {
+#       'kitle':    pd.read_excel('vardiyalar.xlsx', sheet_name='kitle'),
+#       'kurumsal': pd.read_excel('vardiyalar.xlsx', sheet_name='kurumsal'),
+#       'gold':     pd.read_excel('vardiyalar.xlsx', sheet_name='gold'),
+#   }
 
 
-# =============================================================================
-# Yardımcılar
-# =============================================================================
+# %% [HÜCRE 3] — CONFIG_WEEKDAY (inline)
+# Kitle = gerçek dağılım uyumlu tuned değerler.
+# Kurumsal & Gold = v6 default değerleri.
+CONFIG_WEEKDAY = {
 
-def _shift_available_on_day(shift_row_or_dict, day_label):
-    """df_shifts satırı veya dict — 'available_days' alanı varsa kontrol et,
-    yoksa her gün geçerli kabul et."""
-    if hasattr(shift_row_or_dict, 'get'):
-        avail = shift_row_or_dict.get('available_days')
-    else:
-        avail = getattr(shift_row_or_dict, 'available_days', None)
-    if avail is None or (isinstance(avail, float) and pd.isna(avail)):
-        return True
-    if isinstance(avail, (list, tuple, set)):
-        return day_label in avail
-    if isinstance(avail, str):
-        return day_label in [x.strip() for x in avail.split(',')]
-    return True
+    # ---- KUYRUKLAR ----
+    'queues': {
+        'kitle':    {'label': 'kitle',    'actual_name': 'kitle_cagrilar',
+                     'companies': ['inhouse', 'outsource']},
+        'kurumsal': {'label': 'kurumsal', 'actual_name': 'kurumsal_cagrilar',
+                     'companies': ['inhouse']},
+        'gold':     {'label': 'gold',     'actual_name': 'gold_cagrilar',
+                     'companies': ['inhouse']},
+    },
 
+    # ---- AHT (load_aht_from_df ile doldurulur, HÜCRE 5'te) ----
+    'sub_queues': {},
+    'aht_overrides': {'kitle': {}, 'kurumsal': {}, 'gold': {}},
+    'default_aht': 150,
 
-def _classify_shifts_by_days(df_shifts, day_labels=DAY_LABELS):
-    """Her shift için hangi günlerde aktif olduğunu döndür.
-    Returns: {shift_key: set(day_labels_active)}"""
-    out = {}
-    for _, row in df_shifts.iterrows():
-        key = f"{row['shift']}_{row['company']}"
-        active_days = {d for d in day_labels if _shift_available_on_day(row, d)}
-        out[key] = active_days
-    return out
+    # ---- PART-TIME ----
+    'part_time': {
+        'enabled': False,
+        'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
+        'count': {'kitle': 42, 'kurumsal': 4, 'gold': 10},
+    },
 
+    'outsource_ratio': {'kitle': None, 'kurumsal': None, 'gold': None},
 
-def _date_to_day_label(date_str):
-    """'2026-02-09' → 'Mon'"""
-    d = pd.to_datetime(date_str)
-    return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d.weekday()]
+    # ---- SAAT BAZLI MALİYET ÇARPANLARI ----
+    # Kitle inhouse'da 09:00 ve 15:00 saatleri EN UCUZ → MIP buralara yığsın.
+    'time_cost_multipliers': {
+        'kitle': {
+            'inhouse': {
+                '07:00': 25.0, '07:30': 10.0,
+                '08:00': 1.05, '08:30': 1.05, '09:00': 1.00, '09:30': 1.05,
+                '10:00': 1.05, '10:30': 1.05,
+                '11:00': 1.10, '11:30': 1.10, '12:00': 1.10, '13:00': 1.10,
+                '14:00': 1.10,
+                '15:00': 1.00,
+                '17:00': 1.15, '18:00': 1.15, '19:00': 1.20, '22:00': 1.30,
+            },
+            'outsource': {'07:00': 2.0, '07:30': 2.0},
+        },
+        'kurumsal': {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
+        'gold':     {'inhouse': {'07:00': 2.0, '07:30': 1.7}, 'outsource': {}},
+        'default':  {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
+    },
 
+    'company': {
+        'inhouse':   {'shift_value': 'inhouse',   'outsource_flg': 0},
+        'outsource': {'shift_value': 'outsource', 'outsource_flg': 1},
+    },
+    'shift_columns': {'shift': 'shift', 'start': 'start', 'end': 'end',
+                      'company': 'company'},
+    'calls_columns': {'date': 'data_date', 'time': 'min_time_period_value',
+                      'sub_queue': 'resource_group_key',
+                      'main_queue': 'line_based_main_group', 'calls': 'not_call'},
+    'actual_columns': {'date': 'working_date', 'queue': 'line_based_main_group',
+                       'location': 'working_main_group',
+                       'shift_start': 'shifts_start_hour',
+                       'shift_end': 'shifts_end_hour',
+                       'outsource': 'outsource_flg', 'weekend': 'weekend_flg',
+                       'count': 'calisan_kisi_sayisi'},
+    'report': {'peak_threshold': 0.70},
 
-# =============================================================================
-# Haftalık MIP
-# =============================================================================
-
-def optimize_week(erlang_by_slot_per_day, df_shifts, queue, target_dates, config,
-                  inhouse_min_per_day=None, outsource_min_per_day=None,
-                  verbose=True):
-    """5 günlük (Pzt-Cum) haftaiçi için tek MIP.
-
-    Args:
-        erlang_by_slot_per_day: {day_label: {slot: erlang_need}}
-            day_label: 'Mon'..'Fri'
-        df_shifts: pandas DataFrame, kolonlar: shift, start, end, company,
-            opsiyonel 'available_days' (liste, hangi günlerde aktif).
-        queue: 'kitle' | 'kurumsal' | 'gold'
-        target_dates: [date_str, ...] 5 günün tarihleri (raporlama için)
-        config: v6 config yapısı
-        inhouse_min_per_day: {day_label: {slot: min_in}} (opsiyonel)
-        outsource_min_per_day: {day_label: {slot: min_out}} (opsiyonel)
-
-    Returns:
-        (stable_assignments, day_specific_assignments, info_per_day)
-        - stable_assignments: {shift_key: count} → Pzt-Cum boyunca aynı
-        - day_specific_assignments: {day_label: {shift_key: count}}
-        - info_per_day: {day_label: mip_info dict (v6 ile uyumlu)}
-    """
-    qcfg = config['queues'][queue]
-    qconfigs = config['queue_configs'][queue]
-    mcfg = qconfigs['mip']
-    scol = config['shift_columns']
-    ccfg = config['company']
-
-    allowed = qcfg['companies']
-    allowed_values = [ccfg[c]['shift_value'] for c in allowed]
-    df_sf = df_shifts[df_shifts[scol['company']].isin(allowed_values)].copy()
-
-    only_inhouse = (allowed == ['inhouse'])
-    inhouse_value = ccfg['inhouse']['shift_value']
-    outsource_value = ccfg['outsource']['shift_value']
-
-    shift_cov = create_shift_coverage(df_sf, config)
-    # available_days bilgisini shift_cov'a ekle
-    shift_days = _classify_shifts_by_days(df_sf)
-    for k, sc in shift_cov.items():
-        sc['available_days'] = shift_days.get(k, set(DAY_LABELS))
-
-    shifts = list(shift_cov.keys())
-
-    # Stable vs day-specific ayrımı:
-    # Bir shift TÜM target günlerde aktifse stabil, değilse gün-özel.
-    target_day_labels = [_date_to_day_label(d) for d in target_dates]
-    stable_shifts = [s for s in shifts
-                     if all(d in shift_cov[s]['available_days'] for d in target_day_labels)]
-    day_specific_shifts = [s for s in shifts if s not in stable_shifts]
-
-    in_shifts_stable = [s for s in stable_shifts if shift_cov[s]['company'] == inhouse_value]
-    out_shifts_stable = [s for s in stable_shifts if shift_cov[s]['company'] == outsource_value]
-
-    if verbose:
-        print(f"  [optimize_week] queue={queue}, stable={len(stable_shifts)}, "
-              f"day_specific={len(day_specific_shifts)}")
+    'inhouse_only_subqueues': {
+        'kitle': ['retention_line',
+                  {'sub_queue': 'karttemelbankaclik', 'min_ratio': 0.20}],
+        'kurumsal': [], 'gold': [],
+    },
+    'outsource_only_subqueues': {
+        'kitle': [{'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0,
+                   'hours': {'start': '08:00', 'end': '00:00'}}],
+        'kurumsal': [], 'gold': [],
+    },
 
     # =========================================================================
-    # Değişkenler
+    # QUEUE CONFIGS
     # =========================================================================
-    prob = LpProblem(f"Q_{queue}_weekly", LpMinimize)
+    'queue_configs': {
 
-    # Stabil: bir değişken, Pzt-Cum aynı
-    x = LpVariable.dicts("x", stable_shifts, lowBound=0, cat='Integer')
-    y = LpVariable.dicts("y", stable_shifts, cat='Binary')
+        # ----------- KİTLE (gerçek-dağılım uyumlu tuned) -----------
+        'kitle': {
+            'erlang': {
+                'target_asa': 30, 'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
+                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
+                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
+                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
+                'min_per_shift': 13,              # KULLANICI ZORUNLULUĞU
+                'min_per_shift_overrides': {},
+                'min_per_shift_fallback': {
+                    'enabled': True, 'floor': 5, 'step': 2,
+                },
+                'capacity_loss_fallback': {'enabled': True},
+            },
+            'rr_penalty': {
+                'enabled': True, 'peak_exempt': False,
+                'penalty_per_person': 4.0, 'peak_penalty': 2.0,
+                'peak_threshold': 0.70,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '00:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {'enabled': True, 'penalty': 10},
+            # Gerçeğin gözlemlenen oranlarına göre genişletilmiş bantlar
+            'slot_cap': {
+                'enabled': True,
+                'bands': [
+                    {'start': '05:00', 'end': '07:00', 'max_ratio': 1.30, 'penalty': 80.0},
+                    {'start': '07:00', 'end': '09:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                    {'start': '09:00', 'end': '11:00', 'max_ratio': 1.55, 'penalty': 50.0},
+                    {'start': '11:00', 'end': '15:00', 'max_ratio': 1.25, 'penalty': 80.0},
+                    {'start': '15:00', 'end': '18:00', 'max_ratio': 1.50, 'penalty': 50.0},
+                    {'start': '18:00', 'end': '22:00', 'max_ratio': 1.30, 'penalty': 80.0},
+                    {'start': '22:00', 'end': '05:00', 'max_ratio': 1.20, 'penalty': 120.0},
+                ],
+            },
+            'balance_penalty': {
+                'enabled': True, 'penalty_per_diff': 1.0,
+                'windows': [
+                    {'name': 'sabah', 'start': '07:00', 'end': '11:59', 'penalty': 1.0},
+                    {'name': 'aksam', 'start': '12:00', 'end': '23:30', 'penalty': 1.0},
+                ],
+            },
+            # Pencere bazlı smoothing — gerçekteki sıçramaları korumak için kademeli
+            'start_smoothing': {
+                'enabled': True,
+                'companies': ['inhouse', 'outsource'],
+                'windows': [
+                    {'name': 'sabah', 'start': '07:00', 'end': '10:00', 'penalty': 2.0},
+                    {'name': 'ogle',  'start': '10:00', 'end': '15:00', 'penalty': 8.0},
+                    {'name': 'aksam', 'start': '15:00', 'end': '20:00', 'penalty': 3.0},
+                ],
+            },
+            'hourly_report': {
+                'rapor_etkisi': {'default': 0.00},
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
+                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
+                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {'default': 15},
+            },
+        },
 
-    # Gün-özel: (shift, day) çiftleri için ayrı değişken
-    day_shift_pairs = []
-    for s in day_specific_shifts:
-        for d in target_day_labels:
-            if d in shift_cov[s]['available_days']:
-                day_shift_pairs.append((s, d))
-    x_day = {(s, d): LpVariable(f"x_day_{s}_{d}", lowBound=0, cat='Integer')
-             for (s, d) in day_shift_pairs}
-    y_day = {(s, d): LpVariable(f"y_day_{s}_{d}", cat='Binary')
-             for (s, d) in day_shift_pairs}
+        # ----------- KURUMSAL -----------
+        'kurumsal': {
+            'erlang': {
+                'target_asa': 30, 'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
+                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
+                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
+                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
+                'min_per_shift': 13,
+                'min_per_shift_overrides': {},
+                'min_per_shift_fallback': {
+                    'enabled': True, 'floor': 1, 'step': 1,
+                },
+                'capacity_loss_fallback': {'enabled': True},
+            },
+            'rr_penalty': {
+                'enabled': True, 'peak_exempt': True,
+                'penalty_per_person': 4.0, 'peak_penalty': 2.0,
+                'peak_threshold': 0.70,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '00:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {'enabled': True, 'penalty': 10},
+            'slot_cap': {'enabled': False, 'bands': []},
+            'hourly_report': {
+                'rapor_etkisi': {'default': 0.0},
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
+                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
+                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {'default': 15},
+            },
+        },
 
-    cost = []
+        # ----------- GOLD -----------
+        'gold': {
+            'erlang': {
+                'target_asa': 30, 'target_seconds': 30,
+                'shrinkage': {
+                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
+                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
+                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
+                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
+                    'default': 0.0,
+                },
+                'interval_minutes': 30,
+            },
+            'mip': {
+                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
+                'min_per_shift': 13,
+                'min_per_shift_overrides': {},
+                'min_per_shift_fallback': {
+                    'enabled': True, 'floor': 1, 'step': 1,
+                },
+                'capacity_loss_fallback': {'enabled': True},
+            },
+            'rr_penalty': {
+                'enabled': True, 'peak_exempt': True,
+                'penalty_per_person': 2.0, 'peak_penalty': 4.0,
+                'peak_threshold': 0.70,
+                'night_multiplier': {
+                    'enabled': True,
+                    'hours': {'start': '00:00', 'end': '07:00'},
+                    'multiplier': 100.0,
+                },
+            },
+            'small_shift_penalty': {'enabled': True, 'penalty': 10},
+            'slot_cap': {'enabled': False, 'bands': []},
+            'hourly_report': {
+                'rapor_etkisi': {'default': 0.0},
+                'kapasite_kaybi': {
+                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
+                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
+                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
+                    'default': 0.08,
+                },
+                'cagri_adedi': {'default': 15},
+            },
+        },
+    },
 
-    # =========================================================================
-    # Cost (shift bazlı)
-    #   - Stabil: x[s] × base_cost (5 gün boyu kullanılacak ama
-    #     tek-faturalandı, çünkü aynı agent paylaşılıyor)
-    #   - Gün-özel: x_day[s,d] × base_cost
-    # =========================================================================
-    cost_details = []
-    pt_shift_keys = []  # part-time bu sürümde yok, placeholder
-
-    for s in stable_shifts:
-        company_type, base_cost, multiplier, start_hour = _classify_shift(
-            s, shift_cov, queue, pt_shift_keys, inhouse_value, mcfg, config)
-        final_cost = base_cost * multiplier
-        cost.append(x[s] * final_cost)
-        if multiplier != 1.0:
-            cost_details.append({
-                'shift': s, 'company': company_type, 'start': start_hour,
-                'base_cost': base_cost, 'multiplier': multiplier,
-                'final_cost': final_cost, 'kind': 'stable',
-            })
-
-    for (s, d) in day_shift_pairs:
-        company_type, base_cost, multiplier, start_hour = _classify_shift(
-            s, shift_cov, queue, pt_shift_keys, inhouse_value, mcfg, config)
-        final_cost = base_cost * multiplier
-        cost.append(x_day[(s, d)] * final_cost)
-        if multiplier != 1.0:
-            cost_details.append({
-                'shift': s, 'day': d, 'company': company_type,
-                'start': start_hour, 'base_cost': base_cost,
-                'multiplier': multiplier, 'final_cost': final_cost,
-                'kind': 'day_specific',
-            })
-
-    # =========================================================================
-    # Coverage kısıtı (her gün × her slot)
-    # + RR penalty + Slot cap (günlük)
-    # =========================================================================
-    rr_cfg = qconfigs.get('rr_penalty', {})
-    rr_enabled = rr_cfg.get('enabled', False)
-    rr_penalty_per = rr_cfg.get('penalty_per_person', 5.0)
-    rr_peak_exempt = rr_cfg.get('peak_exempt', True)
-    rr_peak_thr = rr_cfg.get('peak_threshold', 0.70)
-    peak_penalty_per = rr_cfg.get('peak_penalty', rr_penalty_per)
-    night_mult_cfg = rr_cfg.get('night_multiplier', {})
-    night_mult_enabled = night_mult_cfg.get('enabled', False)
-    night_mult_value = night_mult_cfg.get('multiplier', 3.0)
-    night_mult_start = night_mult_cfg.get('hours', {}).get('start', '22:00')
-    night_mult_end = night_mult_cfg.get('hours', {}).get('end', '08:00')
-
-    def _is_night_slot(slot):
-        return is_slot_in_shift(slot, night_mult_start, night_mult_end)
-
-    sc_cfg = qconfigs.get('slot_cap', {})
-    sc_enabled = sc_cfg.get('enabled', False)
-    sc_bands = sc_cfg.get('bands', [])
-
-    excess_per_day = {}      # {(day, slot): excess_var}
-    sc_excess_per_day = {}   # {(day, slot): (excess_var, penalty)}
-    peak_slots_per_day = {}  # {day: set(slot)}
-    sc_detail_per_day = {}   # {day: [{slot, cap, ...}]}
-
-    for day_label in target_day_labels:
-        erlang_by_slot = erlang_by_slot_per_day.get(day_label, {})
-        active_slots = [s for s in SLOTS_30 if erlang_by_slot.get(s, 0) > 0]
-
-        # Peak slotları
-        peak_slots = set()
-        if rr_enabled and active_slots:
-            max_erlang = max(erlang_by_slot.get(s, 0) for s in active_slots)
-            if rr_peak_exempt and max_erlang > 0:
-                peak_slots = {s for s in active_slots
-                              if erlang_by_slot.get(s, 0) >= max_erlang * rr_peak_thr}
-        peak_slots_per_day[day_label] = peak_slots
-
-        sc_detail_per_day[day_label] = []
-
-        for slot in active_slots:
-            erlang_need = erlang_by_slot.get(slot, 0)
-            if erlang_need <= 0:
-                continue
-
-            # Bu slotu kapsayan stabil vardiyalar
-            covering_stable = [s for s in stable_shifts
-                               if slot in shift_cov[s]['slots']]
-            # Bu slotu kapsayan gün-özel vardiyalar (bu güne ait)
-            covering_day = [(s, day_label) for (s, d) in day_shift_pairs
-                            if d == day_label and slot in shift_cov[s]['slots']]
-
-            if not (covering_stable or covering_day):
-                continue   # bu slotta hiç kaynak yok
-
-            total_cov_expr = (
-                lpSum([x[s] for s in covering_stable]) +
-                lpSum([x_day[pair] for pair in covering_day])
-            )
-            # Coverage zorunluluğu
-            prob += total_cov_expr >= erlang_need
-
-            # RR penalty (gün × slot)
-            if rr_enabled:
-                exc = LpVariable(f"exc_{day_label}_{slot}",
-                                 lowBound=0, cat='Continuous')
-                prob += exc >= total_cov_expr - erlang_need
-                excess_per_day[(day_label, slot)] = exc
-                if slot in peak_slots:
-                    eff_pen = peak_penalty_per
-                elif night_mult_enabled and _is_night_slot(slot):
-                    eff_pen = rr_penalty_per * night_mult_value
-                else:
-                    eff_pen = rr_penalty_per
-                cost.append(exc * eff_pen)
-
-            # Slot cap (gün × slot)
-            if sc_enabled and sc_bands:
-                matched_band = None
-                for band in sc_bands:
-                    if is_slot_in_shift(slot, band['start'], band['end']):
-                        matched_band = band
-                        break
-                if matched_band is not None:
-                    band_ratio = matched_band.get('max_ratio', 1.20)
-                    band_pen = matched_band.get('penalty', 50.0)
-                    cap = max(math.ceil(erlang_need * band_ratio), 3)
-                    sc_exc = LpVariable(f"sc_exc_{day_label}_{slot}",
-                                        lowBound=0, cat='Continuous')
-                    prob += sc_exc >= total_cov_expr - cap
-                    sc_excess_per_day[(day_label, slot)] = (sc_exc, band_pen)
-                    cost.append(sc_exc * band_pen)
-                    sc_detail_per_day[day_label].append({
-                        'slot': slot, 'erlang': erlang_need, 'cap': cap,
-                        'ratio': band_ratio, 'penalty': band_pen,
-                        'band': f"{matched_band['start']}-{matched_band['end']}"
-                    })
-
-        # Inhouse / Outsource min_by_slot (opsiyonel) — günlük
-        if inhouse_min_per_day:
-            day_min = inhouse_min_per_day.get(day_label, {})
-            for slot, min_in in day_min.items():
-                if min_in <= 0:
-                    continue
-                cov_in_stable = [s for s in stable_shifts
-                                 if shift_cov[s]['company'] == inhouse_value
-                                 and slot in shift_cov[s]['slots']]
-                cov_in_day = [(s, day_label) for (s, d) in day_shift_pairs
-                              if d == day_label
-                              and shift_cov[s]['company'] == inhouse_value
-                              and slot in shift_cov[s]['slots']]
-                if cov_in_stable or cov_in_day:
-                    prob += (lpSum([x[s] for s in cov_in_stable]) +
-                             lpSum([x_day[p] for p in cov_in_day])) >= min_in
-
-        if outsource_min_per_day:
-            day_min = outsource_min_per_day.get(day_label, {})
-            for slot, min_out in day_min.items():
-                if min_out <= 0:
-                    continue
-                cov_out_stable = [s for s in stable_shifts
-                                  if shift_cov[s]['company'] == outsource_value
-                                  and slot in shift_cov[s]['slots']]
-                cov_out_day = [(s, day_label) for (s, d) in day_shift_pairs
-                               if d == day_label
-                               and shift_cov[s]['company'] == outsource_value
-                               and slot in shift_cov[s]['slots']]
-                if cov_out_stable or cov_out_day:
-                    prob += (lpSum([x[s] for s in cov_out_stable]) +
-                             lpSum([x_day[p] for p in cov_out_day])) >= min_out
-
-    # =========================================================================
-    # min_per_shift kısıtı
-    # Açılan her vardiyada (stable veya day-specific) en az N kişi.
-    # override yoksa default mcfg['min_per_shift'].
-    # =========================================================================
-    M = 500
-    min_default = mcfg['min_per_shift']
-    min_overrides = mcfg.get('min_per_shift_overrides', {})
-
-    for s in stable_shifts:
-        prob += x[s] <= M * y[s]
-        start_hour = shift_cov[s]['start']
-        min_v = min_overrides.get(start_hour, min_default)
-        prob += x[s] >= min_v * y[s]
-
-    for (s, d) in day_shift_pairs:
-        prob += x_day[(s, d)] <= M * y_day[(s, d)]
-        start_hour = shift_cov[s]['start']
-        min_v = min_overrides.get(start_hour, min_default)
-        prob += x_day[(s, d)] >= min_v * y_day[(s, d)]
-
-    # =========================================================================
-    # Kadro tavanı (haftalık staffing için)
-    # =========================================================================
-    kadro_cfg = config.get('surplus_distribution', {}).get('total_kadro', {}).get(queue, {})
-    kadro_in = kadro_cfg.get('inhouse', 0)
-    kadro_out = kadro_cfg.get('outsource', 0)
-    if kadro_in > 0 and in_shifts_stable:
-        # Stabil inhouse + günde maks gün-özel inhouse
-        prob += lpSum([x[s] for s in in_shifts_stable]) <= kadro_in
-    if kadro_out > 0 and out_shifts_stable:
-        prob += lpSum([x[s] for s in out_shifts_stable]) <= kadro_out
-
-    # =========================================================================
-    # Amaç fonksiyonu
-    # =========================================================================
-    prob += lpSum(cost)
-
-    # =========================================================================
-    # Çöz
-    # =========================================================================
-    solver = PULP_CBC_CMD(msg=0)
-    prob.solve(solver)
-    status = LpStatus[prob.status]
-    if verbose:
-        print(f"  [optimize_week] solver status: {status}")
-
-    if status != 'Optimal':
-        return None, None, None
-
-    # =========================================================================
-    # Sonuçları topla
-    # =========================================================================
-    stable_assignments = {s: int(round(value(x[s]) or 0)) for s in stable_shifts}
-
-    day_specific_assignments = {d: {} for d in target_day_labels}
-    for (s, d), var in x_day.items():
-        v = int(round(value(var) or 0))
-        if v > 0:
-            day_specific_assignments[d][s] = v
-
-    # Her gün için v6-uyumlu mip_info dict'i hazırla
-    info_per_day = {}
-    for day_label, target_date in zip(target_day_labels, target_dates):
-        erlang_by_slot = erlang_by_slot_per_day.get(day_label, {})
-        # day-level assignments = stable + day_specific
-        assigns_this_day = dict(stable_assignments)
-        for s, v in day_specific_assignments[day_label].items():
-            assigns_this_day[s] = assigns_this_day.get(s, 0) + v
-
-        # mip_by_slot, mip_in_by_slot, mip_out_by_slot
-        mip_by_slot = {}
-        mip_in_by_slot = {}
-        mip_out_by_slot = {}
-        for slot in SLOTS_30:
-            tot = in_v = out_v = 0
-            for s, v in assigns_this_day.items():
-                if v <= 0 or slot not in shift_cov[s]['slots']:
-                    continue
-                tot += v
-                if shift_cov[s]['company'] == inhouse_value:
-                    in_v += v
-                elif shift_cov[s]['company'] == outsource_value:
-                    out_v += v
-            mip_by_slot[slot] = tot
-            mip_in_by_slot[slot] = in_v
-            mip_out_by_slot[slot] = out_v
-
-        # rr_excess_by_slot, sc_excess_by_slot
-        rr_excess_by_slot = {}
-        rr_total_excess = rr_total_penalty_cost = rr_penalized_slots = 0
-        if rr_enabled:
-            peak_slots = peak_slots_per_day.get(day_label, set())
-            for (d_l, slot), exc_var in excess_per_day.items():
-                if d_l != day_label:
-                    continue
-                val = value(exc_var) or 0
-                if val > 0.5:
-                    exc_int = int(round(val))
-                    rr_excess_by_slot[slot] = exc_int
-                    rr_total_excess += exc_int
-                    if slot in peak_slots:
-                        rr_total_penalty_cost += exc_int * peak_penalty_per
-                    elif night_mult_enabled and _is_night_slot(slot):
-                        rr_total_penalty_cost += exc_int * rr_penalty_per * night_mult_value
-                    else:
-                        rr_total_penalty_cost += exc_int * rr_penalty_per
-                    rr_penalized_slots += 1
-
-        sc_excess_by_slot = {}
-        sc_total_excess = sc_total_penalty_cost = sc_penalized_slots = 0
-        for (d_l, slot), (exc_var, pen) in sc_excess_per_day.items():
-            if d_l != day_label:
-                continue
-            val = value(exc_var) or 0
-            if val > 0.5:
-                exc_int = int(round(val))
-                sc_excess_by_slot[slot] = (exc_int, pen)
-                sc_total_excess += exc_int
-                sc_total_penalty_cost += exc_int * pen
-                sc_penalized_slots += 1
-
-        info = {
-            'assignments': assigns_this_day,
-            'shift_coverage': shift_cov,
-            'mip_by_slot': mip_by_slot,
-            'mip_in_by_slot': mip_in_by_slot,
-            'mip_out_by_slot': mip_out_by_slot,
-            'total_kisi': sum(assigns_this_day.values()),
-            'total_inhouse_kisi': sum(v for s, v in assigns_this_day.items()
-                                       if shift_cov[s]['company'] == inhouse_value),
-            'total_outsource_kisi': sum(v for s, v in assigns_this_day.items()
-                                        if shift_cov[s]['company'] == outsource_value),
-            'cost_details': cost_details,
-            'rr_penalty_enabled': rr_enabled,
-            'rr_excess_by_slot': rr_excess_by_slot,
-            'rr_total_excess': rr_total_excess,
-            'rr_total_penalty_cost': rr_total_penalty_cost,
-            'rr_penalized_slots': rr_penalized_slots,
-            'rr_peak_slots': peak_slots_per_day.get(day_label, set()),
-            'slot_cap_detail': sc_detail_per_day.get(day_label, []),
-            'sc_excess_by_slot': sc_excess_by_slot,
-            'sc_total_excess': sc_total_excess,
-            'sc_total_penalty_cost': sc_total_penalty_cost,
-            'sc_penalized_slots': sc_penalized_slots,
-            'target_date': target_date,
-            'day_label': day_label,
-            # haftalık-özel bilgi:
-            'weekly_stable_assignments': stable_assignments,
-            'weekly_day_specific': day_specific_assignments[day_label],
-        }
-        info_per_day[day_label] = info
-
-    return stable_assignments, day_specific_assignments, info_per_day
+    # ---- SURPLUS DAĞITIM (v7 ikinci iterasyonda devreye girecek) ----
+    'surplus_distribution': {
+        'enabled': True, 'outsource_enabled': True,
+        'total_kadro': {
+            'kitle':    {'inhouse': 380, 'outsource': 450},
+            'kurumsal': {'inhouse': 47},
+            'gold':     {'inhouse': 130},
+        },
+        'windows': [
+            {'name': 'sabah', 'start': '09:00', 'end': '11:00', 'ratio': 2/3},
+            {'name': 'aksam', 'start': '11:00', 'end': '20:00', 'ratio': 1/3},
+        ],
+        'only_assigned_shifts': True,
+        'fallback_all_inhouse': True,
+        'method': 'rr_first',
+    },
+}
 
 
-# =============================================================================
-# Haftalık özet
-# =============================================================================
-
-def print_weekly_summary(stable_assignments, day_specific_assignments,
-                         shift_cov, queue, target_dates):
-    """Haftanın stable vardiya listesi + günlere göre eklenen day-specific."""
-    print(f"\n{'='*90}")
-    print(f"HAFTALIK STABLE VARDIYA — {queue.upper()}")
-    print(f"  Tarih aralığı: {target_dates[0]} → {target_dates[-1]}")
-    print(f"{'='*90}")
-    if not stable_assignments:
-        print("  (Stable vardiya yok)")
-    else:
-        print(f"  {'Vardiya':<32} {'Saat':<14} {'Şirket':<10} {'Kişi':>6}")
-        print(f"  {'-'*70}")
-        active = [(s, v) for s, v in stable_assignments.items() if v > 0]
-        for s, v in sorted(active, key=lambda x: shift_cov[x[0]]['start']):
-            sc = shift_cov[s]
-            saat = f"{sc['start']}-{sc['end']}"
-            print(f"  {s:<32} {saat:<14} {sc['company']:<10} {v:>6}")
-        print(f"  {'-'*70}")
-        print(f"  {'TOPLAM (Pzt-Cum aynı kişi)':<58} {sum(v for _, v in active):>6}")
-
-    has_extra = any(d for d in day_specific_assignments.values())
-    if has_extra:
-        print(f"\n  GÜN-ÖZEL EKLER (haftaya stabil değil):")
-        for d_label, day_assigns in day_specific_assignments.items():
-            if not day_assigns:
-                continue
-            print(f"  --- {d_label} ---")
-            for s, v in sorted(day_assigns.items(), key=lambda x: shift_cov[x[0]]['start']):
-                sc = shift_cov[s]
-                saat = f"{sc['start']}-{sc['end']}"
-                print(f"    {s:<30} {saat:<14} {sc['company']:<10} {v:>6}")
+# %% [HÜCRE 4] — AHT yükle
+CONFIG_WEEKDAY['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKDAY)
 
 
-# =============================================================================
-# Orchestrator
-# =============================================================================
+# %% [HÜCRE 5] — Cuma-özel inhouse ek shift
+# Standart Excel listesinde olmayan, sadece Cuma aktif olacak shift'leri ekle.
+# 'available_days' kolonu yoksa pipeline default'ta tüm günler aktif sayar.
+extra_friday_kitle = pd.DataFrame([
+    {
+        'shift': '14:00-23:00_fri',
+        'start': '14:00', 'end': '23:00', 'company': 'inhouse',
+        'available_days': ['Fri'],
+    },
+])
 
-def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
-                        queues=('kitle', 'kurumsal', 'gold'), verbose=True):
-    """5 günlük df_calls'tan erlang hesapla, her queue için optimize_week çağır.
+df_shifts_dict['kitle'] = pd.concat(
+    [df_shifts_dict['kitle'], extra_friday_kitle],
+    ignore_index=True,
+)
 
-    Args:
-        df_calls: tüm hafta çağrı verisi
-        df_shifts_by_queue: {queue: df_shifts} (available_days kolonlu)
-        target_dates: 5 günün tarih listesi (Pzt..Cum), str format
-        config: v6 config
-        queues: hangi kuyrukları çöz
 
-    Returns:
-        {queue: {'stable': dict, 'day_specific': dict, 'info_per_day': dict}}
-    """
-    df_calls_30 = prepare_calls_30(df_calls, config=config)
-    df_erlang = calculate_erlang_all(df_calls_30, config=config)
+# %% [HÜCRE 6] — Hafta tarihlerini belirle ve MIP koştur
+WEEK_DATES = [
+    '2026-02-09',   # Pzt
+    '2026-02-10',   # Sal
+    '2026-02-11',   # Çar
+    '2026-02-12',   # Per
+    '2026-02-13',   # Cum
+]
 
-    results = {}
-    for queue in queues:
-        if verbose:
-            print(f"\n{'#'*80}\n# {queue.upper()} HAFTALIK MIP\n{'#'*80}")
-        # Her gün için erlang_by_slot
-        erlang_by_slot_per_day = {}
-        for date_str in target_dates:
-            d = pd.to_datetime(date_str)
-            day_label = _date_to_day_label(date_str)
-            df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-            erlang_by_slot_per_day[day_label] = dict(zip(df_q['slot'], df_q['erlang_need']))
+results = run_week_all_queues(
+    df_calls=df_calls,
+    df_shifts_by_queue=df_shifts_dict,
+    target_dates=WEEK_DATES,
+    config=CONFIG_WEEKDAY,
+    queues=('kitle', 'kurumsal', 'gold'),
+    verbose=True,
+)
+# results['<queue>']['stable']         → {shift_key: count}  (Pzt-Cum aynı)
+# results['<queue>']['day_specific']   → {day_label: {shift_key: count}}
+# results['<queue>']['info_per_day']   → {day_label: mip_info (v6 uyumlu)}
 
-        df_shifts = df_shifts_by_queue.get(queue)
-        if df_shifts is None or df_shifts.empty:
-            if verbose:
-                print(f"  {queue}: vardiya yok, atlandı.") 
-            continue
 
-        stable, day_specific, info_per_day = optimize_week(
-            erlang_by_slot_per_day, df_shifts, queue, target_dates,
-            config, verbose=verbose,
-        )
-        if stable is None:
-            if verbose:
-                print(f"  ✗ {queue}: MIP infeasible")
-            continue
+# %% [HÜCRE 7] — Pickle olarak kaydet (opsiyonel)
+PKL_FILE = f"weekly_v7_{WEEK_DATES[0]}_{WEEK_DATES[-1]}.pkl"
+with open(PKL_FILE, 'wb') as f:
+    pickle.dump({
+        'week_dates': WEEK_DATES,
+        'results': results,
+    }, f)
+print(f"\nKaydedildi: {PKL_FILE}")
 
-        results[queue] = {
-            'stable': stable, 'day_specific': day_specific,
-            'info_per_day': info_per_day,
-        }
-        if verbose:
-            # haftalık özet
-            sample_info = next(iter(info_per_day.values()))
-            print_weekly_summary(stable, day_specific,
-                                 sample_info['shift_coverage'],
-                                 queue, target_dates)
 
-    return results
+# %% [HÜCRE 8] — Günlük detay raporu fonksiyonu
+def print_daily_detail(queue, day_label):
+    """v6 print_queue_report'u tek bir gün için çağırır."""
+    info = results[queue]['info_per_day'].get(day_label)
+    if info is None:
+        print(f"  {queue} {day_label}: veri yok")
+        return
+    target_date = info['target_date']
+    df_calls_30 = prepare_calls_30(df_calls, config=CONFIG_WEEKDAY)
+    df_erlang = calculate_erlang_all(df_calls_30, config=CONFIG_WEEKDAY)
+    d = pd.to_datetime(target_date)
+    df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
+    erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
+
+    actual = None
+    try:
+        actual = get_actual_summary(df_actual, target_date, queue, CONFIG_WEEKDAY)
+    except Exception:
+        pass
+
+    print_queue_report(target_date, queue, erlang_by_slot, info, actual,
+                       config=CONFIG_WEEKDAY)
+
+
+# Örnek: print_daily_detail('kitle', 'Fri')
+
+
+# %% [HÜCRE 9] — Haftalık özet
+print("\n" + "="*90)
+print(f"HAFTALIK ÖZET — {WEEK_DATES[0]} → {WEEK_DATES[-1]}")
+print("="*90)
+for q, r in results.items():
+    stable_total = sum(r['stable'].values())
+    day_specific_total = sum(sum(d.values()) for d in r['day_specific'].values())
+    print(f"\n  {q.upper()}: stable={stable_total} kişi, "
+          f"gün-özel ekstra={day_specific_total}")
+    if 'Mon' in r['info_per_day']:
+        info = r['info_per_day']['Mon']
+        print(f"    Pzt toplam: {info['total_kisi']} "
+              f"(in={info['total_inhouse_kisi']}, out={info['total_outsource_kisi']})")
