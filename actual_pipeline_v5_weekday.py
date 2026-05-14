@@ -2455,44 +2455,16 @@ def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
                 print(f"  {queue}: vardiya yok, atlandı.")
             continue
 
-        # --- MIN_PER_SHIFT FALLBACK (v6 davranışına eşit) ---
-        # Infeasible olursa min_per_shift'i kademeli düşürerek tekrar dene.
-        mcfg = config['queue_configs'][queue]['mip']
-        fb_cfg = mcfg.get('min_per_shift_fallback', {})
-        default_min = mcfg['min_per_shift']
-        floor = default_min   # default — fallback kapalıysa kullanılmaz
-        if fb_cfg.get('enabled', False):
-            floor = fb_cfg.get('floor', 1)
-            step = max(1, fb_cfg.get('step', 1))
-            # default_min < floor ya da boş range gibi kenar durumları korumak için:
-            if floor > default_min:
-                tries = [default_min]
-            else:
-                tries = list(range(default_min, floor - 1, -step))
-                if not tries:
-                    tries = [default_min]
-                elif tries[-1] != floor:
-                    tries.append(floor)
-        else:
-            tries = [default_min]
-
-        stable = day_specific = info_per_day = None
-        for min_try in tries:
-            if verbose and min_try != default_min:
-                print(f"  → fallback: min_per_shift={min_try} ile deniyor...")
-            stable, day_specific, info_per_day = optimize_week(
-                erlang_by_slot_per_day, df_shifts, queue, target_dates,
-                config, min_per_shift_override=min_try, verbose=verbose,
-            )
-            if stable is not None:
-                if min_try != default_min and verbose:
-                    print(f"  ✓ {queue}: çözüldü min_per_shift={min_try} ile")
-                break
-
+        # Tek sefer MIP — min_per_shift azaltma fallback'i YOK.
+        # Config'teki min_per_shift değeri ile çözülemezse infeasible kabul edilir.
+        stable, day_specific, info_per_day = optimize_week(
+            erlang_by_slot_per_day, df_shifts, queue, target_dates,
+            config, verbose=verbose,
+        )
         if stable is None:
             if verbose:
-                last_try = tries[-1] if tries else default_min
-                print(f"  ✗ {queue}: MIP infeasible (min={last_try} dahil hepsi denendi)")
+                mn = config['queue_configs'][queue]['mip']['min_per_shift']
+                print(f"  ✗ {queue}: MIP infeasible (min_per_shift={mn} ile çözülemedi)")
             continue
 
         results[queue] = {
