@@ -2358,17 +2358,24 @@ def optimize_week(erlang_by_slot_per_day, df_shifts, queue, target_dates, config
                 sc_total_penalty_cost += exc_int * pen
                 sc_penalized_slots += 1
 
+        _total_in = sum(v for s, v in assigns_this_day.items()
+                        if shift_cov[s]['company'] == inhouse_value)
+        _total_out = sum(v for s, v in assigns_this_day.items()
+                         if shift_cov[s]['company'] == outsource_value)
+        _total_all = sum(assigns_this_day.values())
         info = {
             'assignments': assigns_this_day,
             'shift_coverage': shift_cov,
             'mip_by_slot': mip_by_slot,
             'mip_in_by_slot': mip_in_by_slot,
             'mip_out_by_slot': mip_out_by_slot,
-            'total_kisi': sum(assigns_this_day.values()),
-            'total_inhouse_kisi': sum(v for s, v in assigns_this_day.items()
-                                       if shift_cov[s]['company'] == inhouse_value),
-            'total_outsource_kisi': sum(v for s, v in assigns_this_day.items()
-                                        if shift_cov[s]['company'] == outsource_value),
+            'mip_pt_by_slot': {s: 0 for s in SLOTS_30},
+            'total_kisi': _total_all,
+            'total_inhouse_kisi': _total_in,
+            'total_outsource_kisi': _total_out,
+            'total_part_time_kisi': 0,
+            'outsource_ratio': (_total_out / _total_all) if _total_all > 0 else 0,
+            'pt_available': 0,
             'cost_details': cost_details,
             'rr_penalty_enabled': rr_enabled,
             'rr_excess_by_slot': rr_excess_by_slot,
