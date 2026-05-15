@@ -2366,6 +2366,11 @@ def optimize_week(erlang_by_slot_per_day, df_shifts, queue, target_dates, config
         info = {
             'assignments': assigns_this_day,
             'shift_coverage': shift_cov,
+            # MIP'in fiilen çözüldüğü Erlang ihtiyacı (shrinkage fallback
+            # devreye girdiyse azaltılmış değer). Raporlar bunu kullansın,
+            # yoksa orijinal Erlang gösterilince "MIP, Erlang'ı karşılamıyor"
+            # gibi yanıltıcı görünüyor.
+            'erlang_by_slot': dict(erlang_by_slot),
             'mip_by_slot': mip_by_slot,
             'mip_in_by_slot': mip_in_by_slot,
             'mip_out_by_slot': mip_out_by_slot,
@@ -2918,8 +2923,11 @@ def print_weekly_full_report(results, df_calls, config,
         for d_label, info in info_per_day.items():
             target_date = info['target_date']
             d = pd.to_datetime(target_date)
-            df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-            erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
+            # Fallback ile değişen Erlang varsa onu kullan; yoksa orijinali hesapla
+            erlang_by_slot = info.get('erlang_by_slot')
+            if not erlang_by_slot:
+                df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
+                erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
             df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
             calls_col = f"{queue}_total"
             calls_by_slot = (dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
@@ -2960,8 +2968,11 @@ def print_weekly_full_report(results, df_calls, config,
         for d_label, info in info_per_day.items():
             target_date = info['target_date']
             d = pd.to_datetime(target_date)
-            df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-            erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
+            # Fallback ile değişen Erlang varsa onu kullan; yoksa orijinali hesapla
+            erlang_by_slot = info.get('erlang_by_slot')
+            if not erlang_by_slot:
+                df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
+                erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
             df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
             calls_col = f"{queue}_total"
             calls_by_slot = (dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
@@ -3016,69 +3027,76 @@ def print_weekly_full_report(results, df_calls, config,
 
 def print_weekly_daily_detail(queue, results, df_calls, df_actual=None,
                               config=CONFIG):
-    """Verilen queue için haftanın HER GÜNÜNE ayrı v6-tarzı detay raporu basar.
+    """Verilen queue(lar) için haftanın HER GÜNÜNE ayrı v6-tarzı detay raporu basar.
+
+    `queue` tek bir string veya liste/tuple olabilir. Liste verilirse her queue
+    için sırasıyla rapor üretilir.
 
     Her gün için v6 print_queue_report çağrılır:
       - mip_info_stage1 = surplus öncesi snapshot (MIP1)
       - mip_info        = surplus sonrası (MIP2)
-      - Inhouse + outsource beraber, slot bazlı detay, kapasite raporu, RR
+      - Erlang: info['erlang_by_slot'] (fallback ile değişen değer)
       - df_actual varsa gerçek karşılaştırma sütunu da gelir
     """
-    if queue not in results:
-        print(f"⚠ {queue} için sonuç yok.")
-        return
-
-    r = results[queue]
-    info_per_day = r.get('info_per_day', {})
-    if not info_per_day:
-        print(f"⚠ {queue} için info_per_day boş.")
-        return
+    queues = [queue] if isinstance(queue, str) else list(queue)
 
     df_calls_30 = prepare_calls_30(df_calls, config=config)
     df_erlang = calculate_erlang_all(df_calls_30, config=config)
 
-    for d_label, info in info_per_day.items():
-        target_date = info['target_date']
-        d = pd.to_datetime(target_date)
-        df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-        erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
-        weighted_aht_by_slot = dict(zip(df_q['slot'], df_q['weighted_aht']))
+    for q in queues:
+        if q not in results:
+            print(f"⚠ {q} için sonuç yok.")
+            continue
+        r = results[q]
+        info_per_day = r.get('info_per_day', {})
+        if not info_per_day:
+            print(f"⚠ {q} için info_per_day boş.")
+            continue
 
-        df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
-        calls_col = f"{queue}_total"
-        calls_by_slot = (dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
-                         if calls_col in df_calls_day.columns else {})
-        total_calls_day = int(sum(calls_by_slot.values())) if calls_by_slot else 0
+        for d_label, info in info_per_day.items():
+            target_date = info['target_date']
+            d = pd.to_datetime(target_date)
 
-        # Gerçek veri — opsiyonel
-        actual = None
-        if df_actual is not None:
-            try:
-                actual = get_actual_summary(df_actual, target_date, queue, config)
-            except Exception as ex:
-                if config is not None:  # sessizce yutma
+            # Erlang: MIP'in fiilen çözüldüğü değer (shrinkage fallback sonrası).
+            erlang_by_slot = info.get('erlang_by_slot')
+            if not erlang_by_slot:
+                df_qd = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == q)]
+                erlang_by_slot = dict(zip(df_qd['slot'], df_qd['erlang_need']))
+
+            # weighted_aht shrinkage'tan bağımsız — orijinal config yeterli
+            df_qd = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == q)]
+            weighted_aht_by_slot = dict(zip(df_qd['slot'], df_qd['weighted_aht']))
+
+            df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
+            calls_col = f"{q}_total"
+            calls_by_slot = (dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
+                             if calls_col in df_calls_day.columns else {})
+            total_calls_day = int(sum(calls_by_slot.values())) if calls_by_slot else 0
+
+            actual = None
+            if df_actual is not None:
+                try:
+                    actual = get_actual_summary(df_actual, target_date, q, config)
+                except Exception as ex:
                     print(f"  ℹ {d_label}: actual hesaplanamadı ({ex})")
-        if actual is None:
-            # print_queue_report None kabul etmez — boş yapı ver
-            actual = {
-                'slot_total': {s: 0 for s in SLOTS_30},
-                'slot_in': {s: 0 for s in SLOTS_30},
-                'slot_out': {s: 0 for s in SLOTS_30},
-                'kisi_total': 0, 'kisi_in': 0, 'kisi_out': 0,
-                'outsource_ratio': 0,
-            }
+            if actual is None:
+                actual = {
+                    'slot_total': {s: 0 for s in SLOTS_30},
+                    'slot_in': {s: 0 for s in SLOTS_30},
+                    'slot_out': {s: 0 for s in SLOTS_30},
+                    'kisi_total': 0, 'kisi_in': 0, 'kisi_out': 0,
+                    'outsource_ratio': 0,
+                }
 
-        mip_info_stage1 = info.get('mip_info_stage1')
+            print(f"\n{'#'*95}")
+            print(f"# GÜNLÜK DETAY — {q.upper()} — {d_label} ({target_date})")
+            print(f"{'#'*95}")
 
-        print(f"\n{'#'*95}")
-        print(f"# GÜNLÜK DETAY — {queue.upper()} — {d_label} ({target_date})")
-        print(f"{'#'*95}")
-
-        print_queue_report(
-            target_date, queue, erlang_by_slot, info, actual,
-            weighted_aht_by_slot=weighted_aht_by_slot,
-            total_calls_day=total_calls_day,
-            calls_by_slot=calls_by_slot,
-            mip_info_stage1=mip_info_stage1,
-            config=config,
-        )
+            print_queue_report(
+                target_date, q, erlang_by_slot, info, actual,
+                weighted_aht_by_slot=weighted_aht_by_slot,
+                total_calls_day=total_calls_day,
+                calls_by_slot=calls_by_slot,
+                mip_info_stage1=info.get('mip_info_stage1'),
+                config=config,
+            )
