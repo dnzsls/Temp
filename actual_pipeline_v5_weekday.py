@@ -2293,7 +2293,9 @@ def optimize_week(erlang_by_slot_per_day, df_shifts, queue, target_dates, config
     if status != 'Optimal':
         return None, None, None
 
+    # Sadece >0 olan atamaları sakla — v6 ile uyumlu, raporda 0-li satır çıkmasın
     stable_assignments = {s: int(round(value(x[s]) or 0)) for s in stable_shifts}
+    stable_assignments = {s: v for s, v in stable_assignments.items() if v > 0}
 
     day_specific_assignments = {d: {} for d in target_day_labels}
     for (s, d), var in x_day.items():
