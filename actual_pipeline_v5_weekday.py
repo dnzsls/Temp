@@ -82,27 +82,35 @@ def _capacity_calc(kap, hour, cagri, re_cfg, kk_cfg, ca_cfg):
 def _print_day_table(date_str, day_label, queue, calls_by_slot, erlang_by_slot,
                      gercek_in, gercek_out, gercek_tot,
                      model_in, model_out, model_tot,
+                     model_tot_s1,
                      re_cfg, kk_cfg, ca_cfg):
-    """Tek bir gün × queue tablosunu bas."""
+    """Tek bir gün × queue tablosunu bas.
+
+    model_tot_s1: MIP(1) (surplus öncesi) toplam kapasite by_slot.
+                  RR1 hesaplaması için kullanılır. Boş dict ise MIP1=MIP2 kabul edilir.
+    """
     gun_adi = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr'][
         pd.to_datetime(date_str).weekday()
     ]
-    line_w = 130
+    line_w = 148
     print(f"\n{'='*line_w}")
     print(f"GERÇEK vs MODEL — {queue.upper()} — {date_str} ({day_label}/{gun_adi})")
     print(f"{'='*line_w}")
     print(f"  {'Slot':<6} {'Çağrı':>6} {'Erl':>5} | "
           f"{'──────── GERÇEK ────────':^34} | "
-          f"{'──────── MODEL ─────────':^34} | "
+          f"{'─── MIP(1) ───':^14} | "
+          f"{'──────── MIP(2) ────────':^34} | "
           f"{'─ FARK ─':^11}")
     print(f"  {'':>6} {'':>6} {'':>5} | "
           f"{'In':>4} {'Out':>4} {'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
-          f"{'In':>4} {'Out':>4} {'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR':>5} | "
+          f"{'Kap':>4} {'Ç.Kap':>7} {'RR1':>5} | "
+          f"{'In':>4} {'Out':>4} {'Kap':>4} {'NMT':>4} {'Ç.Kap':>7} {'RR2':>5} | "
           f"{'NMT':>4} {'RR':>5}")
     print('-' * line_w)
 
     t_g_in = t_g_out = t_g_kap = t_g_nmt = t_g_ck = 0
     t_m_in = t_m_out = t_m_kap = t_m_nmt = t_m_ck = 0
+    t_m1_kap = t_m1_ck = 0
     t_cagri = t_erl = 0
 
     for slot in SLOTS_30:
@@ -114,6 +122,8 @@ def _print_day_table(date_str, day_label, queue, calls_by_slot, erlang_by_slot,
         m_in = model_in.get(slot, 0)
         m_out = model_out.get(slot, 0)
         m_kap = model_tot.get(slot, 0)
+        # MIP(1): surplus öncesi — yoksa MIP(2) ile aynı varsay
+        m1_kap = model_tot_s1.get(slot, m_kap) if model_tot_s1 else m_kap
 
         if cagri == 0 and g_kap == 0 and m_kap == 0:
             continue
@@ -121,31 +131,40 @@ def _print_day_table(date_str, day_label, queue, calls_by_slot, erlang_by_slot,
         h = int(slot[:2])
         _, _, g_nmt, g_ck, g_rr = _capacity_calc(g_kap, h, cagri, re_cfg, kk_cfg, ca_cfg)
         _, _, m_nmt, m_ck, m_rr = _capacity_calc(m_kap, h, cagri, re_cfg, kk_cfg, ca_cfg)
+        _, _, _m1_nmt, m1_ck, m1_rr = _capacity_calc(m1_kap, h, cagri, re_cfg, kk_cfg, ca_cfg)
 
         t_cagri += cagri; t_erl += erl
         t_g_in += g_in; t_g_out += g_out
         t_g_kap += g_kap; t_g_nmt += g_nmt; t_g_ck += g_ck
         t_m_in += m_in; t_m_out += m_out
         t_m_kap += m_kap; t_m_nmt += m_nmt; t_m_ck += m_ck
+        t_m1_kap += m1_kap; t_m1_ck += m1_ck
 
+        arrow = "↑" if m_rr > m1_rr else " "
         print(f"  {slot:<6} {cagri:>6} {erl:>5} | "
               f"{g_in:>4} {g_out:>4} {g_kap:>4} {g_nmt:>4} {g_ck:>7.0f} {g_rr:>5.0%} | "
-              f"{m_in:>4} {m_out:>4} {m_kap:>4} {m_nmt:>4} {m_ck:>7.0f} {m_rr:>5.0%} | "
+              f"{m1_kap:>4} {m1_ck:>7.0f} {m1_rr:>5.0%} | "
+              f"{m_in:>4} {m_out:>4} {m_kap:>4} {m_nmt:>4} {m_ck:>7.0f} {m_rr:>4.0%}{arrow} | "
               f"{m_nmt - g_nmt:>+4} {(m_rr - g_rr):>+5.0%}")
 
     t_g_rr = t_g_ck / t_cagri if t_cagri > 0 else 0
     t_m_rr = t_m_ck / t_cagri if t_cagri > 0 else 0
+    t_m1_rr = t_m1_ck / t_cagri if t_cagri > 0 else 0
+    arrow = "↑" if t_m_rr > t_m1_rr else " "
     print('-' * line_w)
     print(f"  {'TOPLAM':<6} {t_cagri:>6} {t_erl:>5} | "
           f"{t_g_in:>4} {t_g_out:>4} {t_g_kap:>4} {t_g_nmt:>4} {t_g_ck:>7.0f} {t_g_rr:>5.0%} | "
-          f"{t_m_in:>4} {t_m_out:>4} {t_m_kap:>4} {t_m_nmt:>4} {t_m_ck:>7.0f} {t_m_rr:>5.0%} | "
+          f"{t_m1_kap:>4} {t_m1_ck:>7.0f} {t_m1_rr:>5.0%} | "
+          f"{t_m_in:>4} {t_m_out:>4} {t_m_kap:>4} {t_m_nmt:>4} {t_m_ck:>7.0f} {t_m_rr:>4.0%}{arrow} | "
           f"{t_m_nmt - t_g_nmt:>+4} {(t_m_rr - t_g_rr):>+5.0%}")
+    print(f"  Not: MIP(1) = surplus öncesi, MIP(2) = surplus sonrası | RR1=MIP1_Ç.Kap/Çağrı, RR2=MIP2_Ç.Kap/Çağrı | ↑ = RR2>RR1")
 
     return {
         'gercek': {'in': t_g_in, 'out': t_g_out, 'kap': t_g_kap,
                    'nmt': t_g_nmt, 'ck': t_g_ck, 'rr': t_g_rr},
         'model': {'in': t_m_in, 'out': t_m_out, 'kap': t_m_kap,
                   'nmt': t_m_nmt, 'ck': t_m_ck, 'rr': t_m_rr},
+        'model_s1': {'kap': t_m1_kap, 'ck': t_m1_ck, 'rr': t_m1_rr},
         'cagri': t_cagri, 'erlang': t_erl,
     }
 
@@ -169,8 +188,9 @@ def gercek_vs_model_haftalik(week_dates, gercek_per_day, df_calls,
     df_erlang_orig = calculate_erlang_all(df_calls_30, config=cfg_weekday)
 
     # haftalık özet tablosu için biriktir
-    weekly_totals = {q: {'gercek_ck': 0, 'model_ck': 0, 'cagri': 0,
-                          'gercek_kap': 0, 'model_kap': 0}
+    weekly_totals = {q: {'gercek_ck': 0, 'model_ck': 0, 'model_ck_s1': 0,
+                          'cagri': 0, 'gercek_kap': 0,
+                          'model_kap': 0, 'model_kap_s1': 0}
                       for q in queues}
 
     for date_str in week_dates:
@@ -199,6 +219,7 @@ def gercek_vs_model_haftalik(week_dates, gercek_per_day, df_calls,
             if info is None:
                 # Model bu gün/queue için sonuç üretmedi (atlanmış olabilir)
                 model_in = model_out = model_tot = {}
+                model_tot_s1 = {}
                 # Erlang yine orijinal config'ten
                 df_q = df_erlang_orig[(df_erlang_orig['date'] == d) &
                                        (df_erlang_orig['queue'] == queue)]
@@ -207,6 +228,9 @@ def gercek_vs_model_haftalik(week_dates, gercek_per_day, df_calls,
                 model_in = info.get('mip_in_by_slot', {})
                 model_out = info.get('mip_out_by_slot', {})
                 model_tot = info.get('mip_by_slot', {})
+                # MIP(1) snapshot — surplus dağıtımı öncesi kapasite
+                s1 = info.get('mip_info_stage1')
+                model_tot_s1 = s1.get('mip_by_slot', {}) if s1 else {}
                 # Modelin fiilen çözdüğü Erlang (shrinkage fallback sonrası)
                 erlang_by_slot = info.get('erlang_by_slot')
                 if not erlang_by_slot:
@@ -225,34 +249,48 @@ def gercek_vs_model_haftalik(week_dates, gercek_per_day, df_calls,
                 calls_by_slot, erlang_by_slot,
                 gercek_in, gercek_out, gercek_tot,
                 model_in, model_out, model_tot,
+                model_tot_s1,
                 re_cfg, kk_cfg, ca_cfg,
             )
 
             weekly_totals[queue]['gercek_ck'] += totals['gercek']['ck']
             weekly_totals[queue]['model_ck'] += totals['model']['ck']
+            weekly_totals[queue]['model_ck_s1'] += totals['model_s1']['ck']
             weekly_totals[queue]['cagri'] += totals['cagri']
             weekly_totals[queue]['gercek_kap'] += totals['gercek']['kap']
             weekly_totals[queue]['model_kap'] += totals['model']['kap']
+            weekly_totals[queue]['model_kap_s1'] += totals['model_s1']['kap']
 
     # -----------------------------------------------------------
     # Haftalık özet
     # -----------------------------------------------------------
-    print(f"\n{'='*90}")
+    line_w = 115
+    print(f"\n{'='*line_w}")
     print(f"HAFTALIK ÖZET — {week_dates[0]} → {week_dates[-1]}")
-    print(f"{'='*90}")
-    print(f"  {'Queue':<10} {'Çağrı':>8} | "
-          f"{'Gerçek Kap':>11} {'Gerçek Ç.K':>11} {'Gerçek RR':>10} | "
-          f"{'Model Kap':>10} {'Model Ç.K':>10} {'Model RR':>9} | "
-          f"{'ΔRR':>6}")
-    print('-' * 90)
+    print(f"{'='*line_w}")
+    print(f"  {'Queue':<10} {'Çağrı':>7} | "
+          f"{'GERÇEK':^25} | "
+          f"{'MIP(1)':^18} | "
+          f"{'MIP(2)':^25} | "
+          f"{'ΔRR':>7}")
+    print(f"  {'':<10} {'':>7} | "
+          f"{'Kap':>7} {'Ç.Kap':>8} {'RR':>7} | "
+          f"{'Kap':>7} {'RR1':>8} | "
+          f"{'Kap':>7} {'Ç.Kap':>8} {'RR2':>7} | "
+          f"{'(M2-G)':>7}")
+    print('-' * line_w)
     for queue in queues:
         t = weekly_totals[queue]
         g_rr = t['gercek_ck'] / t['cagri'] if t['cagri'] > 0 else 0
         m_rr = t['model_ck'] / t['cagri'] if t['cagri'] > 0 else 0
-        print(f"  {queue:<10} {t['cagri']:>8} | "
-              f"{t['gercek_kap']:>11} {t['gercek_ck']:>11.0f} {g_rr:>9.0%} | "
-              f"{t['model_kap']:>10} {t['model_ck']:>10.0f} {m_rr:>8.0%} | "
-              f"{(m_rr - g_rr):>+6.0%}")
+        m1_rr = t['model_ck_s1'] / t['cagri'] if t['cagri'] > 0 else 0
+        arrow = "↑" if m_rr > m1_rr else " "
+        print(f"  {queue:<10} {t['cagri']:>7} | "
+              f"{t['gercek_kap']:>7} {t['gercek_ck']:>8.0f} {g_rr:>6.0%} | "
+              f"{t['model_kap_s1']:>7} {m1_rr:>7.0%} | "
+              f"{t['model_kap']:>7} {t['model_ck']:>8.0f} {m_rr:>6.0%}{arrow} | "
+              f"{(m_rr - g_rr):>+7.0%}")
+    print(f"  Not: RR1=MIP(1) surplus öncesi, RR2=MIP(2) surplus sonrası | ↑ = RR2>RR1")
 
 
 # %% [HÜCRE 5] — Haftalık model sonuçlarını pickle'dan yükle
