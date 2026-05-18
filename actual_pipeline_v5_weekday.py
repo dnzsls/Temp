@@ -3089,7 +3089,7 @@ def print_weekly_daily_detail(queue, results, df_calls, df_actual=None,
                 except Exception as ex:
                     print(f"  ℹ {d_label}: actual hesaplanamadı ({ex})")
             if actual is None:
-                actual = {
+                actual = { 
                     'slot_total': {s: 0 for s in SLOTS_30},
                     'slot_in': {s: 0 for s in SLOTS_30},
                     'slot_out': {s: 0 for s in SLOTS_30},
