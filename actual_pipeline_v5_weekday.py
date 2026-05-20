@@ -279,3 +279,117 @@ print(f"  {'TOPLAM':<10} {grand_in:>10} {grand_out:>10} {grand_total:>10} "
       f"{grand_ratio:>6.0%}")
 print(f"\nNot: Inhouse=full-time (part-time hariç) | "
       f"Out%=Outsource/(Inhouse+Outsource) | Hafta=ISO hafta numarası")
+
+
+# %% [HÜCRE 11] — Gün gün plan — KİTLE — özet metrikler
+# Her gün için: çağrı, Erlang peak/toplam, MIP peak, kişi sayıları, Out%
+PLAN_QUEUE = 'kitle'
+DAY_NAMES = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+print(f"\n{'='*112}")
+print(f"GÜN GÜN PLAN ÖZETİ — {PLAN_QUEUE.upper()} — {YEAR}/{MONTH:02d}")
+print(f"{'='*112}")
+print(f"  {'Tarih':<11} {'Gün':<4} {'Çağrı':>7} {'Erl_Pk':>7} {'Erl_T':>7} "
+      f"{'MIP_Pk':>7} {'In':>5} {'Out':>5} {'PT':>4} {'Toplam':>7} {'Out%':>6}")
+print('  ' + '-' * 110)
+
+t_cagri = t_erl_t = 0
+t_in = t_out = t_pt = 0
+days_ok = 0
+
+for date_str in sorted(results.keys()):
+    r = results.get(date_str)
+    d = pd.to_datetime(date_str)
+    gun = DAY_NAMES[d.weekday()]
+
+    if r is None or PLAN_QUEUE not in r or r[PLAN_QUEUE] is None:
+        print(f"  {date_str:<11} {gun:<4} {'-':>7} {'-':>7} {'-':>7} "
+              f"{'-':>7} {'-':>5} {'-':>5} {'-':>4} {'-':>7} {'-':>6}  (veri yok)")
+        continue
+
+    qr = r[PLAN_QUEUE]
+    mi = qr['mip_info']
+
+    calls_by_slot = qr.get('calls_by_slot', {}) or {}
+    cagri = int(sum(calls_by_slot.values()))
+
+    erlang_by_slot = qr.get('erlang_by_slot', {}) or {}
+    erl_pk = max(erlang_by_slot.values()) if erlang_by_slot else 0
+    erl_t = sum(erlang_by_slot.values())
+
+    mip_by_slot = mi.get('mip_by_slot', {}) or {}
+    mip_pk = max(mip_by_slot.values()) if mip_by_slot else 0
+
+    in_ft = max(0, mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0))
+    out = mi.get('total_outsource_kisi', 0)
+    pt = mi.get('total_part_time_kisi', 0)
+    toplam = in_ft + out + pt
+    out_pct = out / toplam if toplam > 0 else 0
+
+    print(f"  {date_str:<11} {gun:<4} {cagri:>7,} {erl_pk:>7} {erl_t:>7} "
+          f"{mip_pk:>7} {in_ft:>5} {out:>5} {pt:>4} {toplam:>7} {out_pct:>5.0%}")
+
+    t_cagri += cagri
+    t_erl_t += erl_t
+    t_in += in_ft
+    t_out += out
+    t_pt += pt
+    days_ok += 1
+
+t_toplam = t_in + t_out + t_pt
+t_out_pct = t_out / t_toplam if t_toplam > 0 else 0
+print('  ' + '-' * 110)
+print(f"  {'AYLIK':<11} {'-':<4} {t_cagri:>7,} {'-':>7} {t_erl_t:>7} "
+      f"{'-':>7} {t_in:>5} {t_out:>5} {t_pt:>4} {t_toplam:>7} {t_out_pct:>5.0%}")
+print(f"\n  Erl_Pk=eşzamanlı Erlang peak  |  Erl_T=günlük Erlang toplamı (kişi-slot)")
+print(f"  MIP_Pk=eşzamanlı MIP peak  |  In=full-time inhouse (PT hariç)")
+print(f"  Out%=Outsource/(In+Out+PT)  |  Başarılı: {days_ok}/{len(results)} gün")
+
+
+# %% [HÜCRE 12] — Gün gün vardiya planı — KİTLE — detaylı roster
+# Her gün için açılan vardiyaların listesi (saat, şirket, kişi sayısı)
+print(f"\n{'='*100}")
+print(f"GÜN GÜN VARDIYA PLANI — {PLAN_QUEUE.upper()} — {YEAR}/{MONTH:02d}")
+print(f"{'='*100}")
+
+for date_str in sorted(results.keys()):
+    r = results.get(date_str)
+    d = pd.to_datetime(date_str)
+    gun = DAY_NAMES[d.weekday()]
+
+    if r is None or PLAN_QUEUE not in r or r[PLAN_QUEUE] is None:
+        print(f"\n--- {date_str} ({gun}) ---  (veri yok)")
+        continue
+
+    qr = r[PLAN_QUEUE]
+    mi = qr['mip_info']
+    assignments = mi.get('assignments', {})
+    sc = mi.get('shift_coverage', {})
+
+    in_ft = max(0, mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0))
+    out = mi.get('total_outsource_kisi', 0)
+    pt = mi.get('total_part_time_kisi', 0)
+    toplam = in_ft + out + pt
+
+    print(f"\n--- {date_str} ({gun}) ---  "
+          f"In={in_ft}  Out={out}  PT={pt}  Toplam={toplam}")
+
+    active = [(s, c) for s, c in assignments.items() if c > 0]
+    if not active:
+        print(f"    (vardiya yok)")
+        continue
+
+    # Saat sırasına göre sırala, oradan da şirkete göre
+    active.sort(key=lambda x: (sc.get(x[0], {}).get('start', '99:99'),
+                                sc.get(x[0], {}).get('company', 'zzz')))
+
+    print(f"    {'Vardiya':<32} {'Saat':<14} {'Şirket':<10} {'Kişi':>5}")
+    print(f"    {'-'*68}")
+    for s, cnt in active:
+        info = sc.get(s, {})
+        saat = f"{info.get('start','--:--')}-{info.get('end','--:--')}"
+        comp = info.get('company', '-')
+        print(f"    {s:<32} {saat:<14} {comp:<10} {cnt:>5}")
+
+print(f"\n{'='*100}")
+print(f"NOT: Sadece kitle. Diğer kuyrukları (kurumsal/gold) sonra ekleyeceğiz.")
