@@ -1,49 +1,52 @@
 # =============================================================================
-# HAFTALIK MIP V7 — KOŞTURMA + CONFIG (TEK DOSYA)
+# AYLIK ÇALIŞTIRMA + UYUM KONTROLÜ
 # =============================================================================
-# Pzt-Cum (5 haftaiçi gün) için TEK MIP çözer:
-#   - Stable vardiya: Pzt-Cum aynı kişi sayısı (agent ataması doğrudan)
-#   - Cuma-özel ek vardiyalar (örn. 14:00-23:00 inhouse)
-#   - Her gün için v6 ile uyumlu mip_info (mevcut günlük raporlar çalışır)
+# Bir ayın TÜM günlerini koşar:
+#   - Haftaiçi → actual_pipeline_v6_weekday.run_all_queues (günlük MIP)
+#   - Haftasonu → weekend_model_gelistirim_final.run_all_queues (günlük MIP)
+#
+# Sonuç: results = {date_str: {queue: pipeline_output}}
+# Cache: monthly_YYYY_MM.pkl
+#
+# Sonunda haftasonu inhouse bütçe kontrolü basılır (part-time HARİÇ).
 #
 # DOSYALAR:
-#   - actual_pipeline_v7_weekly.py  → MIP motoru (elleme)
-#   - run_weekly_v7.py              → BU DOSYA: config + akış
+#   - actual_pipeline_v6_weekday.py   → haftaiçi MIP motoru
+#   - weekend_model_gelistirim_final.py → haftasonu MIP motoru
 #
 # Hücre hücre çalıştır (# %% [HÜCRE N] ile işaretli).
 # =============================================================================
 
 
-# %% [HÜCRE 1] — Importlar (HEPSI v7'den, v6 ile bağlantı YOK)
-import pandas as pd
+# %% [HÜCRE 1] — Importlar
+import os
 import pickle
+import calendar
+import pandas as pd
 
-from actual_pipeline_v7_weekly import (
-    # Haftalık MIP
-    run_week_all_queues,
-    optimize_week,
-    print_weekly_summary,
-    print_weekly_daily_detail,  # v6 tarzı her gün için MIP(1)/MIP(2) yan yana
-    # v7 içine alınmış v6 fonksiyonları (standalone)
+# v6 daily — weekday için (run_all_queues'i alias ile)
+from actual_pipeline_v6_weekday import (
     load_aht_from_df,
-    prepare_calls_30,
-    calculate_erlang_all,
-    print_queue_report,
-    get_actual_summary,
+    run_all_queues as run_weekday_all,
+)
+# weekend pipeline
+from weekend_model_gelistirim_final import (
+    run_all_queues as run_weekend_all,
 )
 
 
 # %% [HÜCRE 2] — Veri çekme
-# Mevcut aylık notebook'undaki veri çekme kodunu BURAYA YAPIŞTIR.
+# Mevcut notebook'taki veri çekme kodunu BURAYA YAPIŞTIR.
 # Gereken:
-#   - df_calls (en az hafta tarihlerini içermeli)
+#   - df_calls (en az tüm ayı içermeli)
 #   - df_aht
+#   - df_actual (gerçek vardiya verisi)
 #   - df_shifts_dict = {'kitle': df, 'kurumsal': df, 'gold': df}
-#   - df_actual (opsiyonel — gerçek karşılaştırması için)
 #
 # Örnek:
-#   df_calls = pd.read_sql("SELECT ... FROM ...", conn)
-#   df_aht   = pd.read_sql("SELECT ... FROM ...", conn)
+#   df_calls   = pd.read_sql("SELECT ... FROM ...", conn)
+#   df_aht     = pd.read_sql("SELECT ... FROM ...", conn)
+#   df_actual  = pd.read_sql("SELECT ... FROM ...", conn)
 #   df_shifts_dict = {
 #       'kitle':    pd.read_excel('vardiyalar.xlsx', sheet_name='kitle'),
 #       'kurumsal': pd.read_excel('vardiyalar.xlsx', sheet_name='kurumsal'),
@@ -51,392 +54,144 @@ from actual_pipeline_v7_weekly import (
 #   }
 
 
-# %% [HÜCRE 3] — CONFIG_WEEKDAY (inline)
-# Kitle = gerçek dağılım uyumlu tuned değerler.
-# Kurumsal & Gold = v6 default değerleri.
-CONFIG_WEEKDAY = {
+# %% [HÜCRE 3] — CONFIG_WEEKDAY (inline ya da config_v6_weekday'den import)
+# Örnek (inline):
+#   from config_v6_weekday import CONFIG as CONFIG_WEEKDAY
+# veya run_weekly_v7.py'deki CONFIG_WEEKDAY'i buraya kopyala.
+# (Bu hücreyi kendi config'in ile doldur.)
 
-    # ---- KUYRUKLAR ----
-    'queues': {
-        'kitle':    {'label': 'kitle',    'actual_name': 'kitle_cagrilar',
-                     'companies': ['inhouse', 'outsource']},
-        'kurumsal': {'label': 'kurumsal', 'actual_name': 'kurumsal_cagrilar',
-                     'companies': ['inhouse']},
-        'gold':     {'label': 'gold',     'actual_name': 'gold_cagrilar',
-                     'companies': ['inhouse']},
-    },
 
-    # ---- AHT (load_aht_from_df ile doldurulur, HÜCRE 5'te) ----
-    'sub_queues': {},
-    'aht_overrides': {'kitle': {}, 'kurumsal': {}, 'gold': {}},
-    'default_aht': 150,
+# %% [HÜCRE 4] — CONFIG_WEEKEND (inline ya da weekend_config_final'den import)
+# Örnek:
+#   from weekend_config_final import CONFIG as CONFIG_WEEKEND
+# (Bu hücreyi kendi haftasonu config'inle doldur.)
 
-    # ---- PART-TIME ----
-    'part_time': {
-        'enabled': False,
-        'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
-        'count': {'kitle': 42, 'kurumsal': 4, 'gold': 10},
-    },
 
-    'outsource_ratio': {'kitle': None, 'kurumsal': None, 'gold': None},
+# %% [HÜCRE 5] — AHT yükle (her iki config için)
+CONFIG_WEEKDAY['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKDAY)
+CONFIG_WEEKEND['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKEND)
 
-    # ---- SAAT BAZLI MALİYET ÇARPANLARI ----
-    # Kitle inhouse'da 09:00 ve 15:00 saatleri EN UCUZ → MIP buralara yığsın.
-    'time_cost_multipliers': {
-        'kitle': {
-            'inhouse': {
-                '07:00': 25.0, '07:30': 10.0,
-                '08:00': 1.05, '08:30': 1.05, '09:00': 1.00, '09:30': 1.05,
-                '10:00': 1.05, '10:30': 1.05,
-                '11:00': 1.10, '11:30': 1.10, '12:00': 1.10, '13:00': 1.10,
-                '14:00': 1.10,
-                '15:00': 1.00,
-                '17:00': 1.15, '18:00': 1.15, '19:00': 1.20, '22:00': 1.30,
-            },
-            'outsource': {'07:00': 2.0, '07:30': 2.0},
-        },
-        'kurumsal': {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
-        'gold':     {'inhouse': {'07:00': 2.0, '07:30': 1.7}, 'outsource': {}},
-        'default':  {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
-    },
 
-    'company': {
-        'inhouse':   {'shift_value': 'inhouse',   'outsource_flg': 0},
-        'outsource': {'shift_value': 'outsource', 'outsource_flg': 1},
-    },
-    'shift_columns': {'shift': 'shift', 'start': 'start', 'end': 'end',
-                      'company': 'company'},
-    'calls_columns': {'date': 'data_date', 'time': 'min_time_period_value',
-                      'sub_queue': 'resource_group_key',
-                      'main_queue': 'line_based_main_group', 'calls': 'not_call'},
-    'actual_columns': {'date': 'working_date', 'queue': 'line_based_main_group',
-                       'location': 'working_main_group',
-                       'shift_start': 'shifts_start_hour',
-                       'shift_end': 'shifts_end_hour',
-                       'outsource': 'outsource_flg', 'weekend': 'weekend_flg',
-                       'count': 'calisan_kisi_sayisi'},
-    'report': {'peak_threshold': 0.70},
+# %% [HÜCRE 6] — Aylık çalıştırma fonksiyonu
+def run_month(year, month, df_calls, df_actual, df_shifts,
+              cfg_weekday, cfg_weekend, verbose=False):
+    """Bir ayın tüm günlerini koşar, results dict döner.
 
-    'inhouse_only_subqueues': {
-        'kitle': ['retention_line',
-                  {'sub_queue': 'karttemelbankaclik', 'min_ratio': 0.20}],
-        'kurumsal': [], 'gold': [],
-    },
-    'outsource_only_subqueues': {
-        'kitle': [{'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0,
-                   'hours': {'start': '08:00', 'end': '00:00'}}],
-        'kurumsal': [], 'gold': [],
-    },
+    Returns: {date_str: {queue: {mip_info, actual, ...}} | None}
+    """
+    results = {}
+    cal = calendar.Calendar()
 
-    # =========================================================================
-    # QUEUE CONFIGS
-    # =========================================================================
-    'queue_configs': {
+    for day in cal.itermonthdates(year, month):
+        if day.month != month:
+            continue
+        date_str = day.strftime('%Y-%m-%d')
 
-        # ----------- KİTLE (gerçek-dağılım uyumlu tuned) -----------
-        'kitle': {
-            'erlang': {
-                'target_asa': 30, 'target_seconds': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
-                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
-                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
-                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
-                'min_per_shift': 13,              # KULLANICI ZORUNLULUĞU — kırılmaz
-                # Düşük talepli saatler için saat-özel istisna gir.
-                # Örn. {'22:00': 1, '00:00': 1, '01:00': 1} → gece vardiyalarında min 1
-                'min_per_shift_overrides': {},
-                # Haftalık MIP infeasible olursa shrinkage'ı kademeli azaltır
-                # (her saatten -step puan, floor'da kıs) ve Erlang'ı tüm günler
-                # için yeniden hesaplayıp tekrar dener. min_per_shift sabit kalır.
-                'weekly_shrinkage_fallback': {
-                    'enabled': True,
-                    'step': 0.10,
-                    'floor': 0.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True, 'peak_exempt': False,
-                'penalty_per_person': 4.0, 'peak_penalty': 2.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'small_shift_penalty': {'enabled': True, 'penalty': 10},
-            # Gerçeğin gözlemlenen oranlarına göre genişletilmiş bantlar
-            'slot_cap': {
-                'enabled': True,
-                'bands': [
-                    {'start': '05:00', 'end': '07:00', 'max_ratio': 1.30, 'penalty': 80.0},
-                    {'start': '07:00', 'end': '09:00', 'max_ratio': 1.30, 'penalty': 50.0},
-                    {'start': '09:00', 'end': '11:00', 'max_ratio': 1.55, 'penalty': 50.0},
-                    {'start': '11:00', 'end': '15:00', 'max_ratio': 1.25, 'penalty': 80.0},
-                    {'start': '15:00', 'end': '18:00', 'max_ratio': 1.50, 'penalty': 50.0},
-                    {'start': '18:00', 'end': '22:00', 'max_ratio': 1.30, 'penalty': 80.0},
-                    {'start': '22:00', 'end': '05:00', 'max_ratio': 1.20, 'penalty': 120.0},
-                ],
-            },
-            'balance_penalty': {
-                'enabled': True, 'penalty_per_diff': 1.0,
-                'windows': [
-                    {'name': 'sabah', 'start': '07:00', 'end': '11:59', 'penalty': 1.0},
-                    {'name': 'aksam', 'start': '12:00', 'end': '23:30', 'penalty': 1.0},
-                ],
-            },
-            # Pencere bazlı smoothing — gerçekteki sıçramaları korumak için kademeli
-            'start_smoothing': {
-                'enabled': True,
-                'companies': ['inhouse', 'outsource'],
-                'windows': [
-                    {'name': 'sabah', 'start': '07:00', 'end': '10:00', 'penalty': 2.0},
-                    {'name': 'ogle',  'start': '10:00', 'end': '15:00', 'penalty': 8.0},
-                    {'name': 'aksam', 'start': '15:00', 'end': '20:00', 'penalty': 3.0},
-                ],
-            },
-            'hourly_report': {
-                'rapor_etkisi': {'default': 0.00},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
+        try:
+            if day.weekday() >= 5:   # cumartesi/pazar
+                r = run_weekend_all(df_calls, df_actual, df_shifts,
+                                     date_str, config=cfg_weekend)
+            else:
+                r = run_weekday_all(df_calls, df_actual, df_shifts,
+                                     date_str, config=cfg_weekday)
+            results[date_str] = r
+            day_name = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr'][day.weekday()]
+            print(f"✓ {date_str} ({day_name}) tamamlandı")
+        except Exception as e:
+            print(f"✗ {date_str} hata: {e}")
+            results[date_str] = None
 
-        # ----------- KURUMSAL -----------
-        'kurumsal': {
-            'erlang': {
-                'target_asa': 30, 'target_seconds': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
-                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
-                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
-                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
-                'min_per_shift': 13,
-                'min_per_shift_overrides': {},
-                'weekly_shrinkage_fallback': {
-                    'enabled': True,
-                    'step': 0.10,
-                    'floor': 0.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True, 'peak_exempt': True,
-                'penalty_per_person': 4.0, 'peak_penalty': 2.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'small_shift_penalty': {'enabled': True, 'penalty': 10},
-            'slot_cap': {'enabled': False, 'bands': []},
-            'hourly_report': {
-                'rapor_etkisi': {'default': 0.0},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
+    return results
 
-        # ----------- GOLD -----------
-        'gold': {
-            'erlang': {
-                'target_asa': 30, 'target_seconds': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07,
-                    6: 0.07, 7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17,
-                    12: 0.16, 13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29,
-                    18: 0.18, 19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0, 'cost_outsource': 1.0,
-                'min_per_shift': 13,
-                'min_per_shift_overrides': {},
-                'weekly_shrinkage_fallback': {
-                    'enabled': True,
-                    'step': 0.10,
-                    'floor': 0.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True, 'peak_exempt': True,
-                'penalty_per_person': 2.0, 'peak_penalty': 4.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'small_shift_penalty': {'enabled': True, 'penalty': 10},
-            'slot_cap': {'enabled': False, 'bands': []},
-            'hourly_report': {
-                'rapor_etkisi': {'default': 0.0},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
-    },
 
-    # ---- SURPLUS DAĞITIM (v7 ikinci iterasyonda devreye girecek) ----
-    'surplus_distribution': {
-        'enabled': True, 'outsource_enabled': True,
-        'total_kadro': {
-            'kitle':    {'inhouse': 380, 'outsource': 450},
-            'kurumsal': {'inhouse': 47},
-            'gold':     {'inhouse': 130},
-        },
-        'windows': [
-            {'name': 'sabah', 'start': '09:00', 'end': '11:00', 'ratio': 2/3},
-            {'name': 'aksam', 'start': '11:00', 'end': '20:00', 'ratio': 1/3},
-        ],
-        'only_assigned_shifts': True,
-        'fallback_all_inhouse': True,
-        'method': 'rr_first',
-    },
+# %% [HÜCRE 7] — Aylık çalıştır + cache
+YEAR = 2026
+MONTH = 2
+CACHE_FILE = f"monthly_{YEAR}_{MONTH:02d}.pkl"
+
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, 'rb') as f:
+        results = pickle.load(f)
+    print(f"Cache'ten yüklendi: {len(results)} gün")
+else:
+    results = run_month(YEAR, MONTH, df_calls, df_actual, df_shifts_dict,
+                        CONFIG_WEEKDAY, CONFIG_WEEKEND)
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(results, f)
+    print(f"Kaydedildi: {CACHE_FILE}")
+
+
+# %% [HÜCRE 8] — Özet
+print(f"Toplam gün: {len(results)}")
+print(f"Başarılı:   {sum(1 for r in results.values() if r is not None)}")
+print(f"Başarısız:  {sum(1 for r in results.values() if r is None)}")
+
+# Bir hafta sonu örneği — yapı kontrolü
+sample_date = next(
+    (d for d in sorted(results.keys())
+     if pd.to_datetime(d).weekday() >= 5 and results[d] is not None),
+    None,
+)
+if sample_date:
+    sample = results[sample_date]
+    print(f"\n{sample_date} key'leri: {list(sample.keys())}")
+
+
+# %% [HÜCRE 9] — Haftasonu İnhouse Bütçe Kontrolü (part-time HARİÇ)
+# Pipeline'da mip_info['total_inhouse_kisi'] ZATEN full-time only —
+# part-time ayrı bir alanda (total_part_time_kisi) tutuluyor.
+# Yine de defansif: explicit subtract yapıyoruz ki gelecekte yapı değişse de
+# bütçe karşılaştırması part-time'ı saymasın.
+WEEKEND_BUDGET = {
+    'kitle':    1200,
+    'gold':     300,
+    'kurumsal': 120,
 }
 
+# Haftasonu günlerini topla
+weekend_days = []
+for date_str in sorted(results.keys()):
+    d = pd.to_datetime(date_str)
+    if d.weekday() >= 5:   # Cmt veya Pzr
+        weekend_days.append((date_str, d.weekday()))
 
-# %% [HÜCRE 4] — AHT yükle
-CONFIG_WEEKDAY['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKDAY)
+print(f"\n{'='*100}")
+print(f"HAFTA SONU İNHOUSE BÜTÇE KONTROLÜ — {YEAR}/{MONTH:02d}  (part-time HARİÇ)")
+print(f"{'='*100}")
 
+# Tablo başlığı — günleri yan yana
+print(f"{'Kuyruk':<10} ", end='')
+for date_str, wd in weekend_days:
+    label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
+    print(f"{label:>7}", end=' ')
+print(f"{'Toplam':>8} {'Bütçe':>7} {'Durum':>12}")
+print('-' * 100)
 
-# %% [HÜCRE 5] — Cuma-özel inhouse ek shift
-# Standart Excel listesinde olmayan, sadece Cuma aktif olacak shift'leri ekle.
-# 'available_days' kolonu yoksa pipeline default'ta tüm günler aktif sayar.
-extra_friday_kitle = pd.DataFrame([
-    {
-        'shift': '14:00-23:00_fri',
-        'start': '14:00', 'end': '23:00', 'company': 'inhouse',
-        'available_days': ['Fri'],
-    },
-])
+for queue, budget in WEEKEND_BUDGET.items():
+    inhouse_per_day = []
+    for date_str, _ in weekend_days:
+        r = results.get(date_str)
+        if r and queue in r and r[queue] is not None:
+            mi = r[queue]['mip_info']
+            # Full-time inhouse = total_inhouse_kisi − total_part_time_kisi
+            # (total_inhouse_kisi pipeline'da zaten PT'siz ama defansif çıkarıyoruz)
+            inhouse_ft = mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0)
+            inhouse_ft = max(0, inhouse_ft)
+        else:
+            inhouse_ft = 0
+        inhouse_per_day.append(inhouse_ft)
 
-df_shifts_dict['kitle'] = pd.concat(
-    [df_shifts_dict['kitle'], extra_friday_kitle],
-    ignore_index=True,
-)
+    total = sum(inhouse_per_day)
+    diff = total - budget
+    if diff > 0:
+        status = f"+{diff} AŞIM ✗"
+    else:
+        status = f"{diff:+d} OK ✓"
 
+    print(f"{queue:<10} ", end='')
+    for v in inhouse_per_day:
+        print(f"{v:>7}", end=' ')
+    print(f"{total:>8} {budget:>7} {status:>12}")
 
-# %% [HÜCRE 6] — Hafta tarihlerini belirle ve MIP koştur
-WEEK_DATES = [
-    '2026-02-09',   # Pzt
-    '2026-02-10',   # Sal
-    '2026-02-11',   # Çar
-    '2026-02-12',   # Per
-    '2026-02-13',   # Cum
-]
-
-results = run_week_all_queues(
-    df_calls=df_calls,
-    df_shifts_by_queue=df_shifts_dict,
-    target_dates=WEEK_DATES,
-    config=CONFIG_WEEKDAY,
-    queues=('kitle', 'kurumsal', 'gold'),
-    verbose=True,
-)
-# results['<queue>']['stable']         → {shift_key: count}  (Pzt-Cum aynı)
-# results['<queue>']['day_specific']   → {day_label: {shift_key: count}}
-# results['<queue>']['info_per_day']   → {day_label: mip_info (v6 uyumlu)}
-
-
-# %% [HÜCRE 7] — Pickle olarak kaydet (opsiyonel)
-PKL_FILE = f"weekly_v7_{WEEK_DATES[0]}_{WEEK_DATES[-1]}.pkl"
-with open(PKL_FILE, 'wb') as f:
-    pickle.dump({
-        'week_dates': WEEK_DATES,
-        'results': results,
-    }, f)
-print(f"\nKaydedildi: {PKL_FILE}")
-
-
-# %% [HÜCRE 8] — Günlük detay raporu fonksiyonu (tek gün için)
-def print_daily_detail(queue, day_label):
-    """v6 print_queue_report'u tek bir gün için çağırır.
-    info içinde mip_info_stage1 varsa MIP(1)/MIP(2) yan yana basılır.
-    """
-    info = results[queue]['info_per_day'].get(day_label)
-    if info is None:
-        print(f"  {queue} {day_label}: veri yok")
-        return
-    target_date = info['target_date']
-    df_calls_30 = prepare_calls_30(df_calls, config=CONFIG_WEEKDAY)
-    df_erlang = calculate_erlang_all(df_calls_30, config=CONFIG_WEEKDAY)
-    d = pd.to_datetime(target_date)
-    df_q = df_erlang[(df_erlang['date'] == d) & (df_erlang['queue'] == queue)]
-    # Erlang: MIP'in fiilen çözdüğü değer (shrinkage fallback sonrası).
-    # Aksi halde Hücre 9 ile tutarsız çıkıyor.
-    erlang_by_slot = info.get('erlang_by_slot')
-    if not erlang_by_slot:
-        erlang_by_slot = dict(zip(df_q['slot'], df_q['erlang_need']))
-    weighted_aht_by_slot = dict(zip(df_q['slot'], df_q['weighted_aht']))
-    df_calls_day = df_calls_30[df_calls_30['data_date'] == d]
-    calls_col = f"{queue}_total"
-    calls_by_slot = (dict(zip(df_calls_day['slot_30'], df_calls_day[calls_col]))
-                     if calls_col in df_calls_day.columns else {})
-
-    actual = None
-    try:
-        actual = get_actual_summary(df_actual, target_date, queue, CONFIG_WEEKDAY)
-    except Exception:
-        pass
-
-    print_queue_report(
-        target_date, queue, erlang_by_slot, info, actual,
-        weighted_aht_by_slot=weighted_aht_by_slot,
-        calls_by_slot=calls_by_slot,
-        mip_info_stage1=info.get('mip_info_stage1'),  # MIP(1)/MIP(2) yan yana
-        config=CONFIG_WEEKDAY,
-    )
-
-
-# Örnek: print_daily_detail('kitle', 'Fri')
-
-
-# %% [HÜCRE 9] — TÜM KUYRUKLAR için v6 mantığında her güne ayrı detay rapor
-# Inhouse + outsource beraber, MIP(1) vs MIP(2) (surplus öncesi/sonrası) yan yana,
-# slot bazlı detay, kapasite raporu, RR%, peak işaretleri — v6 print_queue_report.
-# df_actual opsiyonel: kullanıcı ayrıca yüklediyse gerçek karşılaştırması da gelir.
-df_actual_for_detail = globals().get('df_actual')
-
-print_weekly_daily_detail(
-    queue=('kitle', 'kurumsal', 'gold'),
-    results=results,
-    df_calls=df_calls,
-    df_actual=df_actual_for_detail,
-    config=CONFIG_WEEKDAY,
-)
+print('-' * 100)
+print("Not: total_inhouse_kisi'den total_part_time_kisi çıkarılarak hesaplandı.")
