@@ -197,91 +197,7 @@ print('-' * 100)
 print("Not: total_inhouse_kisi'den total_part_time_kisi çıkarılarak hesaplandı.")
 
 
-# %% [HÜCRE 10] — Aylık inhouse/outsource breakdown (haftalık + aylık + ratio)
-# Her queue için: ISO hafta bazlı IN/OUT toplamları + ay sonu toplam + Out%.
-# En altta tüm kuyrukların aylık özeti.
-QUEUES = ['kitle', 'kurumsal', 'gold']
-
-print(f"\n{'='*100}")
-print(f"AYLIK İNHOUSE / OUTSOURCE BREAKDOWN — {YEAR}/{MONTH:02d}  (part-time HARİÇ)")
-print(f"{'='*100}")
-
-# Aylık özet için biriktir
-overall = {q: {'in': 0, 'out': 0} for q in QUEUES}
-
-for queue in QUEUES:
-    # Günleri ISO haftaya grupla
-    weeks = {}   # iso_week → [(date_str, in, out)]
-    for date_str in sorted(results.keys()):
-        r = results.get(date_str)
-        if r is None or queue not in r or r[queue] is None:
-            continue
-        mi = r[queue]['mip_info']
-        in_ft = max(0, mi.get('total_inhouse_kisi', 0)
-                       - mi.get('total_part_time_kisi', 0))
-        out = mi.get('total_outsource_kisi', 0)
-        d = pd.to_datetime(date_str)
-        iso_week = int(d.isocalendar().week)
-        weeks.setdefault(iso_week, []).append((date_str, in_ft, out))
-
-    if not weeks:
-        print(f"\n{queue.upper()} — veri yok")
-        continue
-
-    print(f"\n{queue.upper()}")
-    print(f"  {'Hafta':<8} {'Tarih aralığı':<24} {'Gün':>4} "
-          f"{'Inhouse':>9} {'Outsrc':>9} {'Toplam':>9} {'Out%':>6}")
-    print(f"  {'-'*78}")
-
-    tot_in = tot_out = tot_days = 0
-    for iso_week in sorted(weeks.keys()):
-        days = weeks[iso_week]
-        first = days[0][0]
-        last = days[-1][0]
-        range_str = f"{first[5:]} → {last[5:]}"   # MM-DD → MM-DD
-        w_in = sum(x[1] for x in days)
-        w_out = sum(x[2] for x in days)
-        w_total = w_in + w_out
-        w_ratio = w_out / w_total if w_total > 0 else 0
-        print(f"  Hafta {iso_week:<2} {range_str:<24} {len(days):>4} "
-              f"{w_in:>9} {w_out:>9} {w_total:>9} {w_ratio:>5.0%}")
-        tot_in += w_in
-        tot_out += w_out
-        tot_days += len(days)
-
-    tot_total = tot_in + tot_out
-    tot_ratio = tot_out / tot_total if tot_total > 0 else 0
-    print(f"  {'-'*78}")
-    print(f"  {'AYLIK':<8} {'TOPLAM':<24} {tot_days:>4} "
-          f"{tot_in:>9} {tot_out:>9} {tot_total:>9} {tot_ratio:>5.0%}")
-
-    overall[queue]['in'] = tot_in
-    overall[queue]['out'] = tot_out
-
-# Tüm kuyrukların aylık özeti
-print(f"\n{'='*100}")
-print(f"TÜM KUYRUKLAR — AYLIK ÖZET")
-print(f"{'='*100}")
-print(f"  {'Queue':<10} {'Inhouse':>10} {'Outsrc':>10} {'Toplam':>10} {'Out%':>7}")
-print(f"  {'-'*52}")
-grand_in = grand_out = 0
-for q in QUEUES:
-    o = overall[q]
-    t = o['in'] + o['out']
-    r = o['out'] / t if t > 0 else 0
-    print(f"  {q:<10} {o['in']:>10} {o['out']:>10} {t:>10} {r:>6.0%}")
-    grand_in += o['in']
-    grand_out += o['out']
-grand_total = grand_in + grand_out
-grand_ratio = grand_out / grand_total if grand_total > 0 else 0
-print(f"  {'-'*52}")
-print(f"  {'TOPLAM':<10} {grand_in:>10} {grand_out:>10} {grand_total:>10} "
-      f"{grand_ratio:>6.0%}")
-print(f"\nNot: Inhouse=full-time (part-time hariç) | "
-      f"Out%=Outsource/(Inhouse+Outsource) | Hafta=ISO hafta numarası")
-
-
-# %% [HÜCRE 11] — Gün gün plan — KİTLE — özet metrikler
+# %% [HÜCRE 10] — Gün gün plan — KİTLE — özet metrikler
 # Her gün için: çağrı, Erlang peak/toplam, MIP peak, kişi sayıları, Out%
 PLAN_QUEUE = 'kitle'
 DAY_NAMES = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
@@ -346,7 +262,7 @@ print(f"  MIP_Pk=eşzamanlı MIP peak  |  In=full-time inhouse (PT hariç)")
 print(f"  Out%=Outsource/(In+Out+PT)  |  Başarılı: {days_ok}/{len(results)} gün")
 
 
-# %% [HÜCRE 12] — Gün gün vardiya planı — KİTLE — detaylı roster
+# %% [HÜCRE 11] — Gün gün vardiya planı — KİTLE — detaylı roster
 # Her gün için açılan vardiyaların listesi (saat, şirket, kişi sayısı)
 print(f"\n{'='*100}")
 print(f"GÜN GÜN VARDIYA PLANI — {PLAN_QUEUE.upper()} — {YEAR}/{MONTH:02d}")
