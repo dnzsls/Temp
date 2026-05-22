@@ -1069,11 +1069,27 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     sc = mip_info['shift_coverage']
     mcfg = config['queue_configs'][queue]['mip']
 
+    # V9: Shortfall önerisi varsa +Öneri kolonu eklenir
+    sf_recs = mip_info.get('shortfall_recommendations', {})
+    total_sf = mip_info.get('total_shortfall', 0)
+    has_rec = bool(sf_recs)
+
     print(f"\n📋 SHIFT ATAMALARI ({len(mip_info['assignments'])} shift):")
-    if has_s1:
+    if has_s1 and has_rec:
+        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} "
+              f"{'MIP(1)':>7} {'MIP(2)':>7} {'Fark':>6} "
+              f"{'+Öneri':>7} {'Önerilen':>9} {'Maliyet':>10}")
+        print(f"   {'-'*98}")
+        s1_assigns = mip_info_stage1['assignments']
+    elif has_s1:
         print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'MIP(1)':>7} {'MIP(2)':>7} {'Fark':>6} {'Maliyet':>10}")
         print(f"   {'-'*78}")
         s1_assigns = mip_info_stage1['assignments']
+    elif has_rec:
+        print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} "
+              f"{'Kişi':>6} {'+Öneri':>7} {'Önerilen':>9} {'Maliyet':>10}")
+        print(f"   {'-'*82}")
+        s1_assigns = None
     else:
         print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'Kişi':>6} {'Maliyet':>10}")
         print(f"   {'-'*65}")
@@ -1087,13 +1103,28 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
         final_cost = base_cost * mult * cnt
         mult_str = f" ({mult}x)" if mult != 1.0 else ""
 
-        if s1_assigns is not None:
+        rec = sf_recs.get(s, 0) if has_rec else 0
+        rec_str = f"+{rec}" if rec > 0 else "-"
+        new_total = cnt + rec
+        new_mark = " ←" if rec > 0 else "  "
+
+        if has_s1 and has_rec:
+            cnt1 = s1_assigns.get(s, 0)
+            diff = cnt - cnt1
+            diff_str = f"{diff:+d}" if diff != 0 else "-"
+            print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} "
+                  f"{cnt1:>7} {cnt:>7} {diff_str:>6} "
+                  f"{rec_str:>7} {new_total:>9}{new_mark} {final_cost:>8.2f}{mult_str}")
+        elif has_s1:
             cnt1 = s1_assigns.get(s, 0)
             diff = cnt - cnt1
             diff_str = f"{diff:+d}" if diff != 0 else "-"
             mark = " ←" if diff > 0 else "  "
             print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} "
                   f"{cnt1:>7} {cnt:>7} {diff_str:>6}{mark} {final_cost:>8.2f}{mult_str}")
+        elif has_rec:
+            print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} "
+                  f"{cnt:>6} {rec_str:>7} {new_total:>9}{new_mark} {final_cost:>8.2f}{mult_str}")
         else:
             print(f"   {s:<22} {info_s['start']}-{info_s['end']:<5} {info_s['company']:<10} {cnt:>6} {final_cost:>9.2f}{mult_str}")
 
@@ -1106,6 +1137,32 @@ def print_queue_report(date, queue, erlang_by_slot, mip_info, actual,
     if pt_kisi > 0:
         print(f"   {'':>22} {'':>12} {'part_time':>10} {pt_kisi:>6}")
     print(f"   {'':>22} {'':>12} {'TOPLAM':>10} {in_kisi + out_kisi + pt_kisi:>6}")
+
+    # V9: Shortfall özet bloğu — toplam eksik + önerilen ek kadro
+    if has_rec or total_sf > 0:
+        rec_total = sum(sf_recs.values())
+        print(f"\n⚠ STAGE 4 — COVERAGE SHORTFALL ({queue}):")
+        print(f"   Toplam eksik kapsama: {total_sf} kişi-slot "
+              f"(MIP kadro yetersizliğinden bu kadar slot'u tam karşılayamadı)")
+        if has_rec:
+            kadro_cfg = config.get('surplus_distribution', {}).get('total_kadro', {}).get(queue, {})
+            in_cap = kadro_cfg.get('inhouse', 0)
+            out_cap = kadro_cfg.get('outsource', 0)
+            rec_in = sum(v for s, v in sf_recs.items()
+                         if sc[s]['company'] == inhouse_value)
+            rec_out = sum(v for s, v in sf_recs.items()
+                          if sc[s]['company'] != inhouse_value)
+            print(f"   Önerilen ek kadro (greedy, yalnız MIP'in açtığı vardiyalara):")
+            for s in sorted(sf_recs, key=lambda x: sc[x]['start']):
+                v = sf_recs[s]
+                saat = f"{sc[s]['start']}-{sc[s]['end']}"
+                print(f"     {s:<28} {saat:<14} {sc[s]['company']:<10} +{v}")
+            print(f"   TOPLAM ÖNERİ: +{rec_total} kişi  "
+                  f"(inhouse +{rec_in}, outsource +{rec_out})")
+            if in_cap > 0 and rec_in > 0:
+                print(f"   → Inhouse kadro: {in_cap} → {in_cap + rec_in}")
+            if out_cap > 0 and rec_out > 0:
+                print(f"   → Outsource kadro: {out_cap} → {out_cap + rec_out}")
 
     # Slot bazlı detay
     peak_thr = config.get('report', {}).get('peak_threshold', 0.70)
@@ -2819,6 +2876,59 @@ def _build_erlang_per_day_individual(df_calls_30, queue, target_dates,
     return out
 
 
+def _compute_shortfall_recommendations(info):
+    """V9 — Shortfall'u kapatmak için MIP'in zaten kullandığı vardiyalara
+    greedy +N kişi önerisi.
+
+    Mantık: shortfall_by_slot'taki her slot'ta erlang_need - covered kadar
+    kişi eksik. Bu eksikleri kapatabilen vardiyalar arasında (sadece o gün
+    zaten atanmış olanlar = MIP'in seçtiği vardiyalar), en çok shortfall
+    slot'unu birden kapatan vardiyaya +1 kişi ekle, kalan eksikleri düşür,
+    tekrarla.
+
+    Returns: {shift_key: int}  (öneri > 0 olanlar)
+    """
+    sf_by_slot = dict(info.get('shortfall_by_slot', {}))
+    if not any(v > 0 for v in sf_by_slot.values()):
+        return {}
+
+    assigns = info.get('assignments', {})
+    shift_cov = info.get('shift_coverage', {})
+
+    # Aday vardiyalar: bu gün MIP'in atadığı (>0) ve en az bir shortfall
+    # slot'unu kapsayan vardiyalar
+    candidates = [
+        s for s, v in assigns.items()
+        if v > 0 and any(slot in shift_cov[s]['slots'] for slot in sf_by_slot)
+    ]
+    if not candidates:
+        return {}
+
+    suggestions = {s: 0 for s in candidates}
+    remaining = dict(sf_by_slot)
+
+    guard = 0
+    while any(v > 0 for v in remaining.values()) and guard < 10000:
+        guard += 1
+        best_shift = None
+        best_score = 0
+        for s in candidates:
+            # Bu vardiyaya 1 kişi eklersek kaç shortfall slot'u azalır?
+            score = sum(1 for slot in shift_cov[s]['slots']
+                        if remaining.get(slot, 0) > 0)
+            if score > best_score:
+                best_score = score
+                best_shift = s
+        if best_shift is None or best_score == 0:
+            break
+        suggestions[best_shift] += 1
+        for slot in shift_cov[best_shift]['slots']:
+            if remaining.get(slot, 0) > 0:
+                remaining[slot] -= 1
+
+    return {s: v for s, v in suggestions.items() if v > 0}
+
+
 def _print_trial_log_v8(trial_log, queue, solution_stage_label=None):
     """V8 — fallback ladder denemelerini tablo halinde bas."""
     print(f"\n  ┌─ Fallback Ladder ({queue}) ─┐")
@@ -3118,6 +3228,9 @@ def run_week_all_queues(df_calls, df_shifts_by_queue, target_dates, config,
                 'default' if not any(v > 0 for v in decrements_per_day.values())
                 else 'fallback')
             info_per_day[d_label]['shrinkage_trial_log'] = trial_log
+            # V9: shortfall'u kapatmak için vardiya bazlı öneri (greedy)
+            info_per_day[d_label]['shortfall_recommendations'] = \
+                _compute_shortfall_recommendations(info_per_day[d_label])
 
         # ---- Per-day surplus dağıtımı ----
         if config.get('surplus_distribution', {}).get('enabled', False):
