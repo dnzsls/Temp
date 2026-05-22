@@ -1,31 +1,44 @@
 # =============================================================================
-# HAFTALIK MIP V8 — KOŞTURMA + CONFIG (TEK DOSYA)
+# HAFTALIK MIP V9 — KOŞTURMA + CONFIG (TEK DOSYA)
 # =============================================================================
-# V8 = V7 + 3-aşamalı cascading fallback (run_week_all_queues içinde):
+# V9 = V8 + Stage 4 (Coverage Shortfall — eksik kapsamaya izin)
+#
+# Bu config'de Stage 3 (min_per_shift azaltma) KAPALI — kullanıcı kuralı:
+# min_per_shift=13 sert kısıt, düşürülmez.
+#
+# Aktif fallback akışı (run_week_all_queues içinde):
 #   AŞAMA 1: Orijinal
 #   AŞAMA 2: Per-day shrinkage azaltma — çağrı sırasıyla, en yoğun gün önce
-#   AŞAMA 3: Per-day min_per_shift azaltma — çağrı sırasıyla, en yoğun gün önce
+#   AŞAMA 3: (KAPALI — min_per_shift kırılmaz)
+#   AŞAMA 4: COVERAGE SHORTFALL (V9 YENİ)
+#            Stage 1-2 hâlâ infeasible bıraktıysa coverage'ı soft yapar:
+#            covered + shortfall ≥ erlang_need  (shortfall'a yüksek penalty)
+#            → MIP çözebilir, raporda hangi gün/slot'ta ne kadar eksik kaldığı
+#              ve kabaca ne kadar ek kadro gerektiği görünür.
+#
+# Geriye uyumlu: queue config'inde 'coverage_shortfall.enabled=False' ise
+# V8 ile birebir aynı davranır.
 #
 # DOSYALAR:
-#   - actual_pipeline_v8_weekly.py  → MIP motoru (elleme)
-#   - run_weekly_v8.py              → BU DOSYA: config + akış
+#   - actual_pipeline_v9_weekly.py  → MIP motoru (elleme)
+#   - run_weekly_v9.py              → BU DOSYA: config + akış
 #
 # Hücre hücre çalıştır (# %% [HÜCRE N] ile işaretli).
 # =============================================================================
 
 
-# %% [HÜCRE 1] — Importlar (HEPSI v8'den, v6/v7 ile bağlantı YOK)
+# %% [HÜCRE 1] — Importlar (HEPSI v9'dan, v8/v7/v6 ile bağlantı YOK)
 import pandas as pd
 import pickle
 
-from actual_pipeline_v8_weekly import (
-    # Haftalık MIP (V8 fallback ladder ile)
+from actual_pipeline_v9_weekly import (
+    # Haftalık MIP (V9 fallback ladder + Stage 4 shortfall ile)
     run_week_all_queues,
     optimize_week,
     print_weekly_summary,
     print_weekly_full_report,   # opsiyonel — manuel çağrı için
     print_weekly_daily_detail,  # v6 tarzı her gün için MIP(1)/MIP(2) yan yana
-    # v8 içine alınmış v6 fonksiyonları (standalone)
+    # v9 içine alınmış v6 fonksiyonları (standalone)
     load_aht_from_df,
     prepare_calls_30,
     calculate_erlang_all,
@@ -162,12 +175,20 @@ CONFIG_WEEKDAY = {
                     'floor': 0.0,
                     'per_day': True,    # V8: çağrı en yüksek gün önce azalsın
                 },
-                # V8: shrinkage=0'a inip hâlâ infeasible ise min_per_shift'i
-                # yine çağrı sırasıyla per-day azaltır (default→step→...→floor)
+                # V9: min_per_shift SERT KISIT — düşürülmez. Stage 3 KAPALI.
+                # Akış: Stage 1 (orijinal) → Stage 2 (shrinkage) → Stage 4 (shortfall)
                 'weekly_min_per_shift_fallback': {
-                    'enabled': True,
+                    'enabled': False,
                     'step': 1,
                     'floor': 1,
+                },
+                # V9: Stage 4 — Stage 1-3 hâlâ infeasible bıraktıysa
+                # coverage'ı soft yap (covered + shortfall ≥ erlang_need).
+                # Pazartesi gibi yoğun günlerde kadro yetmediğinde model
+                # yine de çözüm verir, raporda eksik kapsama görünür.
+                'coverage_shortfall': {
+                    'enabled': True,
+                    'penalty': 1000.0,
                 },
             },
             'rr_penalty': {
@@ -247,12 +268,20 @@ CONFIG_WEEKDAY = {
                     'floor': 0.0,
                     'per_day': True,    # V8: çağrı en yüksek gün önce azalsın
                 },
-                # V8: shrinkage=0'a inip hâlâ infeasible ise min_per_shift'i
-                # yine çağrı sırasıyla per-day azaltır (default→step→...→floor)
+                # V9: min_per_shift SERT KISIT — düşürülmez. Stage 3 KAPALI.
+                # Akış: Stage 1 (orijinal) → Stage 2 (shrinkage) → Stage 4 (shortfall)
                 'weekly_min_per_shift_fallback': {
-                    'enabled': True,
+                    'enabled': False,
                     'step': 1,
                     'floor': 1,
+                },
+                # V9: Stage 4 — Stage 1-3 hâlâ infeasible bıraktıysa
+                # coverage'ı soft yap (covered + shortfall ≥ erlang_need).
+                # Pazartesi gibi yoğun günlerde kadro yetmediğinde model
+                # yine de çözüm verir, raporda eksik kapsama görünür.
+                'coverage_shortfall': {
+                    'enabled': True,
+                    'penalty': 1000.0,
                 },
             },
             'rr_penalty': {
@@ -303,12 +332,20 @@ CONFIG_WEEKDAY = {
                     'floor': 0.0,
                     'per_day': True,    # V8: çağrı en yüksek gün önce azalsın
                 },
-                # V8: shrinkage=0'a inip hâlâ infeasible ise min_per_shift'i
-                # yine çağrı sırasıyla per-day azaltır (default→step→...→floor)
+                # V9: min_per_shift SERT KISIT — düşürülmez. Stage 3 KAPALI.
+                # Akış: Stage 1 (orijinal) → Stage 2 (shrinkage) → Stage 4 (shortfall)
                 'weekly_min_per_shift_fallback': {
-                    'enabled': True,
+                    'enabled': False,
                     'step': 1,
                     'floor': 1,
+                },
+                # V9: Stage 4 — Stage 1-3 hâlâ infeasible bıraktıysa
+                # coverage'ı soft yap (covered + shortfall ≥ erlang_need).
+                # Pazartesi gibi yoğun günlerde kadro yetmediğinde model
+                # yine de çözüm verir, raporda eksik kapsama görünür.
+                'coverage_shortfall': {
+                    'enabled': True,
+                    'penalty': 1000.0,
                 },
             },
             'rr_penalty': {
@@ -400,7 +437,7 @@ results = run_week_all_queues(
 
 
 # %% [HÜCRE 7] — Pickle olarak kaydet (opsiyonel)
-PKL_FILE = f"weekly_v8_{WEEK_DATES[0]}_{WEEK_DATES[-1]}.pkl"
+PKL_FILE = f"weekly_v9_{WEEK_DATES[0]}_{WEEK_DATES[-1]}.pkl"
 with open(PKL_FILE, 'wb') as f:
     pickle.dump({
         'week_dates': WEEK_DATES,
