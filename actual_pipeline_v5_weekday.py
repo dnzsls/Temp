@@ -520,7 +520,10 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
                                   output_path=None):
     """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar."""
     if output_path is None:
-        output_path = f"monthly_v9_plan_{year}_{month:02d}.xlsx"
+        ay_isimleri = ['Ocak', 'Subat', 'Mart', 'Nisan', 'Mayis', 'Haziran',
+                       'Temmuz', 'Agustos', 'Eylul', 'Ekim', 'Kasim', 'Aralik']
+        ay_adi = ay_isimleri[month - 1]
+        output_path = f"vardiya_plani_{year}_{month:02d}_{ay_adi}.xlsx"
 
     all_dates = sorted(results.keys())
     if not all_dates:
