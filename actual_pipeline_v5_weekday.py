@@ -579,11 +579,26 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal='center', vertical='center')
 
+    # PT section yerleşimi (Pzr bloğunun sağında, 1 col boşluk sonra)
+    PT_COL_GAP = 1
+    PT_SECTION_COLS = 3   # SHIFT | Cmt | Pzr
+    PT_SECTION_START = 7 * COLS_PER_DAY + PT_COL_GAP + 1   # 1-indexed
+    PT_HEADERS = ['SHIFT', 'Cmt', 'Pzr']
+
     def _collect_week_data(week):
-        """Bu hafta için: tüm shift saat aralıkları + (start, end, day, queue, company) sayıları."""
-        all_shifts = set()
-        # counts[(start, end)][day_idx][queue][company] = count
+        """Bu hafta için: shift'leri BAŞLANGIÇ saatine göre grupla (PT hariç).
+
+        Outsource'da aynı start farklı end varsa tek satırda toplanır.
+        Label = "start-end" (end: önce inhouse'un end'i, yoksa outsource'un).
+        Returns:
+          - sorted_starts: list of start times
+          - labels: {start: "start-end"}
+          - counts: counts[start][day_idx][queue][company] = sum
+        """
+        all_starts = set()
         counts = {}
+        ends_per_start_company = {}   # start → company → set of ends
+
         for day_idx, ds in enumerate(week):
             r = results.get(ds)
             if not r:
@@ -598,52 +613,108 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
                     if c <= 0:
                         continue
                     sci = sc.get(s, {})
+                    company = sci.get('company', 'inhouse')
+                    if company == 'part_time':
+                        continue   # PT ayrı bloka gider
                     start = sci.get('start', '?')
                     end = sci.get('end', '?')
-                    company = sci.get('company', 'inhouse')
-                    key = (start, end)
-                    all_shifts.add(key)
-                    counts.setdefault(key, {}).setdefault(day_idx, {})\
+                    all_starts.add(start)
+                    ends_per_start_company.setdefault(start, {})\
+                        .setdefault(company, set()).add(end)
+                    counts.setdefault(start, {}).setdefault(day_idx, {})\
                         .setdefault(queue, {})
-                    counts[key][day_idx][queue][company] = \
-                        counts[key][day_idx][queue].get(company, 0) + c
-        return sorted(all_shifts, key=lambda x: (x[0], x[1])), counts
+                    counts[start][day_idx][queue][company] = \
+                        counts[start][day_idx][queue].get(company, 0) + c
 
-    def _row_values(shift_counts):
-        """Bir (shift, day) için 7 değer döner: kitle_inh, kitle_out, gold, kurumsal, INH, OS, Total."""
-        kitle_inh = (shift_counts.get('kitle', {}).get('inhouse', 0) +
-                     shift_counts.get('kitle', {}).get('part_time', 0))
-        kitle_out = shift_counts.get('kitle', {}).get('outsource', 0)
-        gold_v = sum(shift_counts.get('gold', {}).values())
-        kurumsal_v = sum(shift_counts.get('kurumsal', {}).values())
+        # Label: inhouse end öncelikli (daha tutarlı), yoksa outsource shortest
+        labels = {}
+        for start in all_starts:
+            ebc = ends_per_start_company.get(start, {})
+            if ebc.get('inhouse'):
+                end_repr = sorted(ebc['inhouse'])[0]
+            elif ebc.get('outsource'):
+                end_repr = sorted(ebc['outsource'])[0]
+            else:
+                end_repr = '?'
+            labels[start] = f"{start}-{end_repr}"
+
+        return sorted(all_starts), labels, counts
+
+    def _collect_pt_weekend(week):
+        """Sadece Cmt (index 5) ve Pzr (index 6) için part-time atamaları topla.
+        Returns: (sorted_pt_shifts [(start, end), ...], pt_counts[(start,end)][day_idx])
+        """
+        pt_shifts_set = set()
+        pt_counts = {}
+        for day_idx in (5, 6):
+            ds = week[day_idx]
+            r = results.get(ds)
+            if not r:
+                continue
+            for queue in queues:
+                qr = r.get(queue)
+                if not qr:
+                    continue
+                mi = qr.get('mip_info', {})
+                sc = mi.get('shift_coverage', {})
+                for s, c in mi.get('assignments', {}).items():
+                    if c <= 0:
+                        continue
+                    sci = sc.get(s, {})
+                    if sci.get('company') != 'part_time':
+                        continue
+                    start = sci.get('start', '?')
+                    end = sci.get('end', '?')
+                    key = (start, end)
+                    pt_shifts_set.add(key)
+                    pt_counts.setdefault(key, {})
+                    pt_counts[key][day_idx] = pt_counts[key].get(day_idx, 0) + c
+        return sorted(pt_shifts_set), pt_counts
+
+    def _row_values(start_counts):
+        """Bir start için 7 değer: kitle_inh, kitle_out, gold, kurumsal, INH, OS, Total."""
+        kitle_inh = start_counts.get('kitle', {}).get('inhouse', 0)
+        kitle_out = start_counts.get('kitle', {}).get('outsource', 0)
+        gold_v = sum(start_counts.get('gold', {}).values())
+        kurumsal_v = sum(start_counts.get('kurumsal', {}).values())
         inh_total = kitle_inh + gold_v + kurumsal_v
         os_total = kitle_out
         total = inh_total + os_total
-        return [kitle_inh, kitle_out, gold_v, kurumsal_v, inh_total, os_total, total]
+        return [kitle_inh, kitle_out, gold_v, kurumsal_v,
+                inh_total, os_total, total]
 
     current_row = 1
     for week in weeks:
-        sorted_shifts, counts = _collect_week_data(week)
-        if not sorted_shifts:
+        sorted_starts, labels, counts = _collect_week_data(week)
+        pt_sorted, pt_counts = _collect_pt_weekend(week)
+
+        if not sorted_starts and not pt_sorted:
             continue
 
-        # 1) Tarih başlık satırı — her günün 8 kolonluk bloğunun ortasına
+        # 1) Tarih başlık satırı
         for day_idx, ds in enumerate(week):
             col_offset = day_idx * COLS_PER_DAY
             d = pd.to_datetime(ds)
             date_label = f"{DAY_TR[day_idx]} {d.strftime('%d.%m.%Y')}"
-            # Bloğun ilk hücresi (SHIFT'in üstüne tarih yaz, sonra merge)
-            start_col = col_offset + 1
-            end_col = col_offset + COLS_PER_DAY
-            cell = ws.cell(row=current_row, column=start_col, value=date_label)
+            cell = ws.cell(row=current_row, column=col_offset + 1, value=date_label)
             cell.fill = date_fill
             cell.font = date_font
             cell.alignment = center
-            ws.merge_cells(start_row=current_row, start_column=start_col,
-                           end_row=current_row, end_column=end_col)
+            ws.merge_cells(start_row=current_row, start_column=col_offset + 1,
+                           end_row=current_row, end_column=col_offset + COLS_PER_DAY)
+        if pt_sorted:
+            cell = ws.cell(row=current_row, column=PT_SECTION_START,
+                           value="KISMİ ÇALIŞANLAR")
+            cell.fill = date_fill
+            cell.font = date_font
+            cell.alignment = center
+            ws.merge_cells(
+                start_row=current_row, start_column=PT_SECTION_START,
+                end_row=current_row,
+                end_column=PT_SECTION_START + PT_SECTION_COLS - 1)
         current_row += 1
 
-        # 2) Sub-header satırı (SHIFT | kitle_inh | ...) — her gün için tekrar
+        # 2) Sub-header
         for day_idx in range(7):
             col_offset = day_idx * COLS_PER_DAY
             for j, h in enumerate(SUB_HEADERS):
@@ -652,64 +723,113 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
                 cell.font = header_font
                 cell.alignment = center
                 cell.border = border
+        if pt_sorted:
+            for j, h in enumerate(PT_HEADERS):
+                cell = ws.cell(row=current_row, column=PT_SECTION_START + j, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+                cell.border = border
         current_row += 1
 
-        # 3) Shift satırları (her satırda 7 gün için aynı shift saatleri)
-        for shift in sorted_shifts:
-            start, end = shift
-            shift_label = f"{start}-{end}"
+        main_start_row = current_row
+
+        # 3a) Main shift satırları (start-bazlı gruplama)
+        for start in sorted_starts:
             for day_idx in range(7):
                 col_offset = day_idx * COLS_PER_DAY
-                # SHIFT kolonu
                 cell = ws.cell(row=current_row, column=col_offset + 1,
-                               value=shift_label)
+                               value=labels[start])
                 cell.alignment = center
                 cell.border = border
 
-                day_shift_counts = counts.get(shift, {}).get(day_idx, {})
-                vals = _row_values(day_shift_counts)
+                day_start_counts = counts.get(start, {}).get(day_idx, {})
+                vals = _row_values(day_start_counts)
                 for j, v in enumerate(vals):
                     cell = ws.cell(row=current_row, column=col_offset + j + 2,
-                                   value=v if v > 0 else 0)
+                                   value=v)
                     cell.alignment = center
                     cell.border = border
             current_row += 1
 
-        # 4) Toplam satırı — her gün için kolon toplamları
+        # 3b) PT shift satırları (main_start_row'dan başlar, bağımsız büyür)
+        if pt_sorted:
+            pt_row = main_start_row
+            for (s_start, s_end) in pt_sorted:
+                label = f"{s_start}-{s_end}"
+                cell = ws.cell(row=pt_row, column=PT_SECTION_START, value=label)
+                cell.alignment = center
+                cell.border = border
+                cmt_v = pt_counts.get((s_start, s_end), {}).get(5, 0)
+                pzr_v = pt_counts.get((s_start, s_end), {}).get(6, 0)
+                for j, v in enumerate([cmt_v, pzr_v]):
+                    cell = ws.cell(row=pt_row, column=PT_SECTION_START + 1 + j,
+                                   value=v)
+                    cell.alignment = center
+                    cell.border = border
+                pt_row += 1
+            pt_toplam_row = pt_row
+        else:
+            pt_toplam_row = main_start_row   # PT yok, etkisiz
+
+        # 4) Main toplam satırı
+        main_toplam_row = current_row
         for day_idx in range(7):
             col_offset = day_idx * COLS_PER_DAY
-            cell = ws.cell(row=current_row, column=col_offset + 1, value='Toplam')
+            cell = ws.cell(row=main_toplam_row, column=col_offset + 1, value='Toplam')
             cell.fill = total_fill
             cell.font = total_font
             cell.alignment = center
             cell.border = border
 
             totals = [0, 0, 0, 0, 0, 0, 0]
-            for shift in sorted_shifts:
-                day_shift_counts = counts.get(shift, {}).get(day_idx, {})
-                vals = _row_values(day_shift_counts)
+            for start in sorted_starts:
+                day_start_counts = counts.get(start, {}).get(day_idx, {})
+                vals = _row_values(day_start_counts)
                 for j in range(7):
                     totals[j] += vals[j]
             for j, v in enumerate(totals):
-                cell = ws.cell(row=current_row, column=col_offset + j + 2, value=v)
+                cell = ws.cell(row=main_toplam_row, column=col_offset + j + 2, value=v)
                 cell.fill = total_fill
                 cell.font = total_font
                 cell.alignment = center
                 cell.border = border
         current_row += 1
 
-        # Hafta arası 2 satır boşluk
-        current_row += 2
+        # 4b) PT toplam (kendi satırında — main toplam'a hizalı değil)
+        if pt_sorted:
+            cell = ws.cell(row=pt_toplam_row, column=PT_SECTION_START,
+                           value='Toplam')
+            cell.fill = total_fill
+            cell.font = total_font
+            cell.alignment = center
+            cell.border = border
+            cmt_total = sum(pt_counts.get(s, {}).get(5, 0) for s in pt_sorted)
+            pzr_total = sum(pt_counts.get(s, {}).get(6, 0) for s in pt_sorted)
+            for j, v in enumerate([cmt_total, pzr_total]):
+                cell = ws.cell(row=pt_toplam_row, column=PT_SECTION_START + 1 + j,
+                               value=v)
+                cell.fill = total_fill
+                cell.font = total_font
+                cell.alignment = center
+                cell.border = border
 
-    # 5) Kolon genişlikleri
+        # Bir sonraki haftaya geçmeden önce: main + PT'nin son satırının max'i
+        current_row = max(current_row, pt_toplam_row + 1) + 2
+
+    # 5) Kolon genişlikleri — ana 7 günlük bloklar
     for day_idx in range(7):
         col_offset = day_idx * COLS_PER_DAY
-        # SHIFT
-        ws.column_dimensions[ws.cell(row=2, column=col_offset + 1).column_letter].width = 12
-        # Diğer 7 kolon
+        ws.column_dimensions[
+            ws.cell(row=2, column=col_offset + 1).column_letter].width = 12
         for j in range(1, COLS_PER_DAY):
             col_letter = ws.cell(row=2, column=col_offset + j + 1).column_letter
             ws.column_dimensions[col_letter].width = 11
+
+    # PT section kolon genişlikleri
+    for j in range(PT_SECTION_COLS):
+        col_letter = ws.cell(row=2, column=PT_SECTION_START + j).column_letter
+        ws.column_dimensions[col_letter].width = 12 if j == 0 else 9
 
     # ---- Sheet 2: Haftasonu Bütçe ----
     ws2 = wb.create_sheet('Bütçe')
