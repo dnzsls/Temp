@@ -507,18 +507,30 @@ print_queue_monthly_plan('gold', results, YEAR, MONTH)
 print_queue_monthly_plan('kurumsal', results, YEAR, MONTH)
 
 
-# %% [HÜCRE 12] — Excel'e aktar: vardiya planı + haftasonu bütçe
-# Sheet 1 "Vardiya Planı": haftalara bölünmüş timetable (Pzt-Pzr 7 sütun)
-#   - Her hafta başlığı, sonra kuyruk bazlı vardiya satırları, kişi sayıları
-# Sheet 2 "Bütçe": haftasonu inhouse bütçe kontrolü tablosu
+# %% [HÜCRE 12] — Excel'e aktar: vardiya planı (timetable) + haftasonu bütçe
+# Layout (referans Excel'e göre):
+#   Sheet 1 "Vardiya Planı":
+#     - Her hafta için 7 gün YAN YANA (Pzt..Pzr), her gün 8 kolonluk blok:
+#         SHIFT | kitle_inh | kitle_out | gold | kurumsal | INH Total | OS Total | Total
+#     - Üst satır: gün adı + tarih (her bloğun üstünde)
+#     - Satırlar: o haftada aktif tüm vardiya saat aralıkları (start-end)
+#     - Bottom: Toplam satırı (her gün için kolon toplamı)
+#     - Haftalar üst üste (1. hafta, sonra 2. hafta, vs.)
+#   Sheet 2 "Bütçe": haftasonu inhouse bütçe kontrolü (tek tablo)
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 
 
 def export_monthly_plan_to_excel(results, year, month, weekend_budget,
                                   queues=('kitle', 'gold', 'kurumsal'),
                                   output_path=None):
-    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar."""
+    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar.
+
+    Sheet 1: 7 gün yan yana, her gün 8 kolon (SHIFT, kitle_inh, kitle_out,
+    gold, kurumsal, INH Total, OS Total, Total). Haftalar üst üste.
+    """
     if output_path is None:
         ay_isimleri = ['Ocak', 'Subat', 'Mart', 'Nisan', 'Mayis', 'Haziran',
                        'Temmuz', 'Agustos', 'Eylul', 'Ekim', 'Kasim', 'Aralik']
@@ -530,7 +542,7 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
         print("⚠ results boş, export atlandı")
         return None
 
-    # Ayı kapsayan Pzt-Pzr haftaları (eksik günler boş kalır)
+    # Ayı kapsayan Pzt-Pzr haftaları
     first = pd.to_datetime(all_dates[0])
     last = pd.to_datetime(all_dates[-1])
     start_mon = first - pd.Timedelta(days=first.weekday())
@@ -545,80 +557,183 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
         cur += pd.Timedelta(days=7)
 
     DAY_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+    COLS_PER_DAY = 8
+    SUB_HEADERS = ['SHIFT', 'kitle inhouse', 'kitle outsource', 'gold',
+                   'kurumsal', 'INH Total', 'OS Total', 'Total']
 
-    # ---- Sheet 1: Vardiya Planı ----
-    # Sabit kolonlar: # | Kuyruk | Vardiya | Saat | Şirket | <gün sütunları> | Toplam
-    # Gün sütun başlığı her hafta için kendi tarihini taşır (örn. "Pzt 02-02")
-    rows = []
-    for week_idx, week in enumerate(weeks, 1):
-        # Hafta ayraç satırı
-        sep_row = {
-            '#': f"HAFTA {week_idx}",
-            'Kuyruk': f"{week[0]} → {week[-1]}",
-            'Vardiya': '', 'Saat': '', 'Şirket': '',
-        }
-        for i in range(7):
-            sep_row[f"{DAY_TR[i]} {week[i][-5:]}"] = ''
-        sep_row['Toplam'] = ''
-        rows.append(sep_row)
+    # ---- Workbook + stiller ----
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Vardiya Planı'
 
-        for queue in queues:
-            # O haftada aktif vardiyaları topla
-            shifts_in_week = {}   # shift_key → {day_idx: count}
-            shift_info = {}       # shift_key → {start, end, company}
-            for i, ds in enumerate(week):
-                r = results.get(ds)
-                if not r or queue not in r or not r[queue]:
+    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78',
+                              fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True, size=10)
+    date_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2',
+                            fill_type='solid')
+    date_font = Font(bold=True, size=11)
+    total_fill = PatternFill(start_color='E7E6E6', end_color='E7E6E6',
+                             fill_type='solid')
+    total_font = Font(bold=True)
+    thin = Side(border_style='thin', color='888888')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center')
+
+    def _collect_week_data(week):
+        """Bu hafta için: tüm shift saat aralıkları + (start, end, day, queue, company) sayıları."""
+        all_shifts = set()
+        # counts[(start, end)][day_idx][queue][company] = count
+        counts = {}
+        for day_idx, ds in enumerate(week):
+            r = results.get(ds)
+            if not r:
+                continue
+            for queue in queues:
+                qr = r.get(queue)
+                if not qr:
                     continue
-                mi = r[queue]['mip_info']
+                mi = qr.get('mip_info', {})
                 sc = mi.get('shift_coverage', {})
                 for s, c in mi.get('assignments', {}).items():
                     if c <= 0:
                         continue
-                    shifts_in_week.setdefault(s, {})[i] = c
-                    if s not in shift_info:
-                        shift_info[s] = sc.get(s, {})
-            if not shifts_in_week:
-                continue
+                    sci = sc.get(s, {})
+                    start = sci.get('start', '?')
+                    end = sci.get('end', '?')
+                    company = sci.get('company', 'inhouse')
+                    key = (start, end)
+                    all_shifts.add(key)
+                    counts.setdefault(key, {}).setdefault(day_idx, {})\
+                        .setdefault(queue, {})
+                    counts[key][day_idx][queue][company] = \
+                        counts[key][day_idx][queue].get(company, 0) + c
+        return sorted(all_shifts, key=lambda x: (x[0], x[1])), counts
 
-            sorted_shifts = sorted(
-                shifts_in_week.keys(),
-                key=lambda x: (shift_info.get(x, {}).get('start', '99:99'),
-                                shift_info.get(x, {}).get('company', 'zzz')),
-            )
-            for s in sorted_shifts:
-                info = shift_info[s]
-                saat = f"{info.get('start', '')}-{info.get('end', '')}"
-                row = {
-                    '#': '',
-                    'Kuyruk': queue,
-                    'Vardiya': s,
-                    'Saat': saat,
-                    'Şirket': info.get('company', ''),
-                }
-                total = 0
-                for i in range(7):
-                    c = shifts_in_week[s].get(i, 0)
-                    row[f"{DAY_TR[i]} {week[i][-5:]}"] = c if c > 0 else ''
-                    total += c
-                row['Toplam'] = total
-                rows.append(row)
+    def _row_values(shift_counts):
+        """Bir (shift, day) için 7 değer döner: kitle_inh, kitle_out, gold, kurumsal, INH, OS, Total."""
+        kitle_inh = (shift_counts.get('kitle', {}).get('inhouse', 0) +
+                     shift_counts.get('kitle', {}).get('part_time', 0))
+        kitle_out = shift_counts.get('kitle', {}).get('outsource', 0)
+        gold_v = sum(shift_counts.get('gold', {}).values())
+        kurumsal_v = sum(shift_counts.get('kurumsal', {}).values())
+        inh_total = kitle_inh + gold_v + kurumsal_v
+        os_total = kitle_out
+        total = inh_total + os_total
+        return [kitle_inh, kitle_out, gold_v, kurumsal_v, inh_total, os_total, total]
 
-        # Hafta sonunda boş ayraç
-        rows.append({})
+    current_row = 1
+    for week in weeks:
+        sorted_shifts, counts = _collect_week_data(week)
+        if not sorted_shifts:
+            continue
 
-    df_plan = pd.DataFrame(rows)
+        # 1) Tarih başlık satırı — her günün 8 kolonluk bloğunun ortasına
+        for day_idx, ds in enumerate(week):
+            col_offset = day_idx * COLS_PER_DAY
+            d = pd.to_datetime(ds)
+            date_label = f"{DAY_TR[day_idx]} {d.strftime('%d.%m.%Y')}"
+            # Bloğun ilk hücresi (SHIFT'in üstüne tarih yaz, sonra merge)
+            start_col = col_offset + 1
+            end_col = col_offset + COLS_PER_DAY
+            cell = ws.cell(row=current_row, column=start_col, value=date_label)
+            cell.fill = date_fill
+            cell.font = date_font
+            cell.alignment = center
+            ws.merge_cells(start_row=current_row, start_column=start_col,
+                           end_row=current_row, end_column=end_col)
+        current_row += 1
 
-    # ---- Sheet 2: Haftasonu Bütçe Kontrolü ----
+        # 2) Sub-header satırı (SHIFT | kitle_inh | ...) — her gün için tekrar
+        for day_idx in range(7):
+            col_offset = day_idx * COLS_PER_DAY
+            for j, h in enumerate(SUB_HEADERS):
+                cell = ws.cell(row=current_row, column=col_offset + j + 1, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+                cell.border = border
+        current_row += 1
+
+        # 3) Shift satırları (her satırda 7 gün için aynı shift saatleri)
+        for shift in sorted_shifts:
+            start, end = shift
+            shift_label = f"{start}-{end}"
+            for day_idx in range(7):
+                col_offset = day_idx * COLS_PER_DAY
+                # SHIFT kolonu
+                cell = ws.cell(row=current_row, column=col_offset + 1,
+                               value=shift_label)
+                cell.alignment = center
+                cell.border = border
+
+                day_shift_counts = counts.get(shift, {}).get(day_idx, {})
+                vals = _row_values(day_shift_counts)
+                for j, v in enumerate(vals):
+                    cell = ws.cell(row=current_row, column=col_offset + j + 2,
+                                   value=v if v > 0 else 0)
+                    cell.alignment = center
+                    cell.border = border
+            current_row += 1
+
+        # 4) Toplam satırı — her gün için kolon toplamları
+        for day_idx in range(7):
+            col_offset = day_idx * COLS_PER_DAY
+            cell = ws.cell(row=current_row, column=col_offset + 1, value='Toplam')
+            cell.fill = total_fill
+            cell.font = total_font
+            cell.alignment = center
+            cell.border = border
+
+            totals = [0, 0, 0, 0, 0, 0, 0]
+            for shift in sorted_shifts:
+                day_shift_counts = counts.get(shift, {}).get(day_idx, {})
+                vals = _row_values(day_shift_counts)
+                for j in range(7):
+                    totals[j] += vals[j]
+            for j, v in enumerate(totals):
+                cell = ws.cell(row=current_row, column=col_offset + j + 2, value=v)
+                cell.fill = total_fill
+                cell.font = total_font
+                cell.alignment = center
+                cell.border = border
+        current_row += 1
+
+        # Hafta arası 2 satır boşluk
+        current_row += 2
+
+    # 5) Kolon genişlikleri
+    for day_idx in range(7):
+        col_offset = day_idx * COLS_PER_DAY
+        # SHIFT
+        ws.column_dimensions[ws.cell(row=2, column=col_offset + 1).column_letter].width = 12
+        # Diğer 7 kolon
+        for j in range(1, COLS_PER_DAY):
+            col_letter = ws.cell(row=2, column=col_offset + j + 1).column_letter
+            ws.column_dimensions[col_letter].width = 11
+
+    # ---- Sheet 2: Haftasonu Bütçe ----
+    ws2 = wb.create_sheet('Bütçe')
     weekend_days = [(d, pd.to_datetime(d).weekday()) for d in all_dates
                     if pd.to_datetime(d).weekday() >= 5]
 
-    budget_rows = []
+    # Başlık satırı
+    headers = ['Kuyruk']
+    for date_str, wd in weekend_days:
+        label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
+        headers.append(label)
+    headers += ['Toplam', 'Bütçe', 'Fark', 'Durum']
+    for j, h in enumerate(headers, 1):
+        cell = ws2.cell(row=1, column=j, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+
+    row_idx = 2
     for queue, budget in weekend_budget.items():
-        row = {'Kuyruk': queue}
+        ws2.cell(row=row_idx, column=1, value=queue).border = border
         total = 0
-        for date_str, wd in weekend_days:
-            label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
+        for j, (date_str, _) in enumerate(weekend_days, 2):
             r = results.get(date_str)
             if r and queue in r and r[queue]:
                 mi = r[queue]['mip_info']
@@ -626,38 +741,36 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
                                   - mi.get('total_part_time_kisi', 0))
             else:
                 inhouse_ft = 0
-            row[label] = inhouse_ft
+            cell = ws2.cell(row=row_idx, column=j, value=inhouse_ft)
+            cell.alignment = center
+            cell.border = border
             total += inhouse_ft
-        row['Toplam'] = total
-        row['Bütçe'] = budget
         diff = total - budget
-        row['Fark'] = diff
-        row['Durum'] = 'AŞIM' if diff > 0 else 'OK'
-        budget_rows.append(row)
-    df_budget = pd.DataFrame(budget_rows)
+        status = 'AŞIM' if diff > 0 else 'OK'
+        last_cols = [total, budget, diff, status]
+        start_j = 2 + len(weekend_days)
+        for k, v in enumerate(last_cols):
+            cell = ws2.cell(row=row_idx, column=start_j + k, value=v)
+            cell.alignment = center
+            cell.border = border
+            if k == 3:  # Durum
+                cell.font = Font(bold=True,
+                                  color='C00000' if status == 'AŞIM' else '006100')
+        row_idx += 1
 
-    # ---- Excel'e yaz ----
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        df_plan.to_excel(writer, sheet_name='Vardiya Planı', index=False)
-        df_budget.to_excel(writer, sheet_name='Bütçe', index=False)
+    ws2.column_dimensions['A'].width = 12
+    for j in range(2, len(headers) + 1):
+        col_letter = ws2.cell(row=1, column=j).column_letter
+        ws2.column_dimensions[col_letter].width = 9
 
-        # Kolon genişliklerini biraz ayarla (okunabilirlik)
-        ws = writer.sheets['Vardiya Planı']
-        widths = {'A': 10, 'B': 12, 'C': 28, 'D': 14, 'E': 12,
-                  'F': 11, 'G': 11, 'H': 11, 'I': 11, 'J': 11, 'K': 11, 'L': 11,
-                  'M': 9}
-        for col, w in widths.items():
-            ws.column_dimensions[col].width = w
+    # ---- Kaydet ----
+    wb.save(output_path)
 
-        ws2 = writer.sheets['Bütçe']
-        ws2.column_dimensions['A'].width = 12
-        for col_idx in range(2, 2 + len(weekend_days)):
-            col_letter = ws2.cell(row=1, column=col_idx).column_letter
-            ws2.column_dimensions[col_letter].width = 9
-
+    n_rows_plan = ws.max_row
     print(f"✓ Excel kaydedildi: {output_path}")
-    print(f"  Sheet 'Vardiya Planı': {len(weeks)} hafta, {len(df_plan)} satır")
-    print(f"  Sheet 'Bütçe': {len(df_budget)} kuyruk, {len(weekend_days)} hafta sonu günü")
+    print(f"  Sheet 'Vardiya Planı': {len(weeks)} hafta, {n_rows_plan} satır")
+    print(f"  Sheet 'Bütçe': {len(weekend_budget)} kuyruk, "
+          f"{len(weekend_days)} hafta sonu günü")
     return output_path
 
 
