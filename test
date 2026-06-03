@@ -1,811 +1,1276 @@
 # =============================================================================
-# KUYRUK BAZLI VARDIYA PİPELİNE - FORECAST v10.9
+# AYLIK ÇALIŞTIRMA V9 FORECAST — GELECEK ÇAĞRI TAHMİNLERİ İÇİN
 # =============================================================================
+# Bir ayın TÜM günlerini FORECAST verisi üzerinden koşar.
+#   - Haftaiçi → weekly_weekday_pipeline_forecast.run_week_all_queues (V9, Stage 4)
+#   - Haftasonu → weekend_forecast_final.run_all_queues_forecast
 #
-# Actual v10.9 ile birebir senkron.
-# Farklar:
-#   - prepare_forecast_calls_30() (geniş format 15dk → 30dk)
-#   - forecast_cols CONFIG
-#   - Raporda "Gerçek" kolonları yok
-#   - Queue overrides (cumartesi/pazar/haftalıcı)
-#   - Excel: Vardiya_Atamaları + Slot_Karşılaştırma + Özet (TOPLAM dahil)
-#   - Otomatik tarih bazlı dosya adı
+# Bu dosya monthly_run_v9.py'nin FORECAST versiyonudur:
+#   - df_actual YOK (gerçek çalışan karşılaştırması yapılmaz)
+#   - df_forecast var (15dk granularitede, geniş format)
+#   - Forecast format pipeline'a DİREKT girer; içerideki run_week_all_queues
+#     prepare_forecast_calls_30'u kendisi çağırır (monkey-patch YOK)
 #
+# FORECAST FORMAT (df_forecast kolonları):
+#   - datetime kolonu (örn. "09.02.2026 09:15:00")
+#   - date kolonu (örn. "09.02.2026")
+#   - KITLE_NOF_CALL, KURUMSAL_NOF_CALL, GOLD_NOF_CALL (kuyruk toplam çağrı)
+#   - {sub_queue}_NOF_CALL (alt-kuyruk bazlı; opsiyonel)
+#   - 15 dakikalık granularite — prepare_forecast_calls_30 ile 30 dk'ya toplanır
+#
+# DOSYALAR:
+#   - weekly_weekday_pipeline_forecast.py → haftaiçi MIP motoru (V9, Stage 4)
+#   - weekend_forecast_final.py            → haftasonu forecast MIP motoru
+#
+# Hücre hücre çalıştır (# %% [HÜCRE N] ile işaretli).
 # =============================================================================
 
-import pandas as pd
-import numpy as np
-import math
+
+# %% [HÜCRE 1] — Importlar
+import io
+import os
+import pickle
 import calendar
-from pulp import *
-import copy
+import contextlib
+import pandas as pd
 
-# CONFIG dışarıdan gelir (Jupyter'da ayrı hücre)
+# V9 weekly forecast pipeline — Stage 4 coverage shortfall dahil
+from weekly_weekday_pipeline_forecast import (
+    load_aht_from_df,
+    prepare_forecast_calls_30,
+    run_week_all_queues,
+)
 
-
-# =============================================================================
-# 0. AHT YÜKLEME
-# =============================================================================
-
-def load_aht_from_df(df_aht, config=CONFIG):
-    required_cols = ['saat', 'sub_queue', 'line_based_main_group', 'weighted_avg_aht']
-    missing = [c for c in required_cols if c not in df_aht.columns]
-    if missing:
-        raise ValueError(f"df_aht'de eksik kolonlar: {missing}")
-    main_queue_map = {qcfg['actual_name']: qkey for qkey, qcfg in config['queues'].items()}
-    sub_queues_cfg = {}
-    for main_group, queue_key in main_queue_map.items():
-        df_q = df_aht[df_aht['line_based_main_group'] == main_group]
-        if len(df_q) == 0: continue
-        sub_queues_cfg[queue_key] = {'queues': [], 'aht': {}}
-        for sq in sorted(df_q['sub_queue'].unique()):
-            sub_queues_cfg[queue_key]['queues'].append(sq)
-            df_sq = df_q[df_q['sub_queue'] == sq].copy()
-            aht_dict = dict(zip(df_sq['saat'].astype(int), df_sq['weighted_avg_aht'].astype(int)))
-            aht_dict['default'] = int(df_sq['weighted_avg_aht'].mean())
-            sub_queues_cfg[queue_key]['aht'][sq] = aht_dict
-        print(f"   ✓ {queue_key}: {len(sub_queues_cfg[queue_key]['queues'])} alt kuyruk")
-    return sub_queues_cfg
+# Weekend forecast pipeline — df_actual gerektirmez
+from weekend_forecast_final import (
+    run_all_queues_forecast,
+)
 
 
-# =============================================================================
-# YARDIMCI
-# =============================================================================
+# %% [HÜCRE 2] — Veri çekme
+# Mevcut notebook'taki forecast veri çekme kodunu BURAYA YAPIŞTIR.
+# Gereken:
+#   - df_forecast (15dk granularitede, geniş format — KITLE_NOF_CALL vs.)
+#   - df_aht (saat × alt-kuyruk × ana_kuyruk → weighted_avg_aht)
+#   - df_shifts_dict = {'kitle': df, 'kurumsal': df, 'gold': df}
+#
+# df_actual YOK — forecast modunda gerçek çalışan karşılaştırması yapılmaz.
 
-SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ['00', '30']]
 
-def get_weekends(year, month):
-    month_names = {
-        'ocak': 1, 'şubat': 2, 'mart': 3, 'nisan': 4, 'mayıs': 5, 'haziran': 6,
-        'temmuz': 7, 'ağustos': 8, 'eylül': 9, 'ekim': 10, 'kasım': 11, 'aralık': 12,
-        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
+# %% [HÜCRE 3] — CONFIG_WEEKDAY (forecast format için)
+# run_weekly_v9.py'deki CONFIG_WEEKDAY'i buraya kopyala.
+# Forecast modu için EKLE/GÜNCELLE:
+#
+#   'forecast_cols': {
+#       'datetime': 'forecast_datetime',     # tam timestamp kolon adı
+#       'date':     'forecast_date',          # tarih kolon adı
+#       'kitle_total':    'KITLE_NOF_CALL',
+#       'kurumsal_total': 'KURUMSAL_NOF_CALL',
+#       'gold_total':     'GOLD_NOF_CALL',
+#   },
+#
+# 'calls_columns' (eski actual format için) opsiyoneldir, dokunulmasa da olur.
+
+
+# %% [HÜCRE 4] — CONFIG_WEEKEND (forecast format için)
+# weekend_forecast_final için config — 'forecast_cols' alanı içermeli.
+
+
+# %% [HÜCRE 5] — AHT yükle (her iki config için)
+CONFIG_WEEKDAY['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKDAY)
+CONFIG_WEEKEND['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKEND)
+
+
+# %% [HÜCRE 6] — Aylık çalıştırma fonksiyonu (FORECAST)
+# Self-contained import'lar — HÜCRE 1 tekrar koşturulmasa bile çalışsın
+import io
+import contextlib
+
+DAY_LABELS_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+DAY_LABELS_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+
+def _wrap_weekly_info_as_daily(info, df_calls_30, queue, date_str):
+    """V9 weekly info_per_day[d] çıktısını gün-bazlı dict'e çevirir.
+    Forecast modunda 'actual' alanı yok — None yerine boş struct.
+    """
+    d = pd.to_datetime(date_str)
+    calls_col = f"{queue}_total"
+    df_day = df_calls_30[df_calls_30['data_date'] == d]
+    calls_by_slot = (dict(zip(df_day['slot_30'], df_day[calls_col]))
+                     if calls_col in df_day.columns else {})
+    return {
+        'mip_info': info,
+        'erlang_by_slot': info.get('erlang_by_slot', {}),
+        'calls_by_slot': calls_by_slot,
+        'actual': None,                      # forecast: gerçek yok
+        'date': d,
+        'queue': queue,
     }
-    if isinstance(month, str): month = month_names[month.lower().strip()]
-    weekends = []
-    cal = calendar.Calendar()
-    for day in cal.itermonthdates(year, month):
-        if day.month == month and day.weekday() >= 5:
-            weekends.append(day.strftime('%Y-%m-%d'))
-    return weekends
-
-def is_slot_in_shift(slot, start, end):
-    if start <= end: return start <= slot < end
-    else: return slot >= start or slot < end
-
-def get_part_time_availability(target_date, config=CONFIG):
-    target_date = pd.to_datetime(target_date)
-    day = target_date.day; weekday = target_date.weekday()
-    year, month = target_date.year, target_date.month
-    pt_config = config.get('part_time', {})
-    if not pt_config.get('enabled', False): return {q: 0 for q in config['queues']}
-    pt_counts = pt_config.get('count', {})
-    if weekday < 5: return {q: 0 for q in config['queues']}
-    last_day = calendar.monthrange(year, month)[1]
-    result = {}
-    for queue in config['queues']:
-        total_pt = pt_counts.get(queue, 0)
-        if total_pt == 0: result[queue] = 0; continue
-        if day in [1, 2, 3]: result[queue] = 0; continue
-        if day == last_day and weekday == 5: result[queue] = total_pt; continue
-        half = total_pt // 2
-        result[queue] = half if weekday == 5 else total_pt - half
-    return result
-
-def get_part_time_shifts(config=CONFIG):
-    pt_config = config.get('part_time', {})
-    if not pt_config.get('enabled', False): return []
-    shifts = []
-    for shift_str in pt_config.get('shifts', []):
-        start, end = shift_str.split('-')
-        slots = [slot for slot in SLOTS_30 if is_slot_in_shift(slot, start, end)]
-        shifts.append({'start': start, 'end': end, 'slots': slots,
-                       'key': f"pt_{start.replace(':', '')}_{end.replace(':', '')}"})
-    return shifts
-
-def get_time_cost_multiplier(queue, company_type, start_hour, config=CONFIG):
-    time_mults_all = config.get('time_cost_multipliers', {})
-    time_mults = time_mults_all.get(queue, time_mults_all.get('default', {}))
-    return time_mults.get(company_type, {}).get(start_hour, 1.0)
 
 
-# =============================================================================
-# 1. VERİ HAZIRLAMA
-# =============================================================================
-
-def get_sub_queue_aht(queue, sub_queue, slot, config=CONFIG):
-    sub_cfg = config['sub_queues'].get(queue, {})
-    aht_cfg = sub_cfg.get('aht', {}).get(sub_queue, {})
-    hour = int(slot.split(':')[0])
-    if hour in aht_cfg: return aht_cfg[hour]
-    if 'default' in aht_cfg: return aht_cfg['default']
-    return config.get('default_aht', 150)
-
-def calculate_weighted_aht(row, queue, slot, config=CONFIG):
-    overrides = config.get('aht_overrides', {}).get(queue, {})
-    if overrides:
-        hour = int(slot[:2])
-        if hour in overrides: return overrides[hour]
-    sub_cfg = config['sub_queues'].get(queue, {})
-    sub_queues = sub_cfg.get('queues', [])
-    total_calls = 0; weighted_sum = 0
-    for sq in sub_queues:
-        col = f"{sq}_calls"
-        if col in row.index:
-            calls = row[col]
-            if pd.notna(calls) and calls > 0:
-                aht = get_sub_queue_aht(queue, sq, slot, config)
-                weighted_sum += calls * aht; total_calls += calls
-    if total_calls > 0: return round(weighted_sum / total_calls, 1)
-    if sub_queues:
-        ahts = [get_sub_queue_aht(queue, sq, slot, config) for sq in sub_queues]
-        return round(sum(ahts) / len(ahts), 1)
-    return config.get('default_aht', 150)
-
-def prepare_forecast_calls_30(df_forecast, config=CONFIG):
-    fcols = config['forecast_cols']
-    df = df_forecast.copy()
-    df[fcols['datetime']] = df[fcols['datetime']].astype(str).str.strip()
-    def extract_time(val):
-        val = str(val).strip()
-        return val.split(' ', 1)[1].strip()[:5] if ' ' in val else '00:00'
-    df['_time_str'] = df[fcols['datetime']].apply(extract_time)
-    hour = df['_time_str'].str.split(':').str[0].astype(int)
-    minute = df['_time_str'].str.split(':').str[1].astype(int)
-    df['slot_30'] = hour.astype(str).str.zfill(2) + ':' + ((minute // 30) * 30).astype(str).str.zfill(2)
-    df['data_date'] = pd.to_datetime(df[fcols['date']], dayfirst=True)
-    queue_total_map = {
-        'kitle': fcols.get('kitle_total', 'KITLE_NOF_CALL'),
-        'kurumsal': fcols.get('kurumsal_total', 'KURUMSAL_NOF_CALL'),
-        'gold': fcols.get('gold_total', 'GOLD_NOF_CALL'),
-    }
-    agg_cols = {}
-    for qk, cn in queue_total_map.items():
-        if cn in df.columns: agg_cols[cn] = 'sum'
-    sub_queues_cfg = config.get('sub_queues', {})
-    for qk, sq_cfg in sub_queues_cfg.items():
-        for sq in sq_cfg.get('queues', []):
-            for cand in [f"{sq}_NOF_CALL", f"{sq}_nof_call", sq]:
-                if cand in df.columns: agg_cols[cand] = 'sum'; break
-    df_30 = df.groupby(['data_date', 'slot_30']).agg(agg_cols).reset_index()
-    for qk, cn in queue_total_map.items():
-        if cn in df_30.columns: df_30 = df_30.rename(columns={cn: f"{qk}_total"})
-    for qk, sq_cfg in sub_queues_cfg.items():
-        for sq in sq_cfg.get('queues', []):
-            for cand in [f"{sq}_NOF_CALL", f"{sq}_nof_call", sq]:
-                if cand in df_30.columns: df_30 = df_30.rename(columns={cand: f"{sq}_calls"}); break
-    return df_30.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+def _short_stage_note(solution_stage, total_shortfall_week=0):
+    """V9 solution_stage string'ini kısa nota çevirir."""
+    if not solution_stage:
+        return '?'
+    s = solution_stage
+    if s.startswith('STAGE 1'):
+        return 'orijinal'
+    if s.startswith('STAGE 2'):
+        try:
+            payload = s.split(': ', 1)[1]
+        except IndexError:
+            payload = s
+        return f"shrinkage {payload}"
+    if s.startswith('STAGE 3'):
+        try:
+            payload = s.split(': ', 1)[1]
+        except IndexError:
+            payload = s
+        return f"min_per_shift {payload}"
+    if s.startswith('STAGE 4'):
+        return f"shortfall {total_shortfall_week} kişi-slot"
+    return s
 
 
-# =============================================================================
-# 2. ERLANG-C
-# =============================================================================
-
-def erlang_c(agents, traffic):
-    if agents <= traffic or agents == 0: return 1.0
-    eb = traffic / agents
-    for i in range(2, int(agents) + 1):
-        eb = (traffic * eb) / (i + traffic * eb)
-    return min(eb / (1 - (traffic / agents) * (1 - eb)), 1.0)
-
-def calc_asa(agents, traffic, aht):
-    if agents <= traffic or agents == 0: return 999
-    ec = erlang_c(agents, traffic)
-    return (ec * (aht / 60)) / (agents - traffic) * 60
-
-def find_optimal_agents(calls, aht, slot, config=CONFIG):
-    ecfg = config['erlang']
-    if calls == 0: return 0, 0, 0
-    traffic = (calls * (aht / 60)) / ecfg['interval_minutes']
-    if traffic == 0: return 0, 0, 0
-    min_a = math.ceil(traffic); max_a = math.ceil(traffic * 3) + 10
-    raw = max_a
-    for a in range(min_a, max_a + 1):
-        if calc_asa(a, traffic, aht) <= ecfg['target_asa']:
-            raw = a; break
-    hour = int(slot[:2])
-    shrinkage_cfg = ecfg['shrinkage']
-    if isinstance(shrinkage_cfg, dict):
-        shrinkage = shrinkage_cfg.get(hour, shrinkage_cfg.get('default', 0.10))
-    else: shrinkage = shrinkage_cfg
-    final = math.ceil(raw / (1 - shrinkage))
-    asa = calc_asa(raw, traffic, aht)
-    return final, round(asa, 1), round(raw, 0)
-
-def calculate_erlang_all(df_calls_30, config=CONFIG):
-    results = []
-    for _, row in df_calls_30.iterrows():
-        date = row['data_date']; slot = row['slot_30']
-        for queue, qcfg in config['queues'].items():
-            total_col = f"{queue}_total"
-            calls = row.get(total_col, 0)
-            if pd.isna(calls): calls = 0
-            weighted_aht = calculate_weighted_aht(row, queue, slot, config)
-            need, asa, _ = find_optimal_agents(calls, weighted_aht, slot, config)
-            results.append({'date': date, 'slot': slot, 'queue': queue, 'label': qcfg['label'],
-                'calls': int(calls), 'weighted_aht': weighted_aht, 'erlang_need': need, 'asa': asa})
-    return pd.DataFrame(results)
+def _run_weekend_silent(df_forecast, df_shifts_dict, date_str, config):
+    """Haftasonu forecast pipeline'ı stdout'u yutarak çağır."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        r = run_all_queues_forecast(df_forecast, df_shifts_dict,
+                                     date_str, config=config)
+    return r
 
 
-# =============================================================================
-# 3. MIP OPTİMİZASYON (actual v10.9 ile birebir aynı)
-# =============================================================================
+def run_month_forecast(year, month, df_forecast, df_shifts_dict,
+                       cfg_weekday, cfg_weekend,
+                       queues=('kitle', 'kurumsal', 'gold'),
+                       verbose=False):
+    """Bir ayın tüm günlerini FORECAST verisi üzerinden koşar.
 
-def create_shift_coverage(df_shifts, config=CONFIG):
-    scol = config['shift_columns']; cov = {}
-    for _, row in df_shifts.iterrows():
-        shift = row[scol['shift']]; start = str(row[scol['start']])[:5]
-        end = str(row[scol['end']])[:5]; company = row[scol['company']]
-        key = f"{shift}_{company}"
-        slots = [s for s in SLOTS_30 if is_slot_in_shift(s, start, end)]
-        cov[key] = {'shift': shift, 'company': company, 'start': start, 'end': end, 'slots': slots}
-    return cov
+    Haftaiçi: V9 weekly (Stage 4 dahil), forecast 30dk'lik formata pre-convert edilir.
+    Haftasonu: weekend_forecast_final.run_all_queues_forecast.
 
-def optimize_queue(erlang_by_slot, df_shifts, queue,
-                   target_date=None, inhouse_min_by_slot=None,
-                   outsource_min_by_slot=None, config=None):
-    if config is None: config = CONFIG
-    qcfg = config['queues'][queue]; mcfg = config['mip']
-    scol = config['shift_columns']; ccfg = config['company']
-    allowed = qcfg['companies']; allowed_values = [ccfg[c]['shift_value'] for c in allowed]
-    df_sf = df_shifts[df_shifts[scol['company']].isin(allowed_values)]
-    shift_cov = create_shift_coverage(df_sf, config)
-    only_inhouse = (allowed == ['inhouse'])
-    shifts = list(shift_cov.keys())
-    active_slots = [s for s in SLOTS_30 if erlang_by_slot.get(s, 0) > 0]
-    inhouse_value = ccfg['inhouse']['shift_value']
-    outsource_value = ccfg['outsource']['shift_value']
-    in_shifts = [s for s in shifts if shift_cov[s]['company'] == inhouse_value]
-    out_shifts = [s for s in shifts if shift_cov[s]['company'] == outsource_value]
-    if not active_slots: return None, "İhtiyaç yok"
-
-    pt_available = 0; pt_shift_keys = []
-    if target_date is not None and config.get('part_time', {}).get('enabled', False):
-        pt_availability = get_part_time_availability(target_date, config)
-        pt_available = pt_availability.get(queue, 0)
-        if pt_available > 0:
-            for pt in get_part_time_shifts(config):
-                pt_shift_keys.append(pt['key'])
-                shift_cov[pt['key']] = {'shift': pt['key'], 'company': 'part_time',
-                    'start': pt['start'], 'end': pt['end'], 'slots': pt['slots']}
-            shifts = list(shift_cov.keys())
-
-    prob = LpProblem(f"Q_{queue}", LpMinimize)
-    x = LpVariable.dicts("x", shifts, lowBound=0, cat='Integer')
-    y = LpVariable.dicts("y", shifts, cat='Binary')
-    cost = []; cost_details = []
-
-    ssp_cfg = config.get('small_shift_penalty', {}); ssp_enabled = ssp_cfg.get('enabled', False); ssp_penalty = ssp_cfg.get('penalty', 3.0)
-    rr_cfg = config.get('rr_penalty', {}); rr_enabled = rr_cfg.get('enabled', False)
-    rr_penalty_per = rr_cfg.get('penalty_per_person', 5.0); rr_peak_exempt = rr_cfg.get('peak_exempt', True)
-    rr_peak_thr = rr_cfg.get('peak_threshold', 0.70)
-    night_mult_cfg = rr_cfg.get('night_multiplier', {}); night_mult_enabled = night_mult_cfg.get('enabled', False)
-    night_mult_value = night_mult_cfg.get('multiplier', 3.0)
-    night_mult_start = night_mult_cfg.get('hours', {}).get('start', '22:00')
-    night_mult_end = night_mult_cfg.get('hours', {}).get('end', '08:00')
-    def _is_night_slot(slot): return is_slot_in_shift(slot, night_mult_start, night_mult_end)
-
-    for s in shifts:
-        start_hour = shift_cov[s]['start']
-        if s in pt_shift_keys:
-            base_cost = mcfg['cost_inhouse']; company_type = 'part_time'
-            multiplier = get_time_cost_multiplier(queue, 'inhouse', start_hour, config)
-        elif shift_cov[s]['company'] == inhouse_value:
-            base_cost = mcfg['cost_inhouse']; company_type = 'inhouse'
-            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
-        else:
-            base_cost = mcfg['cost_outsource']; company_type = 'outsource'
-            multiplier = get_time_cost_multiplier(queue, company_type, start_hour, config)
-        final_cost = base_cost * multiplier
-        cost.append(x[s] * final_cost)
-        if ssp_enabled and s not in pt_shift_keys: cost.append(y[s] * ssp_penalty)
-
-    excess = {}; peak_slots_rr = set()
-    if rr_enabled and active_slots:
-        max_erlang = max(erlang_by_slot.get(s, 0) for s in active_slots)
-        if rr_peak_exempt and max_erlang > 0:
-            peak_slots_rr = {s for s in active_slots if erlang_by_slot.get(s, 0) >= max_erlang * rr_peak_thr}
-        peak_penalty_per = rr_cfg.get('peak_penalty', rr_penalty_per)
-        for slot in active_slots:
-            erlang_need = erlang_by_slot.get(slot, 0)
-            if erlang_need <= 0: continue
-            excess[slot] = LpVariable(f"excess_{slot}", lowBound=0, cat='Continuous')
-            covering = [s for s in shifts if slot in shift_cov[s]['slots']]
-            if covering: prob += excess[slot] >= lpSum([x[s] for s in covering]) - erlang_need
-            if slot in peak_slots_rr: effective_penalty = peak_penalty_per
-            elif night_mult_enabled and _is_night_slot(slot): effective_penalty = rr_penalty_per * night_mult_value
-            else: effective_penalty = rr_penalty_per
-            cost.append(excess[slot] * effective_penalty)
-
-    sc_cfg = config.get('slot_cap', {}); slot_cap_detail = []; sc_excess = {}
-    if sc_cfg.get('enabled', False):
-        sc_queues = sc_cfg.get('queues', list(config['queues'].keys()))
-        if queue in sc_queues:
-            for slot in active_slots:
-                erlang_need = erlang_by_slot.get(slot, 0)
-                if erlang_need <= 0: continue
-                matched_band = None
-                for band in sc_cfg.get('bands', []):
-                    if is_slot_in_shift(slot, band['start'], band['end']): matched_band = band; break
-                if matched_band is None: continue
-                cap = max(math.ceil(erlang_need * matched_band.get('max_ratio', 1.20)), 3)
-                sc_excess[slot] = LpVariable(f"sc_excess_{slot}", lowBound=0, cat='Continuous')
-                covering = [s for s in shifts if slot in shift_cov[s]['slots']]
-                if covering: prob += sc_excess[slot] >= lpSum([x[s] for s in covering]) - cap
-                cost.append(sc_excess[slot] * matched_band.get('penalty', 50.0))
-
-    prob += lpSum(cost)
-    for slot in active_slots:
-        covering = [s for s in shifts if slot in shift_cov[s]['slots']]
-        if covering: prob += lpSum([x[s] for s in covering]) >= erlang_by_slot[slot]
-    M = 500
-    for s in shifts:
-        prob += x[s] <= M * y[s]; prob += x[s] >= mcfg['min_per_shift'] * y[s]
-    if pt_available > 0 and pt_shift_keys:
-        prob += lpSum([x[s] for s in pt_shift_keys]) == pt_available
-    out_cfg = config['outsource_ratio'].get(queue)
-    if not only_inhouse and out_cfg:
-        t_in = lpSum([x[s] for s in in_shifts]) + lpSum([x[s] for s in pt_shift_keys])
-        t_out = lpSum([x[s] for s in out_shifts])
-        prob += (1 - out_cfg['min']) * t_out >= out_cfg['min'] * t_in
-        prob += (1 - out_cfg['max']) * t_out <= out_cfg['max'] * t_in
-    if inhouse_min_by_slot:
-        for slot, min_in in inhouse_min_by_slot.items():
-            if min_in > 0:
-                cov_in = [s for s in in_shifts if slot in shift_cov[s]['slots']]
-                cov_pt = [s for s in pt_shift_keys if slot in shift_cov[s]['slots']]
-                if cov_in + cov_pt: prob += lpSum([x[s] for s in cov_in + cov_pt]) >= min_in
-    if outsource_min_by_slot:
-        for slot, min_out in outsource_min_by_slot.items():
-            if min_out > 0:
-                cov_out = [s for s in out_shifts if slot in shift_cov[s]['slots']]
-                if cov_out: prob += lpSum([x[s] for s in cov_out]) >= min_out
-
-    prob.solve(PULP_CBC_CMD(msg=0))
-    if LpStatus[prob.status] != 'Optimal': return None, LpStatus[prob.status]
-
-    assignments = {s: int(value(x[s])) for s in shifts if value(x[s]) and value(x[s]) > 0}
-    mip_by_slot, mip_in_by_slot, mip_out_by_slot, mip_pt_by_slot = {}, {}, {}, {}
-    for slot in SLOTS_30:
-        mip_by_slot[slot] = sum(assignments.get(s, 0) for s in shifts if slot in shift_cov[s]['slots'])
-        mip_in_by_slot[slot] = sum(assignments.get(s, 0) for s in in_shifts if slot in shift_cov[s]['slots'])
-        mip_out_by_slot[slot] = sum(assignments.get(s, 0) for s in out_shifts if slot in shift_cov[s]['slots'])
-        mip_pt_by_slot[slot] = sum(assignments.get(s, 0) for s in pt_shift_keys if slot in shift_cov[s]['slots'])
-    total_in = sum(assignments.get(s, 0) for s in in_shifts)
-    total_out = sum(assignments.get(s, 0) for s in out_shifts)
-    total_pt = sum(assignments.get(s, 0) for s in pt_shift_keys) if pt_shift_keys else 0
-    total = total_in + total_out + total_pt
-    out_ratio = total_out / total if total > 0 else 0
-
-    rr_excess_by_slot, rr_total_excess, rr_total_penalty_cost, rr_penalized_slots = {}, 0, 0, 0
-    if rr_enabled and excess:
-        peak_penalty_per = rr_cfg.get('peak_penalty', rr_penalty_per)
-        for slot, exc_var in excess.items():
-            exc_val = value(exc_var) or 0
-            if exc_val > 0.5:
-                exc_int = int(round(exc_val))
-                rr_excess_by_slot[slot] = exc_int; rr_total_excess += exc_int
-                if slot in peak_slots_rr: rr_total_penalty_cost += exc_int * peak_penalty_per
-                elif night_mult_enabled and _is_night_slot(slot): rr_total_penalty_cost += exc_int * rr_penalty_per * night_mult_value
-                else: rr_total_penalty_cost += exc_int * rr_penalty_per
-                rr_penalized_slots += 1
-
-    info = {
-        'assignments': assignments, 'shift_coverage': shift_cov,
-        'mip_by_slot': mip_by_slot, 'mip_in_by_slot': mip_in_by_slot,
-        'mip_out_by_slot': mip_out_by_slot, 'mip_pt_by_slot': mip_pt_by_slot,
-        'total_kisi': total, 'total_inhouse_kisi': total_in,
-        'total_outsource_kisi': total_out, 'total_part_time_kisi': total_pt,
-        'pt_available': pt_available, 'outsource_ratio': out_ratio,
-        'inhouse_min_by_slot': inhouse_min_by_slot or {}, 'outsource_min_by_slot': outsource_min_by_slot or {},
-        'rr_penalty_enabled': rr_enabled, 'rr_excess_by_slot': rr_excess_by_slot,
-        'rr_total_excess': rr_total_excess, 'rr_total_penalty_cost': rr_total_penalty_cost,
-        'rr_penalized_slots': rr_penalized_slots, 'rr_peak_slots': peak_slots_rr,
-    }
-    return assignments, info
-
-
-# =============================================================================
-# 4. KAPASİTE + SUBQUEUE MIN
-# =============================================================================
-
-def calculate_daily_capacity(mip_info, weighted_aht_by_slot, config=CONFIG):
-    eff = config.get('capacity', {}).get('efficiency', {'inhouse': 0.70, 'outsource': 0.70, 'part_time': 0.80})
-    active_ahts = [v for v in weighted_aht_by_slot.values() if v > 0]
-    avg_aht = sum(active_ahts) / len(active_ahts) if active_ahts else 150
-    sc = mip_info['shift_coverage']; total_cap = in_cap = out_cap = pt_cap = 0
-    for shift, count in mip_info['assignments'].items():
-        info = sc[shift]; company = info['company']
-        s_h, s_m = int(info['start'][:2]), int(info['start'][3:5])
-        e_h, e_m = int(info['end'][:2]), int(info['end'][3:5])
-        s_min = s_h*60+s_m; e_min = e_h*60+e_m
-        if e_min <= s_min: e_min += 1440
-        dur = (e_min - s_min) * 60; efficiency = eff.get(company, 0.70)
-        cap = (dur / avg_aht) * efficiency * count; total_cap += cap
-        if company == 'inhouse': in_cap += cap
-        elif company == 'outsource': out_cap += cap
-        elif company == 'part_time': pt_cap += cap
-    return {'total_capacity': round(total_cap), 'inhouse_capacity': round(in_cap),
-            'outsource_capacity': round(out_cap), 'pt_capacity': round(pt_cap), 'avg_aht': round(avg_aht, 1)}
-
-def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, config):
-    target_date = pd.to_datetime(target_date)
-    df_day = df_calls_30[df_calls_30['data_date'] == target_date]
-    if len(df_day) == 0: return {}, {}
-    inhouse_min_by_slot, outsource_min_by_slot = {}, {}
-    for item in config.get('inhouse_only_subqueues', {}).get(queue, []):
-        sq_name = item if isinstance(item, str) else item['sub_queue']
-        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
-        sq_col, total_col = f"{sq_name}_calls", f"{queue}_total"
-        for _, row in df_day.iterrows():
-            slot = row['slot_30']; erlang = erlang_by_slot.get(slot, 0)
-            if erlang <= 0: continue
-            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
-            total_calls = row.get(total_col, 0) if total_col in row.index else 0
-            if total_calls > 0 and sq_calls > 0:
-                inhouse_min_by_slot[slot] = inhouse_min_by_slot.get(slot, 0) + math.ceil(erlang * (sq_calls/total_calls) * min_ratio)
-    for item in config.get('outsource_only_subqueues', {}).get(queue, []):
-        sq_name = item if isinstance(item, str) else item['sub_queue']
-        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
-        hours = None if isinstance(item, str) else item.get('hours')
-        sq_col, total_col = f"{sq_name}_calls", f"{queue}_total"
-        for _, row in df_day.iterrows():
-            slot = row['slot_30']; erlang = erlang_by_slot.get(slot, 0)
-            if erlang <= 0: continue
-            if hours and not is_slot_in_shift(slot, hours['start'], hours['end']): continue
-            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
-            total_calls = row.get(total_col, 0) if total_col in row.index else 0
-            if total_calls > 0 and sq_calls > 0:
-                outsource_min_by_slot[slot] = outsource_min_by_slot.get(slot, 0) + math.ceil(erlang * (sq_calls/total_calls) * min_ratio)
-    return inhouse_min_by_slot, outsource_min_by_slot
-
-
-# =============================================================================
-# 5. FORECAST RAPOR
-# =============================================================================
-
-def print_queue_report_forecast(date, queue, erlang_by_slot, mip_info,
-                                weighted_aht_by_slot=None, total_calls_day=0,
-                                calls_by_slot=None, config=CONFIG):
-    label = config['queues'][queue]['label']
-    date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
-    e_peak = max(erlang_by_slot.values()) if erlang_by_slot else 0
-    m_peak = max(mip_info['mip_by_slot'].values()) if mip_info['mip_by_slot'] else 0
-
-    print(f"\n{'='*95}")
-    print(f"FORECAST RAPORU: {label} ({queue.upper()}) - {date_str}")
-    print(f"{'='*95}")
-    print(f"\n📊 ÖZET: {mip_info['total_kisi']} kişi (In:{mip_info['total_inhouse_kisi']} "
-          f"Out:{mip_info['total_outsource_kisi']} PT:{mip_info.get('total_part_time_kisi',0)}) "
-          f"| Out%:{mip_info['outsource_ratio']:.1%} | Peak: E={e_peak} M={m_peak}")
-
-    if weighted_aht_by_slot and total_calls_day > 0:
-        cap = calculate_daily_capacity(mip_info, weighted_aht_by_slot, config)
-        rr = cap['total_capacity'] / total_calls_day
-        print(f"📊 KAPASİTE: AHT={cap['avg_aht']:.0f}s | Kap={cap['total_capacity']:,.0f} | "
-              f"Çağrı={total_calls_day:,} | RR={rr:.1%} {'✅' if rr >= 1.0 else '⚠'}")
-
-    if mip_info.get('rr_penalty_enabled') and mip_info.get('rr_penalized_slots', 0) > 0:
-        print(f"📈 RR PENALTY: {mip_info['rr_penalized_slots']} slot, +{mip_info['rr_total_excess']} kişi")
-
-    sc = mip_info['shift_coverage']
-    print(f"\n📋 SHIFT ATAMALARI ({len(mip_info['assignments'])} shift):")
-    print(f"   {'Shift':<22} {'Saat':<12} {'Tip':<10} {'Kişi':>6}")
-    print(f"   {'-'*55}")
-    for s, cnt in sorted(mip_info['assignments'].items(), key=lambda x: sc[x[0]]['start']):
-        info = sc[s]
-        print(f"   {s:<22} {info['start']}-{info['end']:<5} {info['company']:<10} {cnt:>6}")
-    print(f"   {'-'*55}")
-    print(f"   TOPLAM: In={mip_info['total_inhouse_kisi']} Out={mip_info['total_outsource_kisi']} PT={mip_info.get('total_part_time_kisi',0)} → {mip_info['total_kisi']}")
-
-    # Slot bazlı
-    peak_thr = config.get('report', {}).get('peak_threshold', 0.70)
-    max_e = max(erlang_by_slot.values()) if erlang_by_slot else 0
-    peak_slots = {s for s, e in erlang_by_slot.items() if e >= max_e * peak_thr}
-
-    print(f"\n📋 SLOT BAZLI  * = peak")
-    print(f"   {'Slot':<7} {'AHT':>5} {'Erlang':>7} {'MIP':>7} {'In':>5} {'Out':>5} {'RR':>6} {'E.F':>5}")
-    print(f"   {'-'*50}")
-    for slot in SLOTS_30:
-        e = erlang_by_slot.get(slot, 0); m = mip_info['mip_by_slot'].get(slot, 0)
-        mi = mip_info['mip_in_by_slot'].get(slot, 0); mo = mip_info['mip_out_by_slot'].get(slot, 0)
-        if e > 0 or m > 0:
-            w = weighted_aht_by_slot.get(slot, 0) if weighted_aht_by_slot else 0
-            rr = f"{m/e:.0%}" if e > 0 else "-"; pk = "*" if slot in peak_slots else " "
-            print(f"   {slot}{pk:<2} {w:>5.0f} {e:>7} {m:>7} {mi:>5} {mo:>5} {rr:>6} {m-e:>+5}")
-
-    # Kapasite raporu
-    hr_cfg = config.get('hourly_report', {})
-    if hr_cfg and weighted_aht_by_slot and calls_by_slot:
-        re_cfg = hr_cfg.get('rapor_etkisi', {}); kk_cfg = hr_cfg.get('kapasite_kaybi', {}); ca_cfg = hr_cfg.get('cagri_adedi', {})
-        print(f"\n📋 KAPASİTE RAPORU (30dk)")
-        print(f"   {'Slot':<7} {'Çağrı':>7} {'Kap.':>6} {'R.Etk':>6} {'K.Kay':>6} {'NetMT':>6} {'Ç.Kap':>7} {'RR':>7}")
-        print(f"   {'-'*55}")
-        tc = tk = tr = tkk = tn = tck = 0
-        for slot in SLOTS_30:
-            h = int(slot[:2]); c = int(calls_by_slot.get(slot, 0)); k = mip_info['mip_by_slot'].get(slot, 0)
-            if c == 0 and k == 0: continue
-            re = round(k * re_cfg.get(h, re_cfg.get('default', 0)))
-            kk = round(k * kk_cfg.get(h, kk_cfg.get('default', 0)))
-            net = k - re - kk; ca = ca_cfg.get(h, ca_cfg.get('default', 15))
-            ck = net * (ca / 2); rr = ck / c if c > 0 else 0
-            tc += c; tk += k; tr += re; tkk += kk; tn += net; tck += ck
-            w = " ⚠" if rr < 1.0 and c > 0 else ""
-            print(f"   {slot:<7} {c:>7} {k:>6} {re:>6} {kk:>6} {net:>6} {ck:>7.0f} {rr:>6.0%}{w}")
-        print(f"   {'-'*55}")
-        print(f"   {'TOPLAM':<7} {tc:>7} {tk:>6} {tr:>6} {tkk:>6} {tn:>6} {tck:>7.0f} {tck/tc if tc>0 else 0:>6.0%}")
-
-
-# =============================================================================
-# 6. ANA AKIŞ - FORECAST
-# =============================================================================
-
-def run_queue_pipeline_forecast(df_forecast, df_shifts, target_date, queue,
-                                config=CONFIG, verbose=True):
-    target_date = pd.to_datetime(target_date)
-    date_str = target_date.strftime('%Y-%m-%d')
-    weekday = target_date.weekday()
-    if weekday < 5: override_key = 'haftalici'
-    elif weekday == 5: override_key = 'cumartesi'
-    else: override_key = 'pazar'
-    is_weekend = weekday >= 5
-    day_label = {'haftalici': 'Haftaiçi', 'cumartesi': 'Cumartesi', 'pazar': 'Pazar'}[override_key]
-
-    overrides = config.get('queue_overrides', {}).get(queue, {}).get(override_key, {})
-    if overrides:
-        config = copy.deepcopy(config)
-        def _deep_merge(base, override):
-            for key, val in override.items():
-                if key in base and isinstance(base[key], dict) and isinstance(val, dict):
-                    _deep_merge(base[key], val)
-                else: base[key] = val
-        _deep_merge(config, overrides)
-        if verbose: print(f"   📌 Override aktif: {queue}/{override_key} → {list(overrides.keys())}")
-
-    label = config['queues'][queue]['label']
-
-    if isinstance(df_shifts, dict):
-        df_shifts_queue = df_shifts.get(queue)
-        if df_shifts_queue is None: raise ValueError(f"'{queue}' shift yok")
-    else: df_shifts_queue = df_shifts
-
-    if verbose:
-        print(f"\n{'='*95}")
-        print(f"FORECAST v10.9: {label} ({queue.upper()}) - {date_str} [{day_label}]")
-        print(f"{'='*95}")
-
-    if verbose: print(f"\n[1/4] Forecast veri (15dk → 30dk)...")
-    df_calls_30 = prepare_forecast_calls_30(df_forecast, config)
-
-    if verbose: print(f"[2/4] Erlang (weighted AHT + shrinkage)...")
-    df_erlang = calculate_erlang_all(df_calls_30, config)
-    df_e = df_erlang[(df_erlang['date'] == target_date) & (df_erlang['queue'] == queue)].copy()
-    erlang_by_slot = dict(zip(df_e['slot'], df_e['erlang_need']))
-    weighted_aht_by_slot = dict(zip(df_e['slot'], df_e['weighted_aht']))
-
-    if verbose:
-        e_total = sum(erlang_by_slot.values()); e_peak = max(erlang_by_slot.values()) if erlang_by_slot else 0
-        print(f"   Erlang: toplam={e_total}, peak={e_peak}")
-
-    inhouse_min, outsource_min = _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, config)
-
-    if verbose: print(f"[3/4] MIP...")
-    assignments, mip_info = optimize_queue(erlang_by_slot, df_shifts_queue, queue,
-        target_date=target_date, inhouse_min_by_slot=inhouse_min,
-        outsource_min_by_slot=outsource_min, config=config)
-
-    if assignments is None:
-        print(f"   ⚠ Çözüm bulunamadı: {mip_info}"); return None
-
-    if verbose:
-        print(f"   MIP: {mip_info['total_kisi']} kişi (In:{mip_info['total_inhouse_kisi']} "
-              f"Out:{mip_info['total_outsource_kisi']} Oran:{mip_info['outsource_ratio']:.1%})")
-
-    if verbose: print(f"[4/4] Rapor...")
-    df_day = df_calls_30[df_calls_30['data_date'] == target_date]
-    calls_by_slot = {}
-    if f"{queue}_total" in df_day.columns:
-        calls_by_slot = dict(zip(df_day['slot_30'], df_day[f"{queue}_total"]))
-    total_calls_day = int(sum(calls_by_slot.values())) if calls_by_slot else 0
-
-    print_queue_report_forecast(target_date, queue, erlang_by_slot, mip_info,
-        weighted_aht_by_slot=weighted_aht_by_slot, total_calls_day=total_calls_day,
-        calls_by_slot=calls_by_slot, config=config)
-
-    return {'date': target_date, 'queue': queue, 'label': label, 'day_type': override_key,
-        'erlang_by_slot': erlang_by_slot, 'weighted_aht_by_slot': weighted_aht_by_slot,
-        'mip_info': mip_info, 'total_calls_day': total_calls_day, 'calls_by_slot': calls_by_slot,
-        'inhouse_min_by_slot': inhouse_min, 'outsource_min_by_slot': outsource_min,
-        '_config': config}
-
-
-def run_all_queues_forecast(df_forecast, df_shifts, target_date, config=CONFIG):
+    Returns: {date_str: {queue: {mip_info, ...}} | None}
+    df_actual KULLANILMAZ.
+    """
     results = {}
-    for queue in config['queues']:
-        result = run_queue_pipeline_forecast(df_forecast, df_shifts, target_date, queue, config=config)
-        if result: results[queue] = result
-    target_date = pd.to_datetime(target_date)
+    cal = calendar.Calendar()
+    all_days = [d for d in cal.itermonthdates(year, month) if d.month == month]
 
-    print(f"\n{'='*95}")
-    print(f"TÜM KUYRUKLAR FORECAST - {target_date.strftime('%Y-%m-%d')}")
-    print(f"{'='*95}")
-    print(f"{'Kuyruk':<12} {'MIP':>8} {'In':>6} {'Out':>6} {'PT':>5} {'Out%':>7} {'Shift':>6} {'Kap.RR':>8}")
-    print(f"{'-'*60}")
+    # Haftaiçi blokları (ardışık Pzt-Cum)
+    weekday_blocks = []
+    current = []
+    for d in all_days:
+        if d.weekday() < 5:
+            current.append(d)
+        else:
+            if current:
+                weekday_blocks.append(current)
+                current = []
+    if current:
+        weekday_blocks.append(current)
 
-    for q, r in results.items():
-        mi = r['mip_info']; w = r.get('weighted_aht_by_slot', {}); c = r.get('total_calls_day', 0)
-        if w and c > 0:
-            cap = calculate_daily_capacity(mi, w, config); rr = f"{cap['total_capacity']/c:.1%}"
-        else: rr = "-"
-        print(f"{r['label']:<12} {mi['total_kisi']:>8} {mi['total_inhouse_kisi']:>6} "
-              f"{mi['total_outsource_kisi']:>6} {mi.get('total_part_time_kisi',0):>5} "
-              f"{mi['outsource_ratio']:>6.1%} {len(mi['assignments']):>6} {rr:>8}")
+    # FORECAST → 30 dk internal format (BİR KEZ — tüm haftalara yetecek)
+    # run_week_all_queues bunu df_calls_30_pre olarak alacak, tekrar
+    # convert etmeyecek (hız avantajı).
+    df_calls_30 = prepare_forecast_calls_30(df_forecast, config=cfg_weekday)
 
-    # Toplam kapasite RR
-    t_mip = t_in = t_out = t_pt = t_calls = 0
-    t_cagri_kap = t_cagri_gelen = 0
-    for q, r in results.items():
-        mi = r['mip_info']
-        t_mip += mi['total_kisi']; t_in += mi['total_inhouse_kisi']
-        t_out += mi['total_outsource_kisi']; t_pt += mi.get('total_part_time_kisi', 0)
-        t_calls += r.get('total_calls_day', 0)
-        q_cfg = r.get('_config', config)
-        q_hr = q_cfg.get('hourly_report', {}); q_re = q_hr.get('rapor_etkisi', {})
-        q_kk = q_hr.get('kapasite_kaybi', {}); q_ca = q_hr.get('cagri_adedi', {})
-        cbs = r.get('calls_by_slot', {})
-        for slot in SLOTS_30:
-            h = int(slot[:2]); cagri = int(cbs.get(slot, 0)); kap = mi['mip_by_slot'].get(slot, 0)
-            if cagri == 0 and kap == 0: continue
-            re = round(kap * q_re.get(h, q_re.get('default', 0)))
-            kk = round(kap * q_kk.get(h, q_kk.get('default', 0)))
-            net = kap - re - kk; ca = q_ca.get(h, q_ca.get('default', 15))
-            t_cagri_kap += net * (ca / 2); t_cagri_gelen += cagri
+    # ---- HAFTAİÇİ BLOKLARI ----
+    for block in weekday_blocks:
+        block_dates = [d.strftime('%Y-%m-%d') for d in block]
+        block_label = f"{block_dates[0]} → {block_dates[-1]} ({len(block)} gün)"
+        print(f"\n▶ Haftaiçi blok: {block_label}")
 
-    t_kap_rr = t_cagri_kap / t_cagri_gelen if t_cagri_gelen > 0 else 0
-    t_out_pct = t_out / t_mip if t_mip > 0 else 0
-    print(f"{'-'*60}")
-    print(f"{'TOPLAM':<12} {t_mip:>8} {t_in:>6} {t_out:>6} {t_pt:>5} {t_out_pct:>6.1%} {'':>6} {t_kap_rr:>7.1%}")
-    print(f"\n   Toplam Çağrı: {t_calls:,} | Kapasite RR: {t_kap_rr:.1%}")
+        try:
+            if verbose:
+                week_results = run_week_all_queues(
+                    df_forecast=df_forecast,
+                    df_shifts_by_queue=df_shifts_dict,
+                    target_dates=block_dates,
+                    config=cfg_weekday,
+                    queues=queues,
+                    df_calls_30_pre=df_calls_30,    # pre-computed: tekrar convert etme
+                    verbose=True,
+                )
+            else:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    week_results = run_week_all_queues(
+                        df_forecast=df_forecast,
+                        df_shifts_by_queue=df_shifts_dict,
+                        target_dates=block_dates,
+                        config=cfg_weekday,
+                        queues=queues,
+                        df_calls_30_pre=df_calls_30,
+                        verbose=False,
+                    )
+        except Exception as e:
+            print(f"  ✗ blok hatası: {e}")
+            for d in block:
+                results[d.strftime('%Y-%m-%d')] = None
+            continue
+
+        for d in block:
+            date_str = d.strftime('%Y-%m-%d')
+            day_label = DAY_LABELS_EN[d.weekday()]
+            day_name = DAY_LABELS_TR[d.weekday()]
+
+            day_result = {}
+            parts = []
+            for queue in queues:
+                q_res = week_results.get(queue)
+                if q_res is None:
+                    parts.append(f"{queue}: INFEASIBLE")
+                    continue
+                info = q_res.get('info_per_day', {}).get(day_label)
+                if info is None:
+                    parts.append(f"{queue}: INFEASIBLE")
+                    continue
+                day_result[queue] = _wrap_weekly_info_as_daily(
+                    info, df_calls_30, queue, date_str)
+                note = _short_stage_note(
+                    q_res.get('solution_stage'),
+                    q_res.get('total_shortfall_week', 0),
+                )
+                parts.append(f"{queue}: OK [{note}]")
+
+            if not day_result:
+                results[date_str] = None
+                print(f"  ✗ {date_str} ({day_name}) — tümü INFEASIBLE")
+            else:
+                results[date_str] = day_result
+                has_sf = any(
+                    week_results.get(q, {}).get('total_shortfall_week', 0) > 0
+                    for q in day_result
+                )
+                mark = "⚠" if has_sf else "✓"
+                print(f"  {mark} {date_str} ({day_name}) — " + "  |  ".join(parts))
+
+    # ---- HAFTASONU GÜNLERİ ----
+    weekend_days = [d for d in all_days if d.weekday() >= 5]
+    if weekend_days:
+        print(f"\n▶ Haftasonu günleri: {len(weekend_days)} gün")
+    for d in weekend_days:
+        date_str = d.strftime('%Y-%m-%d')
+        day_name = DAY_LABELS_TR[d.weekday()]
+        try:
+            if verbose:
+                r = run_all_queues_forecast(df_forecast, df_shifts_dict,
+                                             date_str, config=cfg_weekend)
+            else:
+                r = _run_weekend_silent(df_forecast, df_shifts_dict,
+                                         date_str, cfg_weekend)
+            results[date_str] = r
+            if r:
+                parts = []
+                for queue in queues:
+                    if queue in r and r[queue] is not None:
+                        parts.append(f"{queue}: OK")
+                    else:
+                        parts.append(f"{queue}: INFEASIBLE")
+                print(f"  ✓ {date_str} ({day_name}) — " + "  |  ".join(parts))
+            else:
+                print(f"  ✗ {date_str} ({day_name}) — boş sonuç")
+        except Exception as e:
+            print(f"  ✗ {date_str} ({day_name}) — weekend hatası: {e}")
+            results[date_str] = None
 
     return results
 
 
+# %% [HÜCRE 7] — Aylık çalıştır + cache (V9 FORECAST)
+YEAR = 2026
+MONTH = 2
+CACHE_FILE = f"monthly_v9_forecast_{YEAR}_{MONTH:02d}.pkl"
+
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, 'rb') as f:
+        results = pickle.load(f)
+    print(f"Cache'ten yüklendi: {len(results)} gün ({CACHE_FILE})")
+else:
+    results = run_month_forecast(
+        YEAR, MONTH, df_forecast, df_shifts_dict,
+        CONFIG_WEEKDAY, CONFIG_WEEKEND, verbose=False,
+    )
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(results, f)
+    print(f"\nKaydedildi: {CACHE_FILE}")
+
+
+# %% [HÜCRE 8] — Haftasonu İnhouse Bütçe Kontrolü (part-time HARİÇ)
+WEEKEND_BUDGET = {
+    'kitle':    1200,
+    'gold':     300,
+    'kurumsal': 120,
+}
+
+weekend_days = []
+for date_str in sorted(results.keys()):
+    d = pd.to_datetime(date_str)
+    if d.weekday() >= 5:
+        weekend_days.append((date_str, d.weekday()))
+
+print(f"\n{'='*100}")
+print(f"HAFTA SONU İNHOUSE BÜTÇE KONTROLÜ — {YEAR}/{MONTH:02d}  (part-time HARİÇ)")
+print(f"{'='*100}")
+
+print(f"{'Kuyruk':<10} ", end='')
+for date_str, wd in weekend_days:
+    label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
+    print(f"{label:>7}", end=' ')
+print(f"{'Toplam':>8} {'Bütçe':>7} {'Durum':>12}")
+print('-' * 100)
+
+for queue, budget in WEEKEND_BUDGET.items():
+    inhouse_per_day = []
+    for date_str, _ in weekend_days:
+        r = results.get(date_str)
+        if r and queue in r and r[queue] is not None:
+            mi = r[queue]['mip_info']
+            inhouse_ft = mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0)
+            inhouse_ft = max(0, inhouse_ft)
+        else:
+            inhouse_ft = 0
+        inhouse_per_day.append(inhouse_ft)
+
+    total = sum(inhouse_per_day)
+    diff = total - budget
+    if diff > 0:
+        status = f"+{diff} AŞIM ✗"
+    else:
+        status = f"{diff:+d} OK ✓"
+
+    print(f"{queue:<10} ", end='')
+    for v in inhouse_per_day:
+        print(f"{v:>7}", end=' ')
+    print(f"{total:>8} {budget:>7} {status:>12}")
+
+print('-' * 100)
+print("Not: total_inhouse_kisi'den total_part_time_kisi çıkarılarak hesaplandı.")
+
+
 # =============================================================================
-# 7. EXCEL EXPORT - FORECAST
+# Plan özet + vardiya planı — ortak fonksiyon (kuyruk bazında)
 # =============================================================================
 
-def export_forecast_excel(df_forecast, df_shifts, dates, queues=None,
-                          output_file=None, config=CONFIG):
-    if queues is None: queues = list(config['queues'].keys())
-    if output_file is None:
-        dates_pd = [pd.to_datetime(d) for d in dates]
-        first = min(dates_pd).strftime('%Y%m%d'); last = max(dates_pd).strftime('%Y%m%d')
-        output_file = f'vardiya_forecast_{first}.xlsx' if first == last else f'vardiya_forecast_{first}_{last}.xlsx'
+DAY_NAMES = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
 
-    all_assignments, all_slots, all_summary = [], [], []
-    print(f"\n{'='*70}\nFORECAST EXCEL - {len(dates)} tarih\n{'='*70}")
 
-    for i, date in enumerate(dates):
-        date = pd.to_datetime(date); date_str = date.strftime('%Y-%m-%d')
-        dn = ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'][date.weekday()]
-        wkday = date.weekday()
-        dtl = 'Cumartesi' if wkday == 5 else 'Pazar' if wkday == 6 else 'Haftaiçi'
-        print(f"\n[{i+1}/{len(dates)}] {date_str} ({dn}) - {dtl}")
+def print_queue_monthly_plan(plan_queue, results, year, month):
+    """Tek kuyruk için aylık plan — gün özet metrikler + vardiya roster.
+    Forecast modunda: gerçek karşılaştırma sütunu YOK.
+    """
+    print(f"\n{'='*120}")
+    print(f"GÜN GÜN PLAN ÖZETİ — {plan_queue.upper()} — {year}/{month:02d}  (FORECAST)")
+    print(f"{'='*120}")
+    print(f"  {'Tarih':<11} {'Gün':<4} {'Çağrı':>7} {'Erl_Pk':>7} {'Erl_T':>7} "
+          f"{'MIP_Pk':>7} {'In':>5} {'Out':>5} {'PT':>4} {'Toplam':>7} {'Out%':>5} "
+          f"{'Eksik':>6}  {'Çözüm':<28}")
+    print('  ' + '-' * 118)
 
+    t_cagri = t_erl_t = 0
+    t_in = t_out = t_pt = 0
+    t_sf = 0
+    days_ok = 0
+
+    for date_str in sorted(results.keys()):
+        r = results.get(date_str)
+        d = pd.to_datetime(date_str)
+        gun = DAY_NAMES[d.weekday()]
+
+        if r is None or plan_queue not in r or r[plan_queue] is None:
+            print(f"  {date_str:<11} {gun:<4} {'-':>7} {'-':>7} {'-':>7} "
+                  f"{'-':>7} {'-':>5} {'-':>5} {'-':>4} {'-':>7} {'-':>5} "
+                  f"{'-':>6}  INFEASIBLE")
+            continue
+
+        qr = r[plan_queue]
+        mi = qr['mip_info']
+
+        calls_by_slot = qr.get('calls_by_slot', {}) or {}
+        cagri = int(sum(calls_by_slot.values()))
+
+        erlang_by_slot = qr.get('erlang_by_slot', {}) or {}
+        erl_pk = max(erlang_by_slot.values()) if erlang_by_slot else 0
+        erl_t = sum(erlang_by_slot.values())
+
+        mip_by_slot = mi.get('mip_by_slot', {}) or {}
+        mip_pk = max(mip_by_slot.values()) if mip_by_slot else 0
+
+        in_ft = max(0, mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0))
+        out = mi.get('total_outsource_kisi', 0)
+        pt = mi.get('total_part_time_kisi', 0)
+        toplam = in_ft + out + pt
+        out_pct = out / toplam if toplam > 0 else 0
+
+        sol_stage = mi.get('solution_stage')
+        sf_total = mi.get('total_shortfall', 0)
+        note = _short_stage_note(sol_stage, sf_total) if sol_stage else 'weekend'
+        sf_str = str(sf_total) if sf_total > 0 else '-'
+
+        print(f"  {date_str:<11} {gun:<4} {cagri:>7,} {erl_pk:>7} {erl_t:>7} "
+              f"{mip_pk:>7} {in_ft:>5} {out:>5} {pt:>4} {toplam:>7} {out_pct:>4.0%} "
+              f"{sf_str:>6}  {note[:28]:<28}")
+
+        t_cagri += cagri
+        t_erl_t += erl_t
+        t_in += in_ft
+        t_out += out
+        t_pt += pt
+        t_sf += sf_total
+        days_ok += 1
+
+    t_toplam = t_in + t_out + t_pt
+    t_out_pct = t_out / t_toplam if t_toplam > 0 else 0
+    print('  ' + '-' * 118)
+    print(f"  {'AYLIK':<11} {'-':<4} {t_cagri:>7,} {'-':>7} {t_erl_t:>7} "
+          f"{'-':>7} {t_in:>5} {t_out:>5} {t_pt:>4} {t_toplam:>7} {t_out_pct:>4.0%} "
+          f"{t_sf:>6}")
+    print(f"\n  Erl_Pk=eşzamanlı Erlang peak  |  Erl_T=günlük Erlang toplamı")
+    print(f"  Eksik=Stage 4 coverage shortfall (kişi-slot)  |  Çözüm=fallback aşaması")
+    print(f"  Başarılı: {days_ok}/{len(results)} gün")
+
+    # ---- Vardiya planı (roster) ----
+    print(f"\n{'='*100}")
+    print(f"GÜN GÜN VARDIYA PLANI — {plan_queue.upper()} — {year}/{month:02d}  (FORECAST)")
+    print(f"{'='*100}")
+
+    for date_str in sorted(results.keys()):
+        r = results.get(date_str)
+        d = pd.to_datetime(date_str)
+        gun = DAY_NAMES[d.weekday()]
+
+        if r is None or plan_queue not in r or r[plan_queue] is None:
+            print(f"\n--- {date_str} ({gun}) ---  INFEASIBLE")
+            continue
+
+        qr = r[plan_queue]
+        mi = qr['mip_info']
+        assignments = mi.get('assignments', {})
+        sc = mi.get('shift_coverage', {})
+
+        in_ft = max(0, mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0))
+        out = mi.get('total_outsource_kisi', 0)
+        pt = mi.get('total_part_time_kisi', 0)
+        toplam = in_ft + out + pt
+        sf_total = mi.get('total_shortfall', 0)
+
+        header = f"--- {date_str} ({gun}) ---  In={in_ft}  Out={out}  PT={pt}  Toplam={toplam}"
+        if sf_total > 0:
+            header += f"  ⚠ Eksik={sf_total} kişi-slot"
+        print(f"\n{header}")
+
+        active = [(s, c) for s, c in assignments.items() if c > 0]
+        if not active:
+            print(f"    (vardiya yok)")
+            continue
+
+        active.sort(key=lambda x: (sc.get(x[0], {}).get('start', '99:99'),
+                                    sc.get(x[0], {}).get('company', 'zzz')))
+
+        sf_recs = mi.get('shortfall_recommendations', {}) or {}
+        has_rec = bool(sf_recs)
+
+        if has_rec:
+            print(f"    {'Vardiya':<32} {'Saat':<14} {'Şirket':<10} "
+                  f"{'Kişi':>5} {'+Öneri':>7} {'Önerilen':>9}")
+            print(f"    {'-'*84}")
+        else:
+            print(f"    {'Vardiya':<32} {'Saat':<14} {'Şirket':<10} {'Kişi':>5}")
+            print(f"    {'-'*68}")
+
+        for s, cnt in active:
+            info = sc.get(s, {})
+            saat = f"{info.get('start','--:--')}-{info.get('end','--:--')}"
+            comp = info.get('company', '-')
+            if has_rec:
+                rec = sf_recs.get(s, 0)
+                rec_str = f"+{rec}" if rec > 0 else "-"
+                new_total = cnt + rec
+                mark = " ←" if rec > 0 else "  "
+                print(f"    {s:<32} {saat:<14} {comp:<10} "
+                      f"{cnt:>5} {rec_str:>7} {new_total:>8}{mark}")
+            else:
+                print(f"    {s:<32} {saat:<14} {comp:<10} {cnt:>5}")
+
+        if has_rec:
+            rec_total = sum(sf_recs.values())
+            print(f"    → +{rec_total} kişi eklenirse {sf_total} kişi-slot eksik kapanır")
+
+
+# %% [HÜCRE 9] — KİTLE — gün gün plan özeti + vardiya planı
+print_queue_monthly_plan('kitle', results, YEAR, MONTH)
+
+
+# %% [HÜCRE 10] — GOLD — gün gün plan özeti + vardiya planı
+print_queue_monthly_plan('gold', results, YEAR, MONTH)
+
+
+# %% [HÜCRE 11] — KURUMSAL — gün gün plan özeti + vardiya planı
+print_queue_monthly_plan('kurumsal', results, YEAR, MONTH)
+
+
+# %% [HÜCRE 12] — Excel'e aktar: vardiya planı (timetable) + haftasonu bütçe
+# Layout aynı monthly_run_v9 ile:
+#   Sheet 1: 7 gün yan yana, her gün 8 kolon, haftalar üst üste
+#   Sheet 2: haftasonu bütçe kontrolü
+
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+
+
+def export_monthly_plan_to_excel(results, year, month, weekend_budget,
+                                  queues=('kitle', 'gold', 'kurumsal'),
+                                  output_path=None):
+    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar (forecast)."""
+    if output_path is None:
+        ay_isimleri = ['Ocak', 'Subat', 'Mart', 'Nisan', 'Mayis', 'Haziran',
+                       'Temmuz', 'Agustos', 'Eylul', 'Ekim', 'Kasim', 'Aralik']
+        ay_adi = ay_isimleri[month - 1]
+        output_path = f"vardiya_plani_forecast_{year}_{month:02d}_{ay_adi}.xlsx"
+
+    all_dates = sorted(results.keys())
+    if not all_dates:
+        print("⚠ results boş, export atlandı")
+        return None
+
+    first = pd.to_datetime(all_dates[0])
+    last = pd.to_datetime(all_dates[-1])
+    start_mon = first - pd.Timedelta(days=first.weekday())
+    end_sun = last + pd.Timedelta(days=(6 - last.weekday()))
+
+    weeks = []
+    cur = start_mon
+    while cur <= end_sun:
+        week = [(cur + pd.Timedelta(days=i)).strftime('%Y-%m-%d')
+                for i in range(7)]
+        weeks.append(week)
+        cur += pd.Timedelta(days=7)
+
+    DAY_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+    COLS_PER_DAY = 8
+    SUB_HEADERS = ['SHIFT', 'kitle inhouse', 'kitle outsource', 'gold',
+                   'kurumsal', 'INH Total', 'OS Total', 'Total']
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Vardiya Planı'
+
+    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True, size=10)
+    date_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+    date_font = Font(bold=True, size=11)
+    total_fill = PatternFill(start_color='E7E6E6', end_color='E7E6E6', fill_type='solid')
+    total_font = Font(bold=True)
+    thin = Side(border_style='thin', color='888888')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center')
+
+    PT_COL_GAP = 1
+    PT_SECTION_COLS = 4
+    PT_SECTION_START = 7 * COLS_PER_DAY + PT_COL_GAP + 1
+    PT_HEADERS = ['SHIFT', 'Kuyruk', 'Cmt', 'Pzr']
+
+    def _collect_week_data(week):
+        all_starts = set()
+        counts = {}
+        ends_per_start_company = {}
+        for day_idx, ds in enumerate(week):
+            r = results.get(ds)
+            if not r:
+                continue
+            for queue in queues:
+                qr = r.get(queue)
+                if not qr:
+                    continue
+                mi = qr.get('mip_info', {})
+                sc = mi.get('shift_coverage', {})
+                for s, c in mi.get('assignments', {}).items():
+                    if c <= 0:
+                        continue
+                    sci = sc.get(s, {})
+                    company = sci.get('company', 'inhouse')
+                    if company == 'part_time':
+                        continue
+                    start = sci.get('start', '?')
+                    end = sci.get('end', '?')
+                    all_starts.add(start)
+                    ends_per_start_company.setdefault(start, {})\
+                        .setdefault(company, set()).add(end)
+                    counts.setdefault(start, {}).setdefault(day_idx, {})\
+                        .setdefault(queue, {})
+                    counts[start][day_idx][queue][company] = \
+                        counts[start][day_idx][queue].get(company, 0) + c
+        labels = {}
+        for start in all_starts:
+            ebc = ends_per_start_company.get(start, {})
+            if ebc.get('inhouse'):
+                end_repr = sorted(ebc['inhouse'])[0]
+            elif ebc.get('outsource'):
+                end_repr = sorted(ebc['outsource'])[0]
+            else:
+                end_repr = '?'
+            labels[start] = f"{start}-{end_repr}"
+        return sorted(all_starts), labels, counts
+
+    def _collect_pt_weekend(week):
+        """PT atamaları kuyruk bazlı toplanır. Key: (queue, start, end).
+        Aynı PT shift'i farklı kuyrukta varsa ayrı satır oluşur."""
+        pt_shifts_set = set()
+        pt_counts = {}
+        for day_idx in (5, 6):
+            ds = week[day_idx]
+            r = results.get(ds)
+            if not r:
+                continue
+            for queue in queues:
+                qr = r.get(queue)
+                if not qr:
+                    continue
+                mi = qr.get('mip_info', {})
+                sc = mi.get('shift_coverage', {})
+                for s, c in mi.get('assignments', {}).items():
+                    if c <= 0:
+                        continue
+                    sci = sc.get(s, {})
+                    if sci.get('company') != 'part_time':
+                        continue
+                    start = sci.get('start', '?')
+                    end = sci.get('end', '?')
+                    key = (queue, start, end)   # queue de key'e dahil
+                    pt_shifts_set.add(key)
+                    pt_counts.setdefault(key, {})
+                    pt_counts[key][day_idx] = pt_counts[key].get(day_idx, 0) + c
+        # Önce kuyruk sonra başlangıç saatine göre sırala (gruplu görünüm)
+        return sorted(pt_shifts_set, key=lambda x: (x[0], x[1], x[2])), pt_counts
+
+    def _row_values(start_counts):
+        kitle_inh = start_counts.get('kitle', {}).get('inhouse', 0)
+        kitle_out = start_counts.get('kitle', {}).get('outsource', 0)
+        gold_v = sum(start_counts.get('gold', {}).values())
+        kurumsal_v = sum(start_counts.get('kurumsal', {}).values())
+        inh_total = kitle_inh + gold_v + kurumsal_v
+        os_total = kitle_out
+        total = inh_total + os_total
+        return [kitle_inh, kitle_out, gold_v, kurumsal_v,
+                inh_total, os_total, total]
+
+    current_row = 1
+    for week in weeks:
+        sorted_starts, labels, counts = _collect_week_data(week)
+        pt_sorted, pt_counts = _collect_pt_weekend(week)
+
+        if not sorted_starts and not pt_sorted:
+            continue
+
+        # Tarih başlığı
+        for day_idx, ds in enumerate(week):
+            col_offset = day_idx * COLS_PER_DAY
+            d = pd.to_datetime(ds)
+            date_label = f"{DAY_TR[day_idx]} {d.strftime('%d.%m.%Y')}"
+            cell = ws.cell(row=current_row, column=col_offset + 1, value=date_label)
+            cell.fill = date_fill
+            cell.font = date_font
+            cell.alignment = center
+            ws.merge_cells(start_row=current_row, start_column=col_offset + 1,
+                           end_row=current_row, end_column=col_offset + COLS_PER_DAY)
+        if pt_sorted:
+            cell = ws.cell(row=current_row, column=PT_SECTION_START,
+                           value="KISMİ ÇALIŞANLAR")
+            cell.fill = date_fill
+            cell.font = date_font
+            cell.alignment = center
+            ws.merge_cells(
+                start_row=current_row, start_column=PT_SECTION_START,
+                end_row=current_row,
+                end_column=PT_SECTION_START + PT_SECTION_COLS - 1)
+        current_row += 1
+
+        # Sub-header
+        for day_idx in range(7):
+            col_offset = day_idx * COLS_PER_DAY
+            for j, h in enumerate(SUB_HEADERS):
+                cell = ws.cell(row=current_row, column=col_offset + j + 1, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+                cell.border = border
+        if pt_sorted:
+            for j, h in enumerate(PT_HEADERS):
+                cell = ws.cell(row=current_row, column=PT_SECTION_START + j, value=h)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center
+                cell.border = border
+        current_row += 1
+
+        main_start_row = current_row
+
+        # Main shift satırları
+        for start in sorted_starts:
+            for day_idx in range(7):
+                col_offset = day_idx * COLS_PER_DAY
+                cell = ws.cell(row=current_row, column=col_offset + 1,
+                               value=labels[start])
+                cell.alignment = center
+                cell.border = border
+                day_start_counts = counts.get(start, {}).get(day_idx, {})
+                vals = _row_values(day_start_counts)
+                for j, v in enumerate(vals):
+                    cell = ws.cell(row=current_row, column=col_offset + j + 2,
+                                   value=v)
+                    cell.alignment = center
+                    cell.border = border
+            current_row += 1
+
+        # PT shift satırları — Kuyruk kolonu eklendi
+        if pt_sorted:
+            pt_row = main_start_row
+            for (q, s_start, s_end) in pt_sorted:
+                label = f"{s_start}-{s_end}"
+                # 1) SHIFT
+                cell = ws.cell(row=pt_row, column=PT_SECTION_START, value=label)
+                cell.alignment = center
+                cell.border = border
+                # 2) Kuyruk
+                cell = ws.cell(row=pt_row, column=PT_SECTION_START + 1, value=q)
+                cell.alignment = center
+                cell.border = border
+                # 3-4) Cmt, Pzr
+                cmt_v = pt_counts.get((q, s_start, s_end), {}).get(5, 0)
+                pzr_v = pt_counts.get((q, s_start, s_end), {}).get(6, 0)
+                for j, v in enumerate([cmt_v, pzr_v]):
+                    cell = ws.cell(row=pt_row, column=PT_SECTION_START + 2 + j,
+                                   value=v)
+                    cell.alignment = center
+                    cell.border = border
+                pt_row += 1
+            pt_toplam_row = pt_row
+        else:
+            pt_toplam_row = main_start_row
+
+        # Main toplam
+        main_toplam_row = current_row
+        for day_idx in range(7):
+            col_offset = day_idx * COLS_PER_DAY
+            cell = ws.cell(row=main_toplam_row, column=col_offset + 1, value='Toplam')
+            cell.fill = total_fill
+            cell.font = total_font
+            cell.alignment = center
+            cell.border = border
+            totals = [0, 0, 0, 0, 0, 0, 0]
+            for start in sorted_starts:
+                day_start_counts = counts.get(start, {}).get(day_idx, {})
+                vals = _row_values(day_start_counts)
+                for j in range(7):
+                    totals[j] += vals[j]
+            for j, v in enumerate(totals):
+                cell = ws.cell(row=main_toplam_row, column=col_offset + j + 2, value=v)
+                cell.fill = total_fill
+                cell.font = total_font
+                cell.alignment = center
+                cell.border = border
+        current_row += 1
+
+        # PT toplam — 4 kolon (SHIFT/Kuyruk/Cmt/Pzr)
+        if pt_sorted:
+            cell = ws.cell(row=pt_toplam_row, column=PT_SECTION_START,
+                           value='Toplam')
+            cell.fill = total_fill
+            cell.font = total_font
+            cell.alignment = center
+            cell.border = border
+            # Kuyruk hücresi (toplam satırında boş — tüm kuyruklar toplandı)
+            cell = ws.cell(row=pt_toplam_row, column=PT_SECTION_START + 1, value='')
+            cell.fill = total_fill
+            cell.border = border
+            cmt_total = sum(pt_counts.get(s, {}).get(5, 0) for s in pt_sorted)
+            pzr_total = sum(pt_counts.get(s, {}).get(6, 0) for s in pt_sorted)
+            for j, v in enumerate([cmt_total, pzr_total]):
+                cell = ws.cell(row=pt_toplam_row, column=PT_SECTION_START + 2 + j,
+                               value=v)
+                cell.fill = total_fill
+                cell.font = total_font
+                cell.alignment = center
+                cell.border = border
+
+        current_row = max(current_row, pt_toplam_row + 1) + 2
+
+    # Kolon genişlikleri
+    for day_idx in range(7):
+        col_offset = day_idx * COLS_PER_DAY
+        ws.column_dimensions[
+            ws.cell(row=2, column=col_offset + 1).column_letter].width = 12
+        for j in range(1, COLS_PER_DAY):
+            col_letter = ws.cell(row=2, column=col_offset + j + 1).column_letter
+            ws.column_dimensions[col_letter].width = 11
+
+    # PT section: SHIFT geniş, Kuyruk orta, Cmt/Pzr dar
+    pt_widths = [12, 10, 8, 8]   # SHIFT, Kuyruk, Cmt, Pzr
+    for j in range(PT_SECTION_COLS):
+        col_letter = ws.cell(row=2, column=PT_SECTION_START + j).column_letter
+        ws.column_dimensions[col_letter].width = pt_widths[j]
+
+    # Sheet 2: Haftasonu Bütçe
+    ws2 = wb.create_sheet('Bütçe')
+    weekend_days = [(d, pd.to_datetime(d).weekday()) for d in all_dates
+                    if pd.to_datetime(d).weekday() >= 5]
+
+    headers = ['Kuyruk']
+    for date_str, wd in weekend_days:
+        label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
+        headers.append(label)
+    headers += ['Toplam', 'Bütçe', 'Fark', 'Durum']
+    for j, h in enumerate(headers, 1):
+        cell = ws2.cell(row=1, column=j, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+
+    row_idx = 2
+    for queue, budget in weekend_budget.items():
+        ws2.cell(row=row_idx, column=1, value=queue).border = border
+        total = 0
+        for j, (date_str, _) in enumerate(weekend_days, 2):
+            r = results.get(date_str)
+            if r and queue in r and r[queue]:
+                mi = r[queue]['mip_info']
+                inhouse_ft = max(0, mi.get('total_inhouse_kisi', 0)
+                                  - mi.get('total_part_time_kisi', 0))
+            else:
+                inhouse_ft = 0
+            cell = ws2.cell(row=row_idx, column=j, value=inhouse_ft)
+            cell.alignment = center
+            cell.border = border
+            total += inhouse_ft
+        diff = total - budget
+        status = 'AŞIM' if diff > 0 else 'OK'
+        last_cols = [total, budget, diff, status]
+        start_j = 2 + len(weekend_days)
+        for k, v in enumerate(last_cols):
+            cell = ws2.cell(row=row_idx, column=start_j + k, value=v)
+            cell.alignment = center
+            cell.border = border
+            if k == 3:
+                cell.font = Font(bold=True,
+                                  color='C00000' if status == 'AŞIM' else '006100')
+        row_idx += 1
+
+    ws2.column_dimensions['A'].width = 12
+    for j in range(2, len(headers) + 1):
+        col_letter = ws2.cell(row=1, column=j).column_letter
+        ws2.column_dimensions[col_letter].width = 9
+
+    # =========================================================================
+    # Sheet 3+: Haftalık detay sheet'leri (Hafta 1, Hafta 2, ...)
+    # Her sheet: 3 kuyruk için günlük MIP1/MIP2/Surplus/Eksik + dağıtım + shortfall
+    # =========================================================================
+    n_weekly_sheets = 0
+    for week_idx, week_dates in enumerate(weeks, 1):
+        valid_dates = [d for d in week_dates if results.get(d) is not None]
+        if not valid_dates:
+            continue
+        _add_weekly_detail_sheet(
+            wb, week_idx, week_dates, results, queues,
+            header_fill, header_font, date_fill, date_font,
+            total_fill, total_font, border, center,
+        )
+        n_weekly_sheets += 1
+
+    # =========================================================================
+    # Son sheet: RR Raporu — tüm ay için tek tablo
+    # =========================================================================
+    _add_rr_report_sheet(
+        wb, results, queues, all_dates,
+        header_fill, header_font, date_fill, date_font,
+        total_fill, total_font, border, center,
+    )
+
+    wb.save(output_path)
+
+    n_rows_plan = ws.max_row
+    print(f"✓ Excel kaydedildi: {output_path}")
+    print(f"  Sheet 'Vardiya Planı': {len(weeks)} hafta, {n_rows_plan} satır")
+    print(f"  Sheet 'Bütçe': {len(weekend_budget)} kuyruk, "
+          f"{len(weekend_days)} hafta sonu günü")
+    print(f"  Haftalık detay sheet'leri: {n_weekly_sheets}")
+    print(f"  Sheet 'RR Raporu': aylık")
+    return output_path
+
+
+# =============================================================================
+# Excel yardımcıları — haftalık detay sheet + RR raporu
+# =============================================================================
+
+def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
+                              header_fill, header_font, date_fill, date_font,
+                              total_fill, total_font, border, center):
+    """Bir hafta için detay sheet'i ekle. 3 kuyruk için sırayla:
+    1) Günlük MIP1/MIP2/Surplus/Eksik özeti
+    2) Surplus dağıtımı (hangi vardiyaya kaç eklendi)
+    3) Eksik kapsama detayı (sadece Stage 4 çalıştıysa)
+    """
+    sheet_name = f"Hafta {week_idx}"
+    ws = wb.create_sheet(sheet_name)
+    DAY_TR_W = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+    # Üst başlık
+    title = f"HAFTA {week_idx}: {week_dates[0]} → {week_dates[-1]}"
+    cell = ws.cell(row=1, column=1, value=title)
+    cell.fill = date_fill
+    cell.font = Font(bold=True, size=12)
+    cell.alignment = center
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+
+    current_row = 3
+
+    for queue in queues:
+        # Kuyruk başlığı
+        cell = ws.cell(row=current_row, column=1, value=f"=== {queue.upper()} ===")
+        cell.font = Font(bold=True, size=11, color='1F4E78')
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=10)
+        current_row += 1
+
+        # ---- A) Günlük MIP1/MIP2/Surplus/Eksik tablosu ----
+        headers = ['Gün', 'Tarih', 'MIP1 (önce)', 'MIP2 (sonra)',
+                   'Surplus (+)', 'Eksik', 'Çözüm Aşaması']
+        for j, h in enumerate(headers, 1):
+            c = ws.cell(row=current_row, column=j, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = center
+            c.border = border
+        current_row += 1
+
+        t_mip1 = t_mip2 = t_surp = t_short = 0
+        any_data = False
+        for ds in week_dates:
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                # Boş satır
+                ws.cell(row=current_row, column=1, value=gun).border = border
+                ws.cell(row=current_row, column=2,
+                        value=d.strftime('%d.%m.%Y')).border = border
+                for j in range(3, 8):
+                    c = ws.cell(row=current_row, column=j, value='-')
+                    c.alignment = center
+                    c.border = border
+                current_row += 1
+                continue
+
+            any_data = True
+            mi = r[queue]['mip_info']
+            # mip_info_stage1: V9 weekday'de mip_info içinde, weekend'de yok
+            s1 = mi.get('mip_info_stage1') or r[queue].get('mip_info_stage1') or {}
+            mip2 = mi.get('total_kisi', 0)
+            # MIP1 yoksa MIP2 ile aynı (weekend: surplus yok)
+            mip1 = s1.get('total_kisi', mip2)
+            surplus = mip2 - mip1
+            shortfall = mi.get('total_shortfall', 0)
+            sol = mi.get('solution_stage')
+            stage_str = _short_stage_note(sol, shortfall) if sol else 'weekend'
+
+            vals = [gun, d.strftime('%d.%m.%Y'), mip1, mip2,
+                    f"+{surplus}" if surplus > 0 else str(surplus),
+                    shortfall if shortfall > 0 else '-',
+                    stage_str]
+            for j, v in enumerate(vals, 1):
+                c = ws.cell(row=current_row, column=j, value=v)
+                c.alignment = center
+                c.border = border
+            t_mip1 += mip1; t_mip2 += mip2; t_surp += surplus; t_short += shortfall
+            current_row += 1
+
+        if any_data:
+            # Toplam satırı
+            totals_vals = ['TOPLAM', '', t_mip1, t_mip2,
+                            f"+{t_surp}" if t_surp > 0 else str(t_surp),
+                            t_short if t_short > 0 else '-', '']
+            for j, v in enumerate(totals_vals, 1):
+                c = ws.cell(row=current_row, column=j, value=v)
+                c.fill = total_fill
+                c.font = total_font
+                c.alignment = center
+                c.border = border
+            current_row += 1
+        current_row += 1
+
+        # ---- B) Surplus dağıtımı: hangi vardiyaya kaç eklendi ----
+        surplus_rows = []
+        for ds in week_dates:
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                continue
+            mi = r[queue]['mip_info']
+            surplus_added = mi.get('surplus_added', {}) or {}
+            if not surplus_added:
+                continue
+            s1_assigns = mi.get('mip_info_stage1', {}).get('assignments', {})
+            sc = mi.get('shift_coverage', {})
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            for shift_key, added in sorted(surplus_added.items(),
+                                            key=lambda x: sc.get(x[0], {}).get('start', '99:99')):
+                if added <= 0:
+                    continue
+                info_s = sc.get(shift_key, {})
+                saat = f"{info_s.get('start', '')}-{info_s.get('end', '')}"
+                company = info_s.get('company', '')
+                mip1_v = s1_assigns.get(shift_key, 0)
+                surplus_rows.append([gun, d.strftime('%d.%m.%Y'),
+                                      shift_key, saat, company,
+                                      mip1_v, f"+{added}", mip1_v + added])
+
+        if surplus_rows:
+            cell = ws.cell(row=current_row, column=1,
+                            value=f"SURPLUS DAĞITIMI — {queue}")
+            cell.font = Font(bold=True, italic=True)
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=8)
+            current_row += 1
+            s_headers = ['Gün', 'Tarih', 'Vardiya', 'Saat', 'Şirket',
+                         'MIP1', '+Eklenen', 'MIP2']
+            for j, h in enumerate(s_headers, 1):
+                c = ws.cell(row=current_row, column=j, value=h)
+                c.fill = header_fill
+                c.font = header_font
+                c.alignment = center
+                c.border = border
+            current_row += 1
+            for row_vals in surplus_rows:
+                for j, v in enumerate(row_vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.alignment = center
+                    c.border = border
+                current_row += 1
+            current_row += 1
+
+        # ---- C) Eksik kapsama (Stage 4 çıkmışsa) ----
+        shortfall_rows = []
+        for ds in week_dates:
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                continue
+            mi = r[queue]['mip_info']
+            total_sf = mi.get('total_shortfall', 0)
+            if total_sf <= 0:
+                continue
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            sf_recs = mi.get('shortfall_recommendations', {}) or {}
+            sc = mi.get('shift_coverage', {})
+            rec_str = ', '.join(
+                f"{s}({sc.get(s, {}).get('start', '?')}-"
+                f"{sc.get(s, {}).get('end', '?')}): +{v}"
+                for s, v in sorted(sf_recs.items(),
+                                    key=lambda x: sc.get(x[0], {}).get('start', '99:99'))
+                if v > 0
+            )
+            shortfall_rows.append([gun, d.strftime('%d.%m.%Y'),
+                                    total_sf, rec_str or '(öneri yok)'])
+
+        if shortfall_rows:
+            cell = ws.cell(row=current_row, column=1,
+                            value=f"⚠ EKSİK KAPSAMA (Stage 4) — {queue}")
+            cell.font = Font(bold=True, italic=True, color='C00000')
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=8)
+            current_row += 1
+            sf_headers = ['Gün', 'Tarih', 'Toplam Eksik (kişi-slot)',
+                          'Önerilen Ek Kadro (vardiya: +N)']
+            for j, h in enumerate(sf_headers, 1):
+                c = ws.cell(row=current_row, column=j, value=h)
+                c.fill = header_fill
+                c.font = header_font
+                c.alignment = center
+                c.border = border
+            # Önerilen ek kadro kolon genişliği
+            ws.column_dimensions[
+                ws.cell(row=current_row, column=4).column_letter].width = 60
+            current_row += 1
+            for row_vals in shortfall_rows:
+                for j, v in enumerate(row_vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.alignment = (Alignment(horizontal='left', vertical='center',
+                                              wrap_text=True) if j == 4 else center)
+                    c.border = border
+                current_row += 1
+            current_row += 1
+
+        # Kuyruklar arası boşluk
+        current_row += 1
+
+    # Kolon genişlikleri
+    widths = {'A': 6, 'B': 12, 'C': 28, 'D': 14, 'E': 10,
+              'F': 10, 'G': 12, 'H': 10}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+
+def _add_rr_report_sheet(wb, results, queues, all_dates,
+                          header_fill, header_font, date_fill, date_font,
+                          total_fill, total_font, border, center):
+    """Aylık RR raporu — tek sheet, her gün için 3 kuyruk yan yana.
+
+    Her kuyruk için 5 kolon: Erlang_Pk, MIP1_Pk, MIP2_Pk, RR1%, RR2%.
+    """
+    ws = wb.create_sheet("RR Raporu")
+    DAY_TR_R = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+    # Başlık
+    cell = ws.cell(row=1, column=1, value="AYLIK RR RAPORU — Erlang ihtiyacına karşı MIP karşılama oranı")
+    cell.fill = date_fill
+    cell.font = Font(bold=True, size=12)
+    cell.alignment = center
+    total_cols = 2 + len(queues) * 5
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+
+    # Üst başlık satırı (kuyruk blokları — merged)
+    row1 = 3
+    ws.cell(row=row1, column=1, value='Tarih').fill = header_fill
+    ws.cell(row=row1, column=1).font = header_font
+    ws.cell(row=row1, column=1).alignment = center
+    ws.cell(row=row1, column=2, value='Gün').fill = header_fill
+    ws.cell(row=row1, column=2).font = header_font
+    ws.cell(row=row1, column=2).alignment = center
+    # Tarih ve Gün için 2 satıra merge
+    ws.merge_cells(start_row=row1, start_column=1, end_row=row1 + 1, end_column=1)
+    ws.merge_cells(start_row=row1, start_column=2, end_row=row1 + 1, end_column=2)
+
+    col_offset = 3
+    for queue in queues:
+        cell = ws.cell(row=row1, column=col_offset, value=queue.upper())
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        ws.merge_cells(start_row=row1, start_column=col_offset,
+                       end_row=row1, end_column=col_offset + 4)
+        col_offset += 5
+
+    # Alt başlık (metric isimleri)
+    row2 = row1 + 1
+    col_offset = 3
+    for queue in queues:
+        sub_headers = ['Erlang_Pk', 'MIP1_Pk', 'MIP2_Pk', 'RR1 %', 'RR2 %']
+        for k, h in enumerate(sub_headers):
+            c = ws.cell(row=row2, column=col_offset + k, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = center
+            c.border = border
+        col_offset += 5
+
+    # Veri satırları
+    current_row = row2 + 1
+    totals = {q: {'erl': 0, 'mip1': 0, 'mip2': 0} for q in queues}
+    for ds in sorted(all_dates):
+        d = pd.to_datetime(ds)
+        gun = DAY_TR_R[d.weekday()]
+        r = results.get(ds)
+
+        ws.cell(row=current_row, column=1, value=d.strftime('%d.%m.%Y')).border = border
+        ws.cell(row=current_row, column=1).alignment = center
+        ws.cell(row=current_row, column=2, value=gun).border = border
+        ws.cell(row=current_row, column=2).alignment = center
+
+        col_offset = 3
         for queue in queues:
-            label = config['queues'][queue]['label']
-            result = run_queue_pipeline_forecast(df_forecast, df_shifts, date, queue, config=config, verbose=False)
-            if result is None: print(f"   ⚠ {label}: Çözüm bulunamadı"); continue
+            if r is None or queue not in r or r[queue] is None:
+                for k in range(5):
+                    c = ws.cell(row=current_row, column=col_offset + k, value='-')
+                    c.alignment = center
+                    c.border = border
+            else:
+                mi = r[queue]['mip_info']
+                # erlang_by_slot lookup: V9 weekday → mip_info içinde,
+                # weekend forecast → top-level r[queue]'de
+                erl_by_slot = (mi.get('erlang_by_slot') or
+                                r[queue].get('erlang_by_slot') or {})
+                # mip_info_stage1 lookup: V9 weekday → mip_info içinde,
+                # weekend → yok (surplus dağıtılmadı, MIP1=MIP2 say)
+                s1 = mi.get('mip_info_stage1') or r[queue].get('mip_info_stage1') or {}
+                mip2_by_slot = mi.get('mip_by_slot', {}) or {}
+                # MIP1 yoksa MIP2 ile aynı (surplus uygulanmadı)
+                mip1_by_slot = s1.get('mip_by_slot', mip2_by_slot) or mip2_by_slot
 
-            mi = result['mip_info']; sc = mi['shift_coverage']
-            w_aht = result.get('weighted_aht_by_slot', {}); tc = result.get('total_calls_day', 0)
-            calls_by_slot = result.get('calls_by_slot', {})
-            ebs = result['erlang_by_slot']
-            q_config = result.get('_config', config)
-            hr_cfg = q_config.get('hourly_report', {})
-            re_cfg = hr_cfg.get('rapor_etkisi', {}); kk_cfg = hr_cfg.get('kapasite_kaybi', {}); ca_cfg = hr_cfg.get('cagri_adedi', {})
+                erl_pk = max(erl_by_slot.values()) if erl_by_slot else 0
+                mip1_pk = max(mip1_by_slot.values()) if mip1_by_slot else 0
+                mip2_pk = max(mip2_by_slot.values()) if mip2_by_slot else 0
+                rr1 = (mip1_pk / erl_pk) if erl_pk > 0 else 0
+                rr2 = (mip2_pk / erl_pk) if erl_pk > 0 else 0
 
-            # Vardiya atamaları
-            for shift, count in mi['assignments'].items():
-                info = sc[shift]
-                all_assignments.append({'Tarih': date_str, 'Gün': dn, 'Tip': dtl, 'Kuyruk': label,
-                    'Shift': shift, 'Başlangıç': info['start'], 'Bitiş': info['end'],
-                    'Company': info['company'], 'Kişi_Sayısı': count})
+                vals = [erl_pk, mip1_pk, mip2_pk,
+                        f"{rr1:.0%}", f"{rr2:.0%}"]
+                for k, v in enumerate(vals):
+                    c = ws.cell(row=current_row, column=col_offset + k, value=v)
+                    c.alignment = center
+                    c.border = border
+                    # RR < 100% → kırmızı, == 100% → yeşil, > 100% → mavi
+                    if k == 4:   # RR2
+                        if rr2 < 1.0:
+                            c.font = Font(bold=True, color='C00000')
+                        elif rr2 > 1.05:
+                            c.font = Font(color='0070C0')
+                        else:
+                            c.font = Font(color='006100')
 
-            # Slot detay + kapasite raporu
-            ino = mi.get('inhouse_min_by_slot', {}); ouo = mi.get('outsource_min_by_slot', {})
-            for slot in SLOTS_30:
-                e = ebs.get(slot, 0); m = mi['mip_by_slot'].get(slot, 0)
-                m_in = mi['mip_in_by_slot'].get(slot, 0); m_out = mi['mip_out_by_slot'].get(slot, 0)
-                m_pt = mi.get('mip_pt_by_slot', {}).get(slot, 0)
-                w = w_aht.get(slot, 0); rr_slot = round(m / e, 3) if e > 0 else None
-                h = int(slot[:2]); cagri = int(calls_by_slot.get(slot, 0))
-                re = round(m * re_cfg.get(h, re_cfg.get('default', 0)))
-                kk = round(m * kk_cfg.get(h, kk_cfg.get('default', 0)))
-                net_mt = m - re - kk; ca = ca_cfg.get(h, ca_cfg.get('default', 15))
-                cagri_kap = net_mt * (ca / 2); kap_rr = round(cagri_kap / cagri, 3) if cagri > 0 else None
+                totals[queue]['erl'] += erl_pk
+                totals[queue]['mip1'] += mip1_pk
+                totals[queue]['mip2'] += mip2_pk
+            col_offset += 5
+        current_row += 1
 
-                if e > 0 or m > 0:
-                    all_slots.append({'Tarih': date_str, 'Gün': dn, 'Tip': dtl, 'Kuyruk': label,
-                        'Slot': slot, 'Weighted_AHT': w, 'Erlang': e,
-                        'Inhouse_Min': ino.get(slot, 0), 'Outsource_Min': ouo.get(slot, 0),
-                        'MIP_Toplam': m, 'MIP_Inhouse': m_in, 'MIP_Outsource': m_out, 'MIP_PartTime': m_pt,
-                        'Response_Rate_Slot': rr_slot,
-                        'Çağrı': cagri, 'Rapor_Etkisi': re, 'Kapasite_Kaybı': kk,
-                        'Net_MT': net_mt, 'Çağrı_Kapasitesi': round(cagri_kap), 'Kapasite_RR': kap_rr})
+    # Aylık toplam satırı
+    ws.cell(row=current_row, column=1, value='AYLIK').fill = total_fill
+    ws.cell(row=current_row, column=1).font = total_font
+    ws.cell(row=current_row, column=1).alignment = center
+    ws.cell(row=current_row, column=2, value='—').fill = total_fill
+    ws.cell(row=current_row, column=2).font = total_font
+    ws.cell(row=current_row, column=2).alignment = center
+    col_offset = 3
+    for queue in queues:
+        t = totals[queue]
+        # Peak toplamı bilgilendirici değil ama yine de göster (toplam değil avg)
+        avg_rr2 = (t['mip2'] / t['erl']) if t['erl'] > 0 else 0
+        vals = [t['erl'], t['mip1'], t['mip2'], '—', f"{avg_rr2:.0%}"]
+        for k, v in enumerate(vals):
+            c = ws.cell(row=current_row, column=col_offset + k, value=v)
+            c.fill = total_fill
+            c.font = total_font
+            c.alignment = center
+            c.border = border
+        col_offset += 5
 
-            # Özet
-            avg_aht = sum(w_aht.values())/len(w_aht) if w_aht else 0
-            cap = calculate_daily_capacity(mi, w_aht, config) if w_aht else {}
-            total_cap = cap.get('total_capacity', 0)
+    # Açıklama
+    current_row += 2
+    ws.cell(row=current_row, column=1,
+            value="RR = MIP_peak / Erlang_peak | "
+                  "MIP1 = surplus öncesi | MIP2 = surplus sonrası | "
+                  "RR2 < 100% kırmızı (eksik) | RR2 > 105% mavi (fazla)")
+    ws.merge_cells(start_row=current_row, start_column=1,
+                   end_row=current_row, end_column=total_cols)
 
-            toplam_ckap = sum(s.get('Çağrı_Kapasitesi', 0) or 0 for s in all_slots if s['Tarih'] == date_str and s['Kuyruk'] == label)
-            toplam_cgelen = sum(s.get('Çağrı', 0) or 0 for s in all_slots if s['Tarih'] == date_str and s['Kuyruk'] == label)
-            kap_rr_gunluk = round(toplam_ckap / toplam_cgelen, 3) if toplam_cgelen > 0 else None
+    # Kolon genişlikleri
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 5
+    col_letter_offset = 3
+    for queue in queues:
+        for k in range(5):
+            col_letter = ws.cell(row=row2, column=col_letter_offset + k).column_letter
+            ws.column_dimensions[col_letter].width = 10
+        col_letter_offset += 5
 
-            all_summary.append({'Tarih': date_str, 'Gün': dn, 'Tip': dtl, 'Kuyruk': label,
-                'MIP_Toplam': mi['total_kisi'], 'MIP_Inhouse': mi['total_inhouse_kisi'],
-                'MIP_Outsource': mi['total_outsource_kisi'], 'MIP_PartTime': mi.get('total_part_time_kisi', 0),
-                'MIP_Out%': round(mi['outsource_ratio']*100, 1), 'Aktif_Shift': len(mi['assignments']),
-                'Avg_Weighted_AHT': round(avg_aht, 1), 'Toplam_Cagri': tc,
-                'Gunluk_Kapasite': total_cap,
-                'Response_Rate_Gunluk': round(total_cap/tc, 3) if tc > 0 else None,
-                'Kapasite_RR_Gunluk': kap_rr_gunluk})
 
-            krr = f"{kap_rr_gunluk:.1%}" if kap_rr_gunluk else "-"
-            print(f"   ✓ {label}: {mi['total_kisi']} kişi | Kap.RR: {krr}")
-
-        # TOPLAM satırları — Özet
-        date_summaries = [s for s in all_summary if s['Tarih'] == date_str and s['Kuyruk'] != 'TOPLAM']
-        if date_summaries:
-            t_mip = sum(s['MIP_Toplam'] for s in date_summaries)
-            t_in = sum(s['MIP_Inhouse'] for s in date_summaries)
-            t_out = sum(s['MIP_Outsource'] for s in date_summaries)
-            t_pt = sum(s['MIP_PartTime'] for s in date_summaries)
-            t_calls = sum(s['Toplam_Cagri'] for s in date_summaries)
-            t_cap = sum(s['Gunluk_Kapasite'] for s in date_summaries)
-            date_sl = [s for s in all_slots if s['Tarih'] == date_str and s['Kuyruk'] != 'TOPLAM']
-            t_ckap = sum(s.get('Çağrı_Kapasitesi', 0) or 0 for s in date_sl)
-            t_cgelen = sum(s.get('Çağrı', 0) or 0 for s in date_sl)
-            t_kap_rr = round(t_ckap / t_cgelen, 3) if t_cgelen > 0 else None
-
-            all_summary.append({'Tarih': date_str, 'Gün': dn, 'Tip': dtl, 'Kuyruk': 'TOPLAM',
-                'MIP_Toplam': t_mip, 'MIP_Inhouse': t_in, 'MIP_Outsource': t_out, 'MIP_PartTime': t_pt,
-                'MIP_Out%': round(t_out/t_mip*100, 1) if t_mip > 0 else 0,
-                'Aktif_Shift': None, 'Avg_Weighted_AHT': None, 'Toplam_Cagri': t_calls,
-                'Gunluk_Kapasite': t_cap,
-                'Response_Rate_Gunluk': round(t_cap/t_calls, 3) if t_calls > 0 else None,
-                'Kapasite_RR_Gunluk': t_kap_rr})
-
-        # TOPLAM satırları — Slot
-        date_slots = [s for s in all_slots if s['Tarih'] == date_str and s['Kuyruk'] != 'TOPLAM']
-        if date_slots:
-            slot_agg = {}
-            for s in date_slots:
-                slot = s['Slot']
-                if slot not in slot_agg:
-                    slot_agg[slot] = {k: 0 for k in ['MIP_Toplam','MIP_Inhouse','MIP_Outsource','MIP_PartTime',
-                        'Erlang','Çağrı','Rapor_Etkisi','Kapasite_Kaybı','Net_MT','Çağrı_Kapasitesi']}
-                for k in slot_agg[slot]:
-                    slot_agg[slot][k] += s.get(k, 0) or 0
-            for slot in SLOTS_30:
-                if slot not in slot_agg: continue
-                sa = slot_agg[slot]
-                rr_slot = round(sa['MIP_Toplam']/sa['Erlang'], 3) if sa['Erlang'] > 0 else None
-                kap_rr = round(sa['Çağrı_Kapasitesi']/sa['Çağrı'], 3) if sa['Çağrı'] > 0 else None
-                all_slots.append({'Tarih': date_str, 'Gün': dn, 'Tip': dtl, 'Kuyruk': 'TOPLAM', 'Slot': slot,
-                    'Weighted_AHT': None, 'Erlang': sa['Erlang'], 'Inhouse_Min': None, 'Outsource_Min': None,
-                    'MIP_Toplam': sa['MIP_Toplam'], 'MIP_Inhouse': sa['MIP_Inhouse'],
-                    'MIP_Outsource': sa['MIP_Outsource'], 'MIP_PartTime': sa['MIP_PartTime'],
-                    'Response_Rate_Slot': rr_slot,
-                    'Çağrı': sa['Çağrı'], 'Rapor_Etkisi': sa['Rapor_Etkisi'],
-                    'Kapasite_Kaybı': sa['Kapasite_Kaybı'], 'Net_MT': sa['Net_MT'],
-                    'Çağrı_Kapasitesi': sa['Çağrı_Kapasitesi'], 'Kapasite_RR': kap_rr})
-
-    dfa = pd.DataFrame(all_assignments); dfs = pd.DataFrame(all_slots); dfsu = pd.DataFrame(all_summary)
-    with pd.ExcelWriter(output_file, engine='openpyxl') as w:
-        dfa.to_excel(w, sheet_name='Vardiya_Atamaları', index=False)
-        dfs.to_excel(w, sheet_name='Slot_Karşılaştırma', index=False)
-        dfsu.to_excel(w, sheet_name='Özet', index=False)
-    print(f"\n✅ Excel: {output_file} | Vardiya:{len(dfa)} Slot:{len(dfs)} Özet:{len(dfsu)}")
-    return {'assignments': dfa, 'slots': dfs, 'summary': dfsu}
+export_monthly_plan_to_excel(
+    results=results,
+    year=YEAR,
+    month=MONTH,
+    weekend_budget=WEEKEND_BUDGET,
+    queues=('kitle', 'gold', 'kurumsal'),
+)
