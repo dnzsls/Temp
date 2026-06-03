@@ -849,6 +849,31 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
         col_letter = ws2.cell(row=1, column=j).column_letter
         ws2.column_dimensions[col_letter].width = 9
 
+    # =========================================================================
+    # Sheet 3+: Haftalık detay sheet'leri (Hafta 1, Hafta 2, ...)
+    # Her sheet: 3 kuyruk için günlük MIP1/MIP2/Surplus/Eksik + dağıtım + shortfall
+    # =========================================================================
+    n_weekly_sheets = 0
+    for week_idx, week_dates in enumerate(weeks, 1):
+        valid_dates = [d for d in week_dates if results.get(d) is not None]
+        if not valid_dates:
+            continue
+        _add_weekly_detail_sheet(
+            wb, week_idx, week_dates, results, queues,
+            header_fill, header_font, date_fill, date_font,
+            total_fill, total_font, border, center,
+        )
+        n_weekly_sheets += 1
+
+    # =========================================================================
+    # Son sheet: RR Raporu — tüm ay için tek tablo
+    # =========================================================================
+    _add_rr_report_sheet(
+        wb, results, queues, all_dates,
+        header_fill, header_font, date_fill, date_font,
+        total_fill, total_font, border, center,
+    )
+
     wb.save(output_path)
 
     n_rows_plan = ws.max_row
@@ -856,7 +881,367 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
     print(f"  Sheet 'Vardiya Planı': {len(weeks)} hafta, {n_rows_plan} satır")
     print(f"  Sheet 'Bütçe': {len(weekend_budget)} kuyruk, "
           f"{len(weekend_days)} hafta sonu günü")
+    print(f"  Haftalık detay sheet'leri: {n_weekly_sheets}")
+    print(f"  Sheet 'RR Raporu': aylık")
     return output_path
+
+
+# =============================================================================
+# Excel yardımcıları — haftalık detay sheet + RR raporu
+# =============================================================================
+
+def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
+                              header_fill, header_font, date_fill, date_font,
+                              total_fill, total_font, border, center):
+    """Bir hafta için detay sheet'i ekle. 3 kuyruk için sırayla:
+    1) Günlük MIP1/MIP2/Surplus/Eksik özeti
+    2) Surplus dağıtımı (hangi vardiyaya kaç eklendi)
+    3) Eksik kapsama detayı (sadece Stage 4 çalıştıysa)
+    """
+    sheet_name = f"Hafta {week_idx}"
+    ws = wb.create_sheet(sheet_name)
+    DAY_TR_W = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+    # Üst başlık
+    title = f"HAFTA {week_idx}: {week_dates[0]} → {week_dates[-1]}"
+    cell = ws.cell(row=1, column=1, value=title)
+    cell.fill = date_fill
+    cell.font = Font(bold=True, size=12)
+    cell.alignment = center
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+
+    current_row = 3
+
+    for queue in queues:
+        # Kuyruk başlığı
+        cell = ws.cell(row=current_row, column=1, value=f"=== {queue.upper()} ===")
+        cell.font = Font(bold=True, size=11, color='1F4E78')
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=10)
+        current_row += 1
+
+        # ---- A) Günlük MIP1/MIP2/Surplus/Eksik tablosu ----
+        headers = ['Gün', 'Tarih', 'MIP1 (önce)', 'MIP2 (sonra)',
+                   'Surplus (+)', 'Eksik', 'Çözüm Aşaması']
+        for j, h in enumerate(headers, 1):
+            c = ws.cell(row=current_row, column=j, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = center
+            c.border = border
+        current_row += 1
+
+        t_mip1 = t_mip2 = t_surp = t_short = 0
+        any_data = False
+        for ds in week_dates:
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                # Boş satır
+                ws.cell(row=current_row, column=1, value=gun).border = border
+                ws.cell(row=current_row, column=2,
+                        value=d.strftime('%d.%m.%Y')).border = border
+                for j in range(3, 8):
+                    c = ws.cell(row=current_row, column=j, value='-')
+                    c.alignment = center
+                    c.border = border
+                current_row += 1
+                continue
+
+            any_data = True
+            mi = r[queue]['mip_info']
+            s1 = mi.get('mip_info_stage1', {})
+            mip1 = s1.get('total_kisi', mi.get('total_kisi', 0))
+            mip2 = mi.get('total_kisi', 0)
+            surplus = mip2 - mip1
+            shortfall = mi.get('total_shortfall', 0)
+            sol = mi.get('solution_stage')
+            stage_str = _short_stage_note(sol, shortfall) if sol else 'weekend'
+
+            vals = [gun, d.strftime('%d.%m.%Y'), mip1, mip2,
+                    f"+{surplus}" if surplus > 0 else str(surplus),
+                    shortfall if shortfall > 0 else '-',
+                    stage_str]
+            for j, v in enumerate(vals, 1):
+                c = ws.cell(row=current_row, column=j, value=v)
+                c.alignment = center
+                c.border = border
+            t_mip1 += mip1; t_mip2 += mip2; t_surp += surplus; t_short += shortfall
+            current_row += 1
+
+        if any_data:
+            # Toplam satırı
+            totals_vals = ['TOPLAM', '', t_mip1, t_mip2,
+                            f"+{t_surp}" if t_surp > 0 else str(t_surp),
+                            t_short if t_short > 0 else '-', '']
+            for j, v in enumerate(totals_vals, 1):
+                c = ws.cell(row=current_row, column=j, value=v)
+                c.fill = total_fill
+                c.font = total_font
+                c.alignment = center
+                c.border = border
+            current_row += 1
+        current_row += 1
+
+        # ---- B) Surplus dağıtımı: hangi vardiyaya kaç eklendi ----
+        surplus_rows = []
+        for ds in week_dates:
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                continue
+            mi = r[queue]['mip_info']
+            surplus_added = mi.get('surplus_added', {}) or {}
+            if not surplus_added:
+                continue
+            s1_assigns = mi.get('mip_info_stage1', {}).get('assignments', {})
+            sc = mi.get('shift_coverage', {})
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            for shift_key, added in sorted(surplus_added.items(),
+                                            key=lambda x: sc.get(x[0], {}).get('start', '99:99')):
+                if added <= 0:
+                    continue
+                info_s = sc.get(shift_key, {})
+                saat = f"{info_s.get('start', '')}-{info_s.get('end', '')}"
+                company = info_s.get('company', '')
+                mip1_v = s1_assigns.get(shift_key, 0)
+                surplus_rows.append([gun, d.strftime('%d.%m.%Y'),
+                                      shift_key, saat, company,
+                                      mip1_v, f"+{added}", mip1_v + added])
+
+        if surplus_rows:
+            cell = ws.cell(row=current_row, column=1,
+                            value=f"SURPLUS DAĞITIMI — {queue}")
+            cell.font = Font(bold=True, italic=True)
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=8)
+            current_row += 1
+            s_headers = ['Gün', 'Tarih', 'Vardiya', 'Saat', 'Şirket',
+                         'MIP1', '+Eklenen', 'MIP2']
+            for j, h in enumerate(s_headers, 1):
+                c = ws.cell(row=current_row, column=j, value=h)
+                c.fill = header_fill
+                c.font = header_font
+                c.alignment = center
+                c.border = border
+            current_row += 1
+            for row_vals in surplus_rows:
+                for j, v in enumerate(row_vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.alignment = center
+                    c.border = border
+                current_row += 1
+            current_row += 1
+
+        # ---- C) Eksik kapsama (Stage 4 çıkmışsa) ----
+        shortfall_rows = []
+        for ds in week_dates:
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                continue
+            mi = r[queue]['mip_info']
+            total_sf = mi.get('total_shortfall', 0)
+            if total_sf <= 0:
+                continue
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            sf_recs = mi.get('shortfall_recommendations', {}) or {}
+            sc = mi.get('shift_coverage', {})
+            rec_str = ', '.join(
+                f"{s}({sc.get(s, {}).get('start', '?')}-"
+                f"{sc.get(s, {}).get('end', '?')}): +{v}"
+                for s, v in sorted(sf_recs.items(),
+                                    key=lambda x: sc.get(x[0], {}).get('start', '99:99'))
+                if v > 0
+            )
+            shortfall_rows.append([gun, d.strftime('%d.%m.%Y'),
+                                    total_sf, rec_str or '(öneri yok)'])
+
+        if shortfall_rows:
+            cell = ws.cell(row=current_row, column=1,
+                            value=f"⚠ EKSİK KAPSAMA (Stage 4) — {queue}")
+            cell.font = Font(bold=True, italic=True, color='C00000')
+            ws.merge_cells(start_row=current_row, start_column=1,
+                           end_row=current_row, end_column=8)
+            current_row += 1
+            sf_headers = ['Gün', 'Tarih', 'Toplam Eksik (kişi-slot)',
+                          'Önerilen Ek Kadro (vardiya: +N)']
+            for j, h in enumerate(sf_headers, 1):
+                c = ws.cell(row=current_row, column=j, value=h)
+                c.fill = header_fill
+                c.font = header_font
+                c.alignment = center
+                c.border = border
+            # Önerilen ek kadro kolon genişliği
+            ws.column_dimensions[
+                ws.cell(row=current_row, column=4).column_letter].width = 60
+            current_row += 1
+            for row_vals in shortfall_rows:
+                for j, v in enumerate(row_vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.alignment = (Alignment(horizontal='left', vertical='center',
+                                              wrap_text=True) if j == 4 else center)
+                    c.border = border
+                current_row += 1
+            current_row += 1
+
+        # Kuyruklar arası boşluk
+        current_row += 1
+
+    # Kolon genişlikleri
+    widths = {'A': 6, 'B': 12, 'C': 28, 'D': 14, 'E': 10,
+              'F': 10, 'G': 12, 'H': 10}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+
+def _add_rr_report_sheet(wb, results, queues, all_dates,
+                          header_fill, header_font, date_fill, date_font,
+                          total_fill, total_font, border, center):
+    """Aylık RR raporu — tek sheet, her gün için 3 kuyruk yan yana.
+
+    Her kuyruk için 5 kolon: Erlang_Pk, MIP1_Pk, MIP2_Pk, RR1%, RR2%.
+    """
+    ws = wb.create_sheet("RR Raporu")
+    DAY_TR_R = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+    # Başlık
+    cell = ws.cell(row=1, column=1, value="AYLIK RR RAPORU — Erlang ihtiyacına karşı MIP karşılama oranı")
+    cell.fill = date_fill
+    cell.font = Font(bold=True, size=12)
+    cell.alignment = center
+    total_cols = 2 + len(queues) * 5
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+
+    # Üst başlık satırı (kuyruk blokları — merged)
+    row1 = 3
+    ws.cell(row=row1, column=1, value='Tarih').fill = header_fill
+    ws.cell(row=row1, column=1).font = header_font
+    ws.cell(row=row1, column=1).alignment = center
+    ws.cell(row=row1, column=2, value='Gün').fill = header_fill
+    ws.cell(row=row1, column=2).font = header_font
+    ws.cell(row=row1, column=2).alignment = center
+    # Tarih ve Gün için 2 satıra merge
+    ws.merge_cells(start_row=row1, start_column=1, end_row=row1 + 1, end_column=1)
+    ws.merge_cells(start_row=row1, start_column=2, end_row=row1 + 1, end_column=2)
+
+    col_offset = 3
+    for queue in queues:
+        cell = ws.cell(row=row1, column=col_offset, value=queue.upper())
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        ws.merge_cells(start_row=row1, start_column=col_offset,
+                       end_row=row1, end_column=col_offset + 4)
+        col_offset += 5
+
+    # Alt başlık (metric isimleri)
+    row2 = row1 + 1
+    col_offset = 3
+    for queue in queues:
+        sub_headers = ['Erlang_Pk', 'MIP1_Pk', 'MIP2_Pk', 'RR1 %', 'RR2 %']
+        for k, h in enumerate(sub_headers):
+            c = ws.cell(row=row2, column=col_offset + k, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = center
+            c.border = border
+        col_offset += 5
+
+    # Veri satırları
+    current_row = row2 + 1
+    totals = {q: {'erl': 0, 'mip1': 0, 'mip2': 0} for q in queues}
+    for ds in sorted(all_dates):
+        d = pd.to_datetime(ds)
+        gun = DAY_TR_R[d.weekday()]
+        r = results.get(ds)
+
+        ws.cell(row=current_row, column=1, value=d.strftime('%d.%m.%Y')).border = border
+        ws.cell(row=current_row, column=1).alignment = center
+        ws.cell(row=current_row, column=2, value=gun).border = border
+        ws.cell(row=current_row, column=2).alignment = center
+
+        col_offset = 3
+        for queue in queues:
+            if r is None or queue not in r or r[queue] is None:
+                for k in range(5):
+                    c = ws.cell(row=current_row, column=col_offset + k, value='-')
+                    c.alignment = center
+                    c.border = border
+            else:
+                mi = r[queue]['mip_info']
+                s1 = mi.get('mip_info_stage1', {})
+                erl_by_slot = mi.get('erlang_by_slot', {}) or {}
+                mip1_by_slot = s1.get('mip_by_slot', {}) or {}
+                mip2_by_slot = mi.get('mip_by_slot', {}) or {}
+
+                erl_pk = max(erl_by_slot.values()) if erl_by_slot else 0
+                mip1_pk = max(mip1_by_slot.values()) if mip1_by_slot else 0
+                mip2_pk = max(mip2_by_slot.values()) if mip2_by_slot else 0
+                rr1 = (mip1_pk / erl_pk) if erl_pk > 0 else 0
+                rr2 = (mip2_pk / erl_pk) if erl_pk > 0 else 0
+
+                vals = [erl_pk, mip1_pk, mip2_pk,
+                        f"{rr1:.0%}", f"{rr2:.0%}"]
+                for k, v in enumerate(vals):
+                    c = ws.cell(row=current_row, column=col_offset + k, value=v)
+                    c.alignment = center
+                    c.border = border
+                    # RR < 100% → kırmızı, == 100% → yeşil, > 100% → mavi
+                    if k == 4:   # RR2
+                        if rr2 < 1.0:
+                            c.font = Font(bold=True, color='C00000')
+                        elif rr2 > 1.05:
+                            c.font = Font(color='0070C0')
+                        else:
+                            c.font = Font(color='006100')
+
+                totals[queue]['erl'] += erl_pk
+                totals[queue]['mip1'] += mip1_pk
+                totals[queue]['mip2'] += mip2_pk
+            col_offset += 5
+        current_row += 1
+
+    # Aylık toplam satırı
+    ws.cell(row=current_row, column=1, value='AYLIK').fill = total_fill
+    ws.cell(row=current_row, column=1).font = total_font
+    ws.cell(row=current_row, column=1).alignment = center
+    ws.cell(row=current_row, column=2, value='—').fill = total_fill
+    ws.cell(row=current_row, column=2).font = total_font
+    ws.cell(row=current_row, column=2).alignment = center
+    col_offset = 3
+    for queue in queues:
+        t = totals[queue]
+        # Peak toplamı bilgilendirici değil ama yine de göster (toplam değil avg)
+        avg_rr2 = (t['mip2'] / t['erl']) if t['erl'] > 0 else 0
+        vals = [t['erl'], t['mip1'], t['mip2'], '—', f"{avg_rr2:.0%}"]
+        for k, v in enumerate(vals):
+            c = ws.cell(row=current_row, column=col_offset + k, value=v)
+            c.fill = total_fill
+            c.font = total_font
+            c.alignment = center
+            c.border = border
+        col_offset += 5
+
+    # Açıklama
+    current_row += 2
+    ws.cell(row=current_row, column=1,
+            value="RR = MIP_peak / Erlang_peak | "
+                  "MIP1 = surplus öncesi | MIP2 = surplus sonrası | "
+                  "RR2 < 100% kırmızı (eksik) | RR2 > 105% mavi (fazla)")
+    ws.merge_cells(start_row=current_row, start_column=1,
+                   end_row=current_row, end_column=total_cols)
+
+    # Kolon genişlikleri
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 5
+    col_letter_offset = 3
+    for queue in queues:
+        for k in range(5):
+            col_letter = ws.cell(row=row2, column=col_letter_offset + k).column_letter
+            ws.column_dimensions[col_letter].width = 10
+        col_letter_offset += 5
 
 
 export_monthly_plan_to_excel(
