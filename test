@@ -1,49 +1,6 @@
-# Her iki notebook'ta koştur, çıktıları karşılaştır
+# İki notebook'tan da gold shift'lerini bas — yan yana koy
 
-print("=== GOLD DIAGNOSTİK ===\n")
-
-# 1) Gold için AHT yüklü mü? Hangi sub-queue'lar var?
-gold_sq = CONFIG_WEEKEND.get('sub_queues', {}).get('gold', {})
-print(f"1) gold sub_queues: {gold_sq.get('queues', [])}")
-print(f"   AHT entry sayısı: {len(gold_sq.get('aht', {}))}")
-# İlk sub_queue için örnek
-if gold_sq.get('queues'):
-    first_sq = gold_sq['queues'][0]
-    sample = gold_sq.get('aht', {}).get(first_sq, {})
-    print(f"   {first_sq} AHT örnek (ilk 3 saat): "
-          f"{ {k: sample.get(k) for k in list(sample.keys())[:3]} }")
-
-# 2) Gold için df_shifts kontrol
-gold_shifts = df_shifts_dict.get('gold')
-print(f"\n2) df_shifts['gold']:")
-if gold_shifts is None:
-    print("   ⚠ YOK")
-else:
-    print(f"   shape: {gold_shifts.shape}")
-    print(f"   company dağılımı: {gold_shifts['company'].value_counts().to_dict()}")
-    if 'available_days' in gold_shifts.columns:
-        n_special = gold_shifts['available_days'].notna().sum()
-        print(f"   available_days dolu satır: {n_special}")
-
-# 3) Gold queue_config
-gold_qc = CONFIG_WEEKEND.get('queue_configs', {}).get('gold', {})
-print(f"\n3) gold queue_config keys: {list(gold_qc.keys())}")
-print(f"   companies: {CONFIG_WEEKEND.get('queues', {}).get('gold', {}).get('companies')}")
-
-# 4) Gold kadro
-gold_kadro = CONFIG_WEEKEND.get('surplus_distribution', {}).get('total_kadro', {}).get('gold', {})
-print(f"\n4) gold total_kadro: {gold_kadro}")
-
-# 5) Gold cumartesi override
-sat_ov = CONFIG_WEEKEND.get('queue_overrides', {}).get('gold', {}).get('cumartesi', {})
-print(f"\n5) gold cumartesi override keys: {list(sat_ov.keys())}")
-if 'erlang' in sat_ov:
-    print(f"   override erlang keys: {list(sat_ov['erlang'].keys())}")
-if 'mip' in sat_ov:
-    print(f"   override mip keys: {list(sat_ov['mip'].keys())}")
-
-# 6) Gold orijinal shrinkage (sample)
-shr = gold_qc.get('erlang', {}).get('shrinkage', {})
-if isinstance(shr, dict):
-    sample = {k: shr[k] for k in list(shr.keys())[:5]}
-    print(f"\n6) gold orijinal shrinkage örnek: {sample}")
+gold = df_shifts_dict['gold']
+print(f"Shape: {gold.shape}")
+print(f"\nTüm shift'ler:")
+print(gold[['shift', 'start', 'end', 'company']].to_string())
