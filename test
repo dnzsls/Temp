@@ -522,9 +522,14 @@ from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 
 
 def export_monthly_plan_to_excel(results, year, month, weekend_budget,
+                                  cfg_weekday=None, cfg_weekend=None,
                                   queues=('kitle', 'gold', 'kurumsal'),
                                   output_path=None):
-    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar (forecast)."""
+    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar (forecast).
+
+    cfg_weekday / cfg_weekend: RR hesabı için hourly_report config'i gerekli
+    (rapor_etkisi, kapasite_kaybi, cagri_adedi). Verilmezse Kap_RR çalışmaz.
+    """
     if output_path is None:
         ay_isimleri = ['Ocak', 'Subat', 'Mart', 'Nisan', 'Mayis', 'Haziran',
                        'Temmuz', 'Agustos', 'Eylul', 'Ekim', 'Kasim', 'Aralik']
@@ -866,7 +871,8 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
 
     # =========================================================================
     # Sheet 3+: Haftalık detay sheet'leri (Hafta 1, Hafta 2, ...)
-    # Her sheet: 3 kuyruk için günlük MIP1/MIP2/Surplus/Eksik + dağıtım + shortfall
+    # Her sheet: 3 kuyruk için günlük MIP1/MIP2/Surplus/Eksik + dağıtım +
+    # shortfall + SLOT BAZLI RR
     # =========================================================================
     n_weekly_sheets = 0
     for week_idx, week_dates in enumerate(weeks, 1):
@@ -877,6 +883,7 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
             wb, week_idx, week_dates, results, queues,
             header_fill, header_font, date_fill, date_font,
             total_fill, total_font, border, center,
+            cfg_weekday=cfg_weekday, cfg_weekend=cfg_weekend,
         )
         n_weekly_sheets += 1
 
@@ -887,6 +894,7 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
         wb, results, queues, all_dates,
         header_fill, header_font, date_fill, date_font,
         total_fill, total_font, border, center,
+        cfg_weekday=cfg_weekday, cfg_weekend=cfg_weekend,
     )
 
     wb.save(output_path)
@@ -905,9 +913,111 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
 # Excel yardımcıları — haftalık detay sheet + RR raporu
 # =============================================================================
 
+def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=None,
+                                  is_weekend=False):
+    """Bir günün bir kuyruğu için slot-bazlı RR metrikleri.
+
+    Returns:
+        (slot_rows, day_summary)
+        - slot_rows: liste [{slot, calls, erlang, mip1, mip2, rr1, rr2,
+                              nmt, ck, kap_rr}, ...]  — sadece Erlang>0 olan slotlar
+        - day_summary: dict {erl_pk, mip2_pk, rr2_at_peak, rr2_min, rr2_max,
+                              rr2_avg (Erlang-weighted), kap_rr_day, total_calls,
+                              total_ck}  — slot yoksa None
+    """
+    if r_queue is None:
+        return [], None
+    mi = r_queue.get('mip_info', {})
+    s1 = mi.get('mip_info_stage1') or r_queue.get('mip_info_stage1') or {}
+    erl_by_slot = (mi.get('erlang_by_slot') or
+                    r_queue.get('erlang_by_slot') or {})
+    mip2_by_slot = mi.get('mip_by_slot', {}) or {}
+    mip1_by_slot = s1.get('mip_by_slot', mip2_by_slot) or mip2_by_slot
+    calls_by_slot = r_queue.get('calls_by_slot', {}) or {}
+
+    # Kap_RR için hourly_report config — weekend günü merged override içerebilir
+    base_cfg = cfg_weekend if is_weekend else cfg_weekday
+    eff_cfg = r_queue.get('_config') or base_cfg or {}
+    hr_cfg = eff_cfg.get('queue_configs', {}).get(queue, {}).get('hourly_report', {})
+    re_cfg = hr_cfg.get('rapor_etkisi', {})
+    kk_cfg = hr_cfg.get('kapasite_kaybi', {})
+    ca_cfg = hr_cfg.get('cagri_adedi', {})
+
+    slot_rows = []
+    rr2_values = []
+    erl_weights = []
+    t_ck = 0.0
+    t_cagri = 0
+
+    for slot in sorted(erl_by_slot.keys()):
+        erl = erl_by_slot[slot]
+        if erl <= 0:
+            continue
+        mip1 = mip1_by_slot.get(slot, 0)
+        mip2 = mip2_by_slot.get(slot, 0)
+        calls = int(calls_by_slot.get(slot, 0))
+
+        rr1 = mip1 / erl
+        rr2 = mip2 / erl
+
+        # Kapasite hesabı (actual_pipeline_v9_weekly._capacity_calc_v7 ile aynı)
+        h = int(slot[:2])
+        re_oran = re_cfg.get(h, re_cfg.get('default', 0))
+        kk_oran = kk_cfg.get(h, kk_cfg.get('default', 0))
+        ca = ca_cfg.get(h, ca_cfg.get('default', 15))
+        re_v = round(mip2 * re_oran)
+        kk_v = round(mip2 * kk_oran)
+        nmt = mip2 - re_v - kk_v
+        ck = nmt * (ca / 2)
+        kap_rr = (ck / calls) if calls > 0 else None
+
+        slot_rows.append({
+            'slot': slot, 'calls': calls, 'erlang': erl,
+            'mip1': mip1, 'mip2': mip2,
+            'rr1': rr1, 'rr2': rr2,
+            'nmt': nmt, 'ck': ck, 'kap_rr': kap_rr,
+        })
+        rr2_values.append(rr2)
+        erl_weights.append(erl)
+        t_ck += ck
+        t_cagri += calls
+
+    if not rr2_values:
+        return slot_rows, None
+
+    total_w = sum(erl_weights)
+    rr2_avg = (sum(r * w for r, w in zip(rr2_values, erl_weights)) / total_w
+                if total_w > 0 else 0)
+    peak_idx = erl_weights.index(max(erl_weights))
+    day_summary = {
+        'erl_pk': max(erl_weights),
+        'mip2_pk': max((s['mip2'] for s in slot_rows), default=0),
+        'rr2_at_peak': rr2_values[peak_idx],
+        'rr2_min': min(rr2_values),
+        'rr2_max': max(rr2_values),
+        'rr2_avg': rr2_avg,
+        'kap_rr_day': (t_ck / t_cagri) if t_cagri > 0 else 0,
+        'total_calls': t_cagri,
+        'total_ck': t_ck,
+    }
+    return slot_rows, day_summary
+
+
+def _rr_color(rr2):
+    """RR2 değerine göre renk: <1.0 kırmızı, >1.05 mavi, arada yeşil."""
+    if rr2 is None:
+        return None
+    if rr2 < 1.0:
+        return Font(bold=True, color='C00000')
+    if rr2 > 1.05:
+        return Font(color='0070C0')
+    return Font(color='006100')
+
+
 def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
                               header_fill, header_font, date_fill, date_font,
-                              total_fill, total_font, border, center):
+                              total_fill, total_font, border, center,
+                              cfg_weekday=None, cfg_weekend=None):
     """Bir hafta için detay sheet'i ekle. 3 kuyruk için sırayla:
     1) Günlük MIP1/MIP2/Surplus/Eksik özeti
     2) Surplus dağıtımı (hangi vardiyaya kaç eklendi)
@@ -1103,6 +1213,83 @@ def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
                 current_row += 1
             current_row += 1
 
+        # ---- D) SLOT BAZLI RR (YENİ) ----
+        # Her aktif slot için: Çağrı, Erlang, MIP1, MIP2, RR1, RR2, Kap_RR
+        # Her günün altında ÖZET satırı: avg/min/max + Kap_RR_Day
+        cell = ws.cell(row=current_row, column=1,
+                        value=f"SLOT BAZLI RR — {queue}")
+        cell.font = Font(bold=True, italic=True, color='1F4E78')
+        ws.merge_cells(start_row=current_row, start_column=1,
+                       end_row=current_row, end_column=10)
+        current_row += 1
+
+        rr_headers = ['Gün', 'Tarih', 'Slot', 'Çağrı', 'Erlang',
+                      'MIP1', 'MIP2', 'RR1 %', 'RR2 %', 'Kap_RR %']
+        for j, h in enumerate(rr_headers, 1):
+            c = ws.cell(row=current_row, column=j, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = center
+            c.border = border
+        current_row += 1
+
+        for ds in week_dates:
+            r = results.get(ds)
+            if r is None or queue not in r or r[queue] is None:
+                continue
+            d = pd.to_datetime(ds)
+            gun = DAY_TR_W[d.weekday()]
+            is_wknd = d.weekday() >= 5
+            slot_rows, day_summary = _compute_rr_metrics_for_day(
+                r[queue], queue, cfg_weekday=cfg_weekday,
+                cfg_weekend=cfg_weekend, is_weekend=is_wknd)
+            if not slot_rows:
+                continue
+
+            # Slot satırları
+            for sr in slot_rows:
+                vals = [gun, d.strftime('%d.%m.%Y'), sr['slot'],
+                        sr['calls'], sr['erlang'],
+                        sr['mip1'], sr['mip2'],
+                        f"{sr['rr1']:.0%}", f"{sr['rr2']:.0%}",
+                        (f"{sr['kap_rr']:.0%}" if sr['kap_rr'] is not None else '-')]
+                for j, v in enumerate(vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.alignment = center
+                    c.border = border
+                    # RR2 renklendirme
+                    if j == 9:
+                        col_font = _rr_color(sr['rr2'])
+                        if col_font:
+                            c.font = col_font
+                current_row += 1
+
+            # Günlük ÖZET satırı
+            if day_summary is not None:
+                ds_vals = [
+                    gun, d.strftime('%d.%m.%Y'), 'ÖZET',
+                    day_summary['total_calls'], day_summary['erl_pk'],
+                    '', day_summary['mip2_pk'],
+                    '',
+                    f"avg {day_summary['rr2_avg']:.0%} | "
+                    f"min {day_summary['rr2_min']:.0%} | "
+                    f"max {day_summary['rr2_max']:.0%}",
+                    f"{day_summary['kap_rr_day']:.0%}",
+                ]
+                for j, v in enumerate(ds_vals, 1):
+                    c = ws.cell(row=current_row, column=j, value=v)
+                    c.fill = total_fill
+                    c.font = total_font
+                    c.alignment = center
+                    c.border = border
+                # ÖZET RR cell'inde alignment'i daha geniş kolon için sola
+                c9 = ws.cell(row=current_row, column=9)
+                c9.alignment = Alignment(horizontal='center', vertical='center',
+                                          wrap_text=True)
+                current_row += 1
+
+        current_row += 1   # gün/kuyruk arası boşluk ekstra
+
         # Kuyruklar arası boşluk
         current_row += 1
 
@@ -1115,31 +1302,35 @@ def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
 
 def _add_rr_report_sheet(wb, results, queues, all_dates,
                           header_fill, header_font, date_fill, date_font,
-                          total_fill, total_font, border, center):
-    """Aylık RR raporu — tek sheet, her gün için 3 kuyruk yan yana.
+                          total_fill, total_font, border, center,
+                          cfg_weekday=None, cfg_weekend=None):
+    """Aylık RR raporu — günlük min/max/avg + Kap_RR (3 kuyruk yan yana).
 
-    Her kuyruk için 5 kolon: Erlang_Pk, MIP1_Pk, MIP2_Pk, RR1%, RR2%.
+    Her kuyruk için 6 kolon:
+       Erl_Pk | MIP2_Pk | RR2_Avg | RR2_Min | RR2_Max | Kap_RR
     """
     ws = wb.create_sheet("RR Raporu")
     DAY_TR_R = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+    METRICS_PER_QUEUE = 6
+    SUB_HEADERS = ['Erl_Pk', 'MIP2_Pk', 'RR2 Avg', 'RR2 Min', 'RR2 Max', 'Kap_RR']
 
     # Başlık
-    cell = ws.cell(row=1, column=1, value="AYLIK RR RAPORU — Erlang ihtiyacına karşı MIP karşılama oranı")
+    cell = ws.cell(row=1, column=1,
+                    value="AYLIK RR RAPORU — slot-bazlı min/max/avg + kapasite RR")
     cell.fill = date_fill
     cell.font = Font(bold=True, size=12)
     cell.alignment = center
-    total_cols = 2 + len(queues) * 5
+    total_cols = 2 + len(queues) * METRICS_PER_QUEUE
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
 
-    # Üst başlık satırı (kuyruk blokları — merged)
+    # Üst başlık satırı (Tarih, Gün + kuyruk blokları)
     row1 = 3
-    ws.cell(row=row1, column=1, value='Tarih').fill = header_fill
-    ws.cell(row=row1, column=1).font = header_font
-    ws.cell(row=row1, column=1).alignment = center
-    ws.cell(row=row1, column=2, value='Gün').fill = header_fill
-    ws.cell(row=row1, column=2).font = header_font
-    ws.cell(row=row1, column=2).alignment = center
-    # Tarih ve Gün için 2 satıra merge
+    for k, h in enumerate(['Tarih', 'Gün'], 1):
+        c = ws.cell(row=row1, column=k, value=h)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = center
+        c.border = border
     ws.merge_cells(start_row=row1, start_column=1, end_row=row1 + 1, end_column=1)
     ws.merge_cells(start_row=row1, start_column=2, end_row=row1 + 1, end_column=2)
 
@@ -1150,121 +1341,153 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
         cell.font = header_font
         cell.alignment = center
         ws.merge_cells(start_row=row1, start_column=col_offset,
-                       end_row=row1, end_column=col_offset + 4)
-        col_offset += 5
+                       end_row=row1, end_column=col_offset + METRICS_PER_QUEUE - 1)
+        col_offset += METRICS_PER_QUEUE
 
     # Alt başlık (metric isimleri)
     row2 = row1 + 1
     col_offset = 3
     for queue in queues:
-        sub_headers = ['Erlang_Pk', 'MIP1_Pk', 'MIP2_Pk', 'RR1 %', 'RR2 %']
-        for k, h in enumerate(sub_headers):
+        for k, h in enumerate(SUB_HEADERS):
             c = ws.cell(row=row2, column=col_offset + k, value=h)
             c.fill = header_fill
             c.font = header_font
             c.alignment = center
             c.border = border
-        col_offset += 5
+        col_offset += METRICS_PER_QUEUE
 
     # Veri satırları
     current_row = row2 + 1
-    totals = {q: {'erl': 0, 'mip1': 0, 'mip2': 0} for q in queues}
+    # Aylık özet için biriktir
+    monthly = {q: {'erl_pk_sum': 0, 'mip2_pk_sum': 0,
+                    'rr2_avg_vals': [], 'rr2_min': None, 'rr2_max': None,
+                    'kap_rr_vals': []} for q in queues}
+
     for ds in sorted(all_dates):
         d = pd.to_datetime(ds)
         gun = DAY_TR_R[d.weekday()]
+        is_wknd = d.weekday() >= 5
         r = results.get(ds)
 
-        ws.cell(row=current_row, column=1, value=d.strftime('%d.%m.%Y')).border = border
-        ws.cell(row=current_row, column=1).alignment = center
-        ws.cell(row=current_row, column=2, value=gun).border = border
-        ws.cell(row=current_row, column=2).alignment = center
+        for k, v in enumerate([d.strftime('%d.%m.%Y'), gun], 1):
+            c = ws.cell(row=current_row, column=k, value=v)
+            c.alignment = center
+            c.border = border
 
         col_offset = 3
         for queue in queues:
             if r is None or queue not in r or r[queue] is None:
-                for k in range(5):
+                for k in range(METRICS_PER_QUEUE):
                     c = ws.cell(row=current_row, column=col_offset + k, value='-')
                     c.alignment = center
                     c.border = border
             else:
-                mi = r[queue]['mip_info']
-                # erlang_by_slot lookup: V9 weekday → mip_info içinde,
-                # weekend forecast → top-level r[queue]'de
-                erl_by_slot = (mi.get('erlang_by_slot') or
-                                r[queue].get('erlang_by_slot') or {})
-                # mip_info_stage1 lookup: V9 weekday → mip_info içinde,
-                # weekend → yok (surplus dağıtılmadı, MIP1=MIP2 say)
-                s1 = mi.get('mip_info_stage1') or r[queue].get('mip_info_stage1') or {}
-                mip2_by_slot = mi.get('mip_by_slot', {}) or {}
-                # MIP1 yoksa MIP2 ile aynı (surplus uygulanmadı)
-                mip1_by_slot = s1.get('mip_by_slot', mip2_by_slot) or mip2_by_slot
-
-                erl_pk = max(erl_by_slot.values()) if erl_by_slot else 0
-                mip1_pk = max(mip1_by_slot.values()) if mip1_by_slot else 0
-                mip2_pk = max(mip2_by_slot.values()) if mip2_by_slot else 0
-                rr1 = (mip1_pk / erl_pk) if erl_pk > 0 else 0
-                rr2 = (mip2_pk / erl_pk) if erl_pk > 0 else 0
-
-                vals = [erl_pk, mip1_pk, mip2_pk,
-                        f"{rr1:.0%}", f"{rr2:.0%}"]
-                for k, v in enumerate(vals):
-                    c = ws.cell(row=current_row, column=col_offset + k, value=v)
-                    c.alignment = center
-                    c.border = border
-                    # RR < 100% → kırmızı, == 100% → yeşil, > 100% → mavi
-                    if k == 4:   # RR2
-                        if rr2 < 1.0:
+                _slot_rows, day_summary = _compute_rr_metrics_for_day(
+                    r[queue], queue, cfg_weekday=cfg_weekday,
+                    cfg_weekend=cfg_weekend, is_weekend=is_wknd)
+                if day_summary is None:
+                    for k in range(METRICS_PER_QUEUE):
+                        c = ws.cell(row=current_row, column=col_offset + k, value='-')
+                        c.alignment = center
+                        c.border = border
+                else:
+                    erl_pk = day_summary['erl_pk']
+                    mip2_pk = day_summary['mip2_pk']
+                    rr2_avg = day_summary['rr2_avg']
+                    rr2_min = day_summary['rr2_min']
+                    rr2_max = day_summary['rr2_max']
+                    kap_rr = day_summary['kap_rr_day']
+                    vals = [erl_pk, mip2_pk,
+                            f"{rr2_avg:.0%}", f"{rr2_min:.0%}",
+                            f"{rr2_max:.0%}", f"{kap_rr:.0%}"]
+                    for k, v in enumerate(vals):
+                        c = ws.cell(row=current_row, column=col_offset + k, value=v)
+                        c.alignment = center
+                        c.border = border
+                        # Renklendirme: RR2_Avg (k=2), RR2_Min (k=3), Kap_RR (k=5)
+                        if k == 2:
+                            f = _rr_color(rr2_avg)
+                            if f: c.font = f
+                        elif k == 3 and rr2_min < 1.0:
                             c.font = Font(bold=True, color='C00000')
-                        elif rr2 > 1.05:
-                            c.font = Font(color='0070C0')
-                        else:
-                            c.font = Font(color='006100')
-
-                totals[queue]['erl'] += erl_pk
-                totals[queue]['mip1'] += mip1_pk
-                totals[queue]['mip2'] += mip2_pk
-            col_offset += 5
+                        elif k == 5:
+                            f = _rr_color(kap_rr)
+                            if f: c.font = f
+                    # Aylık biriktir
+                    m = monthly[queue]
+                    m['erl_pk_sum'] += erl_pk
+                    m['mip2_pk_sum'] += mip2_pk
+                    m['rr2_avg_vals'].append((rr2_avg, erl_pk))   # weighted later
+                    m['rr2_min'] = (rr2_min if m['rr2_min'] is None
+                                     else min(m['rr2_min'], rr2_min))
+                    m['rr2_max'] = (rr2_max if m['rr2_max'] is None
+                                     else max(m['rr2_max'], rr2_max))
+                    m['kap_rr_vals'].append((kap_rr, day_summary['total_calls']))
+            col_offset += METRICS_PER_QUEUE
         current_row += 1
 
-    # Aylık toplam satırı
+    # Aylık özet satırı
     ws.cell(row=current_row, column=1, value='AYLIK').fill = total_fill
     ws.cell(row=current_row, column=1).font = total_font
     ws.cell(row=current_row, column=1).alignment = center
+    ws.cell(row=current_row, column=1).border = border
     ws.cell(row=current_row, column=2, value='—').fill = total_fill
     ws.cell(row=current_row, column=2).font = total_font
     ws.cell(row=current_row, column=2).alignment = center
+    ws.cell(row=current_row, column=2).border = border
+
     col_offset = 3
     for queue in queues:
-        t = totals[queue]
-        # Peak toplamı bilgilendirici değil ama yine de göster (toplam değil avg)
-        avg_rr2 = (t['mip2'] / t['erl']) if t['erl'] > 0 else 0
-        vals = [t['erl'], t['mip1'], t['mip2'], '—', f"{avg_rr2:.0%}"]
+        m = monthly[queue]
+        # Erlang-ağırlıklı aylık RR2 avg
+        if m['rr2_avg_vals']:
+            total_w = sum(w for _, w in m['rr2_avg_vals'])
+            wavg = (sum(r * w for r, w in m['rr2_avg_vals']) / total_w
+                     if total_w > 0 else 0)
+        else:
+            wavg = 0
+        # Çağrı-ağırlıklı aylık Kap_RR
+        if m['kap_rr_vals']:
+            total_calls = sum(c for _, c in m['kap_rr_vals'])
+            wkap = (sum(r * c for r, c in m['kap_rr_vals']) / total_calls
+                     if total_calls > 0 else 0)
+        else:
+            wkap = 0
+        vals = [m['erl_pk_sum'], m['mip2_pk_sum'],
+                f"{wavg:.0%}",
+                f"{m['rr2_min']:.0%}" if m['rr2_min'] is not None else '-',
+                f"{m['rr2_max']:.0%}" if m['rr2_max'] is not None else '-',
+                f"{wkap:.0%}"]
         for k, v in enumerate(vals):
             c = ws.cell(row=current_row, column=col_offset + k, value=v)
             c.fill = total_fill
             c.font = total_font
             c.alignment = center
             c.border = border
-        col_offset += 5
+        col_offset += METRICS_PER_QUEUE
 
     # Açıklama
     current_row += 2
-    ws.cell(row=current_row, column=1,
-            value="RR = MIP_peak / Erlang_peak | "
-                  "MIP1 = surplus öncesi | MIP2 = surplus sonrası | "
-                  "RR2 < 100% kırmızı (eksik) | RR2 > 105% mavi (fazla)")
+    cell = ws.cell(row=current_row, column=1,
+                    value="RR2 = MIP2_slot / Erlang_slot  |  "
+                          "RR2 Avg = Erlang-ağırlıklı slot ort.  |  "
+                          "Kap_RR = Çağrı_Kapasitesi / Gelen_Çağrı (kapasite kayıpları dahil)  |  "
+                          "RR < 100% kırmızı (eksik karşılama)  |  "
+                          "RR > 105% mavi (fazla)")
+    cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
     ws.merge_cells(start_row=current_row, start_column=1,
                    end_row=current_row, end_column=total_cols)
+    ws.row_dimensions[current_row].height = 30
 
     # Kolon genişlikleri
     ws.column_dimensions['A'].width = 12
     ws.column_dimensions['B'].width = 5
     col_letter_offset = 3
     for queue in queues:
-        for k in range(5):
+        for k in range(METRICS_PER_QUEUE):
             col_letter = ws.cell(row=row2, column=col_letter_offset + k).column_letter
             ws.column_dimensions[col_letter].width = 10
-        col_letter_offset += 5
+        col_letter_offset += METRICS_PER_QUEUE
 
 
 export_monthly_plan_to_excel(
@@ -1272,5 +1495,7 @@ export_monthly_plan_to_excel(
     year=YEAR,
     month=MONTH,
     weekend_budget=WEEKEND_BUDGET,
+    cfg_weekday=CONFIG_WEEKDAY,    # Kap_RR için hourly_report config'i
+    cfg_weekend=CONFIG_WEEKEND,
     queues=('kitle', 'gold', 'kurumsal'),
 )
