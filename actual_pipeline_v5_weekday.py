@@ -5,13 +5,15 @@
 İçindekiler:
 1. Problem Tanımı
 2. Veri Akışı (Yüksek Seviye)
-3. MIP Modeli
-4. Cascading Fallback (Stage 1-4)
-5. Def'ler ve İşlevleri
-6. Veri Yapıları
-7. Hücre Akışı
-8. Excel Çıktısı
-9. Hata Durumları
+3. Haftaiçi MIP Modeli (optimize_week)
+4. Haftasonu MIP Modeli (optimize_queue)
+5. Cascading Fallback (Stage 1-4) — sadece haftaiçi
+6. Def'ler ve İşlevleri
+7. Veri Yapıları
+8. Hücre Akışı
+9. Excel Çıktısı
+10. Hata Durumları
+11. İlişkili Dosyalar
 
 ---
 
@@ -64,10 +66,10 @@ ham_girdiler:
 
 ---
 
-# 3. MIP MODELİ
+# 3. HAFTAİÇİ MIP MODELİ (optimize_week)
 
 V9 haftaiçi MIP modeli `optimize_week()` içinde kurulur. 5 günlük blok için
-tek modelde çözülür.
+tek modelde çözülür. Haftasonu MIP'i için bkz. **Bölüm 4**.
 
 ## 3.1 Karar Değişkenleri
 
@@ -280,9 +282,176 @@ cost += (diff_pos + diff_neg) × balance_penalty
 
 ---
 
-# 4. CASCADING FALLBACK (Stage 1-4)
+# 4. HAFTASONU MIP MODELİ (optimize_queue)
 
-`run_week_all_queues` bir kuyruğu şu sırayla dener. İlk çözen aşamada durur.
+`weekend_forecast_final.py`'deki `optimize_queue()` fonksiyonu — V6 daily
+mantığı. Haftaiçi V9 modelinden **temelde farklı** bir yapı.
+
+## 4.0 Temel farklar (özet tablo)
+
+| Özellik | Haftaiçi (optimize_week) | Haftasonu (optimize_queue) |
+|---|---|---|
+| Kapsam | 5 gün tek MIP | 1 gün tek MIP |
+| Stable inhouse | Var (Pzt-Cum aynı kişi) | YOK (Cmt/Pzr bağımsız) |
+| Day-specific | Outsource + Cuma-özel | — (gerek yok, zaten tek gün) |
+| Stage 4 shortfall | Var | YOK (sert coverage) |
+| Surplus dağıtımı | Var (kadro tavanı altı doldurma) | YOK (MIP1 == MIP2) |
+| Part-time | Sınırlı destek | Tam destek (Σ pt == pt_available) |
+| Outsource ratio | Genelde kapalı | Aktif (min/max %) |
+| Cascading fallback | 4 aşamalı (Bölüm 5) | YOK |
+| Per-day kadro | Var | Yok (tek gün) |
+
+---
+
+## 4.1 Karar Değişkenleri
+
+### Ana değişkenler
+
+```
+x[s]  ∈ {0, 1, 2, ...}    Integer, lowBound=0    (her shift için kişi)
+y[s]  ∈ {0, 1}            Binary                  (vardiya açık mı)
+
+s ∈ shifts = allowed companies (kuyruğun izin verdiği — inhouse/outsource/PT)
+```
+
+Stable/day-specific ayrımı **YOK** — her vardiya için tek değişken
+(zaten tek gün çözülüyor).
+
+### Slack değişkenleri (Continuous, ≥ 0)
+
+```
+excess[slot]      RR penalty (Erlang üstü fazla)
+sc_excess[slot]   Slot cap penalty (tavan aşımı)
+```
+
+---
+
+## 4.2 Amaç Fonksiyonu
+
+```
+MINIMIZE Z = Σ_s x[s] × cost(s)                       ← vardiya maliyeti
+           + Σ_s y[s] × small_shift_penalty           ← küçük vardiya cezası
+           + Σ_slot excess[slot] × rr_penalty         ← Erlang fazlalık
+           + Σ_slot sc_excess[slot] × sc_penalty      ← slot cap aşımı
+```
+
+`cost(s)` formülü haftaiçi ile aynı: `base_cost(company) × time_multiplier(start_hour)`.
+
+Haftaiçinden farklı olarak:
+- **Stable n_days çarpanı YOK** (tek gün, asimetri sorunu yok)
+- **Coverage shortfall terimi YOK**
+- **Balance penalty YOK**
+
+---
+
+## 4.3 Kısıtlar
+
+### K1 — Coverage (SERT)
+
+```
+∀ slot ∈ active_slots:
+  Σ_(s ∈ shifts, slot ∈ s.slots) x[s]  ≥  erlang_need[slot]
+```
+
+**Haftaiçinden fark:** shortfall slack değişkeni **YOK**. Coverage karşılanamazsa
+MIP `INFEASIBLE` döner — Stage 4 gibi kurtarıcı mekanizma yok.
+
+### K2 — min_per_shift (Big-M)
+
+```
+x[s] ≤ M × y[s]              (M = 500)
+x[s] ≥ min_per_shift × y[s]
+```
+
+Haftaiçindeki gibi ama **per-shift override yok** (saat-özel istisna config
+weekend için tanımlı değil).
+
+### K3 — Part-time toplamı SABİT
+
+```
+config['part_time']['enabled'] == True ise:
+  Σ_(s ∈ pt_shifts) x[s]  ==  pt_available
+```
+
+PT kişi sayısı **tam olarak** `config['part_time']['count'][queue]` kadar
+olmalı — ne fazla ne az. Eşitlik kısıtı.
+
+### K4 — Outsource Ratio (haftaiçinden farklı: AKTİF)
+
+`config['outsource_ratio'][queue]` set edilmişse:
+
+```
+(1 - r_min) × Σ x[out]  ≥  r_min × (Σ x[in] + Σ x[pt])
+(1 - r_max) × Σ x[out]  ≤  r_max × (Σ x[in] + Σ x[pt])
+```
+
+`r_min, r_max` config'den (örn. min=0.55, max=0.65 → outsource %55-65 arası).
+
+Inhouse-only kuyruklarda (gold, kurumsal) bu kısıt **devre dışı**.
+
+### K5 — Alt-Kuyruk Min
+
+Haftaiçi K4 ile birebir aynı mantık — `inhouse_only_subqueues` ve
+`outsource_only_subqueues` config'leri.
+
+### K6 — RR Penalty (Soft)
+
+Haftaiçi K5 ile aynı — peak slot çarpanı, gece çarpanı dahil.
+
+### K7 — Slot Cap (Soft)
+
+Haftaiçi K6 ile aynı — `slot_cap.bands` ile saat bantları.
+
+### K8 — Balance Penalty: YOK
+### K9 — Stage 4 Shortfall: YOK
+### K10 — Per-day Kadro: YOK (tek gün, kadro scalar)
+
+---
+
+## 4.4 Davranışsal Sonuçları
+
+Haftasonu pipeline'ının çıktısında dikkat:
+
+| Alan | Haftaiçi (V9) | Haftasonu |
+|---|---|---|
+| `mip_info_stage1` | Var (surplus öncesi) | **YOK** (MIP1 ≡ MIP2) |
+| `total_shortfall` | 0 ya da pozitif | **Her zaman 0** |
+| `shortfall_by_slot` | Var olabilir | **Yok** |
+| `solution_stage` | `'STAGE 1: original'` vs. | **Yok** |
+| `surplus_added` | Var olabilir | **Yok** |
+| `_config` | Yok | **Var** (merged override) |
+
+Excel'deki **RR Raporu** ve **Hafta** sheet'lerinde haftasonu satırlarında
+MIP1 = MIP2, Surplus = 0, Eksik = 0 görünmesi normal. `_compute_rr_metrics_for_day`
+helper'ı bunları doğru sarmalıyor (Bölüm 6.5).
+
+---
+
+## 4.5 Pipeline farkları
+
+```
+Haftaiçi: run_week_all_queues(5 gün)
+            → 4 aşamalı fallback ile optimize_week çağırır
+            → _distribute_surplus_per_day ile surplus eklenir
+            → Stage 4 garantili çözüm
+
+Haftasonu: run_all_queues_forecast(1 gün, kuyruk başına)
+            → run_queue_pipeline_forecast içinde optimize_queue çağırır
+            → Tek deneme, fallback yok
+            → INFEASIBLE olursa o kuyruk için sonuç None
+```
+
+Aylık akışta (`run_month_forecast`):
+- Pzt-Cum bloklar `run_week_all_queues` ile
+- Cmt/Pzr günler **tek tek** `run_all_queues_forecast` ile
+
+---
+
+# 5. CASCADING FALLBACK (Stage 1-4) — sadece haftaiçi
+
+`run_week_all_queues` (haftaiçi MIP) bir kuyruğu şu sırayla dener.
+İlk çözen aşamada durur. **Haftasonu için bu mekanizma YOK**
+(bkz. Bölüm 4.5).
 
 ## Aşama 1 — Orijinal config
 
@@ -354,9 +523,9 @@ eklersen eksiği kapatırsın hesabı.
 
 ---
 
-# 5. DEF'LER VE İŞLEVLERİ
+# 6. DEF'LER VE İŞLEVLERİ
 
-## 5.1 Köprü Def'leri (HÜCRE 6 içinde)
+## 6.1 Köprü Def'leri (HÜCRE 6 içinde)
 
 ### `_wrap_weekly_info_as_daily(info, df_calls_30, queue, date_str)`
 
@@ -406,7 +575,7 @@ Haftasonu pipeline'ını stdout'u yutarak çağırır. `run_all_queues_forecast`
 
 ---
 
-## 5.2 Ana Orkestratör
+## 6.2 Ana Orkestratör
 
 ### `run_month_forecast(year, month, df_forecast, df_shifts_dict, cfg_weekday, cfg_weekend, queues, verbose)`
 
@@ -439,7 +608,7 @@ Ayın TÜM günlerini sırayla çözer. Tek giriş noktası.
 
 ---
 
-## 5.3 Plan Özeti (HÜCRE 9-11 kullanır)
+## 6.3 Plan Özeti (HÜCRE 9-11 kullanır)
 
 ### `print_queue_monthly_plan(plan_queue, results, year, month)`
 
@@ -452,7 +621,7 @@ basar.
 
 ---
 
-## 5.4 Excel Export
+## 6.4 Excel Export
 
 ### `export_monthly_plan_to_excel(results, year, month, weekend_budget, cfg_weekday, cfg_weekend, queues, output_path)`
 
@@ -471,7 +640,7 @@ Tüm aylık planı 1 Excel dosyasına çıkarır.
 
 ---
 
-## 5.5 Excel Helper Def'leri
+## 6.5 Excel Helper Def'leri
 
 ### `_compute_rr_metrics_for_day(r_queue, queue, cfg_weekday, cfg_weekend, is_weekend)`
 
@@ -546,9 +715,9 @@ Aylık özet satırı: Erlang-ağırlıklı `RR2 Avg`, ay boyu görülen `RR2 Mi
 
 ---
 
-# 6. VERİ YAPILARI
+# 7. VERİ YAPILARI
 
-## 6.1 df_forecast (Girdi)
+## 7.1 df_forecast (Girdi)
 
 15 dakikalık granularitede, geniş format.
 
@@ -574,7 +743,7 @@ CONFIG'de kolon adları tanıtılır:
 }
 ```
 
-## 6.2 df_aht (Girdi)
+## 7.2 df_aht (Girdi)
 
 ```
 Kolon                       Örnek
@@ -585,7 +754,7 @@ line_based_main_group       kitle_cagrilar
 weighted_avg_aht            157      (saniye)
 ```
 
-## 6.3 df_shifts_dict (Girdi)
+## 7.3 df_shifts_dict (Girdi)
 
 ```python
 {
@@ -607,7 +776,7 @@ company            'inhouse'          inhouse/outsource/part_time
 available_days     ['Fri']            (opsiyonel, hangi günler)
 ```
 
-## 6.4 CONFIG — Kritik Alanlar
+## 7.4 CONFIG — Kritik Alanlar
 
 ```python
 {
@@ -683,7 +852,7 @@ available_days     ['Fri']            (opsiyonel, hangi günler)
 
 Çözümleme önceliği: **tarih > gün-of-week > default**.
 
-## 6.5 results (Çıktı)
+## 7.5 results (Çıktı)
 
 ```python
 results = {
@@ -724,7 +893,7 @@ Bir gün **tamamen başarısız** olduysa: `results[date_str] = None`.
 
 ---
 
-# 7. HÜCRE AKIŞI
+# 8. HÜCRE AKIŞI
 
 ```
 HÜCRE 1   importlar
@@ -755,7 +924,7 @@ HÜCRE 12  export_monthly_plan_to_excel(...)
 
 ---
 
-# 8. EXCEL ÇIKTISI
+# 9. EXCEL ÇIKTISI
 
 `vardiya_plani_forecast_YYYY_MM_AyAdı.xlsx` aşağıdaki sheet'leri içerir.
 
@@ -813,7 +982,7 @@ Renk kodu (RR2 Avg, RR2 Min, Kap_RR sütunlarında):
 
 ---
 
-# 9. HATA DURUMLARI
+# 10. HATA DURUMLARI
 
 | Durum | Sebep | Çözüm |
 |-------|-------|-------|
@@ -825,7 +994,7 @@ Renk kodu (RR2 Avg, RR2 Min, Kap_RR sütunlarında):
 
 ---
 
-# 10. İLİŞKİLİ DOSYALAR
+# 11. İLİŞKİLİ DOSYALAR
 
 | Dosya | Görev |
 |-------|-------|
