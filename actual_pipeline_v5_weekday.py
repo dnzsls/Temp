@@ -73,17 +73,22 @@ tek modelde çözülür. Haftasonu MIP'i için bkz. **Bölüm 4**.
 
 ## 3.1 Karar Değişkenleri
 
+MIP'in çözeceği bilinmeyenler. Hepsi `s` = vardiya, `d` = gün (Pzt..Cum),
+`slot` = 30 dk dilim, `win` = balance penalty penceresi.
+
 ### Stable Inhouse (haftanın 5 günü aynı kişi)
 
 ```
 x[s]   ∈ {0, 1, 2, ...}    Integer, lowBound=0
-y[s]   ∈ {0, 1}            Binary (vardiya açık mı?)
+y[s]   ∈ {0, 1}            Binary
 
 s ∈ stable_shifts = INHOUSE + her gün aktif olan vardiyalar
 ```
 
-Stable: aynı Pzt günü 13 kişi açtıysan, Cuma günü de aynı 13 kişi (V7'den
-beri stable staffing prensibi).
+| Değişken | Anlamı |
+|---|---|
+| `x[s]` | Stable vardiya `s`'ye atanan **kişi sayısı**. Aynı kişi sayısı Pzt-Cum boyunca geçerli (V7 stable staffing prensibi: aynı 13 inhouse her gün, aynı saat). |
+| `y[s]` | Vardiya `s` **açık mı**? `1` → bu vardiya kullanılıyor (x[s] ≥ min_per_shift); `0` → kapalı, kimseyi atama. Big-M ile `x[s]`'ye bağlı. |
 
 ### Day-Specific (her gün ayrı)
 
@@ -95,17 +100,26 @@ y_day[(s, d)] ∈ {0, 1}            Binary
                            ∪ Gün-kısıtlı inhouse (örn. `_fri` vardiyası)
 ```
 
-Day-specific: outsource ekibinin günlük kapasitesi farklı olabilir
-(Pzt 50 kişi, Sal 35 kişi gibi).
+| Değişken | Anlamı |
+|---|---|
+| `x_day[(s, d)]` | Vardiya `s`'ye, **o güne (d) özgü** atanan kişi sayısı. Outsource için her gün farklı olabilir (Pzt 50, Sal 35 gibi). |
+| `y_day[(s, d)]` | O gün için vardiya açık mı? `1` → o gün kullanılıyor; `0` → o gün kapalı. |
+
+Outsource ve gün-özel inhouse (örn. sadece Cuma aktif `14:00-23:00_fri`)
+için kullanılır.
 
 ### Slack / Penalty Değişkenleri (Continuous, ≥ 0)
 
-```
-excess[(d, slot)]         RR penalty (Erlang üstüne çıkma)
-sc_excess[(d, slot)]      Slot cap penalty (tavan aşma)
-bp_diff_pos/neg[(d, win)] Balance penalty (in/out denge)
-shortfall[(d, slot)]      Stage 4 — eksik kapsama
-```
+Bunlar **kısıtların ihlal miktarını ölçen** yardımcı değişkenler. Amaç
+fonksiyonunda penalty ile cezalanırlar — MIP bunları küçük tutmaya çalışır.
+
+| Değişken | Anlamı |
+|---|---|
+| `excess[(d, slot)]` | RR penalty değişkeni. O slot'ta `covered − erlang_need`'ten büyük; yani Erlang ihtiyacının **üstüne ne kadar fazla** kişi atandığı (Erlang fazlalığı). |
+| `sc_excess[(d, slot)]` | Slot cap penalty değişkeni. O slot'ta `covered − cap`'ten büyük; yani saat bandı tavanının **ne kadar üstüne** çıkıldığı. |
+| `bp_diff_pos[(d, win)]` | Balance penalty pozitif sapma. Pencerede `in_total − out_total`'in pozitif kısmı (inhouse outsource'tan ne kadar fazla). |
+| `bp_diff_neg[(d, win)]` | Balance penalty negatif sapma. Aynı farkın negatif kısmı (outsource inhouse'tan ne kadar fazla). |
+| `shortfall[(d, slot)]` | V9 Stage 4 değişkeni. O slot'ta `erlang_need − covered`'in pozitif kısmı; **Erlang'ı tam karşılayamayıp eksik bırakılan kişi-slot sayısı**. Çok yüksek penalty (1000) ile cezalanır → MIP son çare olarak kullanır. |
 
 ---
 
@@ -305,24 +319,37 @@ mantığı. Haftaiçi V9 modelinden **temelde farklı** bir yapı.
 
 ## 4.1 Karar Değişkenleri
 
+Tek gün için MIP olduğundan değişkenler haftaiçine göre **çok daha sade**.
+`s` = vardiya, `slot` = 30 dk dilim.
+
 ### Ana değişkenler
 
 ```
-x[s]  ∈ {0, 1, 2, ...}    Integer, lowBound=0    (her shift için kişi)
-y[s]  ∈ {0, 1}            Binary                  (vardiya açık mı)
+x[s]  ∈ {0, 1, 2, ...}    Integer, lowBound=0
+y[s]  ∈ {0, 1}            Binary
 
 s ∈ shifts = allowed companies (kuyruğun izin verdiği — inhouse/outsource/PT)
 ```
 
-Stable/day-specific ayrımı **YOK** — her vardiya için tek değişken
-(zaten tek gün çözülüyor).
+| Değişken | Anlamı |
+|---|---|
+| `x[s]` | Vardiya `s`'ye atanan **kişi sayısı**. Sadece o gün için geçerli (haftasonu tek gün MIP). |
+| `y[s]` | Vardiya `s` **açık mı**? `1` → kullanılıyor (`x[s] ≥ min_per_shift`); `0` → kapalı. |
+
+Haftaiçinden fark:
+- **Stable/day-specific ayrımı yok** — her vardiya için tek değişken
+- **PT shifts** için ayrı `pt_shift_keys` listesi var, ama yine `x[s]` kullanılıyor (sadece config'de `part_time.enabled=True` ise eklenir)
 
 ### Slack değişkenleri (Continuous, ≥ 0)
 
-```
-excess[slot]      RR penalty (Erlang üstü fazla)
-sc_excess[slot]   Slot cap penalty (tavan aşımı)
-```
+| Değişken | Anlamı |
+|---|---|
+| `excess[slot]` | RR penalty değişkeni. O slot'ta `covered − erlang_need`'ten büyük; yani Erlang ihtiyacının **üstüne ne kadar fazla** kişi atandığı. |
+| `sc_excess[slot]` | Slot cap penalty değişkeni. O slot'ta `covered − cap`'ten büyük; yani saat bandı tavanının **ne kadar üstüne** çıkıldığı. |
+
+Haftasonu için **olmayan** slack'ler:
+- `bp_diff_pos/neg` (balance penalty yok)
+- `shortfall` (Stage 4 yok → coverage sert kısıt)
 
 ---
 
