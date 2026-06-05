@@ -136,7 +136,19 @@ MINIMIZE Z = Σ_s x[s] × cost(s) × n_days              ← stable cost (×5 g�
            + Σ_(d,slot) shortfall × 1000               ← Stage 4 (V9 YENİ)
 ```
 
-**cost(s)** formülü:
+### Formüldeki semboller
+
+| Sembol | Anlamı / Kaynağı |
+|---|---|
+| `n_days` | Blok günü sayısı (haftaiçi için **5** — Pzt-Cum). Stable cost'u 5 ile çarpmak gerekir, sebebi aşağıda. |
+| `cost(s)` | Vardiya `s` için **birim maliyet** (1 kişinin 1 gün maliyeti). Hesabı aşağıda. |
+| `rr_penalty` | `config['queue_configs'][queue]['rr_penalty']['penalty_per_person']`. Default 5.0. Peak slot'larda `peak_penalty`, gece slot'larında `× night_multiplier`. |
+| `sc_penalty` | Her saat-bandı için `config['queue_configs'][queue]['slot_cap']['bands'][i]['penalty']`. Tipik 50-120. |
+| `bp_pen` | `config['queue_configs'][queue]['balance_penalty']['windows'][i]['penalty']`. Tipik 1.0. |
+| `1000` | Stage 4 shortfall sabit penalty'si. `config['queue_configs'][queue]['mip']['coverage_shortfall']['penalty']`. Diğer cezalardan **çok yüksek** olmalı ki MIP shortfall'u son çare olarak kullansın. |
+
+### cost(s) hesabı
+
 ```
 cost(s) = base_cost(company) × time_multiplier(start_hour)
 
@@ -147,13 +159,33 @@ time_multiplier        = config['time_cost_multipliers'][queue][company][start_h
                            saat tercih edilmesin)
 ```
 
-**Stable cost neden n_days ile çarpılıyor?** Stable inhouse haftanın 5 günü
-çalışır ama tek `x[s]` değişkeni var. Day-specific her gün için ayrı
-maliyet eklenir. Eşitlemezsen MIP yanlışlıkla inhouse'u 5 kat ucuz görür.
+### Stable cost neden `n_days` ile çarpılıyor?
+
+Stable inhouse haftanın 5 günü çalışır ama tek `x[s]` değişkeni var.
+Day-specific (`x_day`) her gün için ayrı maliyet terimi ekler (5 kez).
+Stable cost'u 5 ile çarpmazsan MIP yanlışlıkla inhouse'u 5 kat ucuz görür ve
+gereksiz yere her şeyi stable inhouse'a yığar.
 
 ---
 
 ## 3.3 Kısıtlar
+
+### Kısıtlarda kullanılan girdi sembolleri
+
+Karar değişkenlerinden (3.1) farklı olarak, kısıtlarda **MIP'in DEĞİL,
+config/hesabın sağladığı** sabit değerler de geçer:
+
+| Sembol | Anlamı / Kaynağı |
+|---|---|
+| `erlang_need[d][slot]` | Erlang-C ile hesaplanan ihtiyaç. `_build_erlang_per_day*` döndürür. |
+| `s.slots` | Vardiya `s`'nin kapsadığı 30 dk slot listesi (`create_shift_coverage` üretir). |
+| `kadro_in_d`, `kadro_out_d` | O günün kadro tavanı. `_resolve_kadro(...)` ile 3 katmanlı çözülür (K3'e bak). |
+| `inhouse_min[d][slot]` | Alt-kuyruk min inhouse ihtiyacı (`inhouse_only_subqueues` config). |
+| `M` | Big-M sabiti, **500**. min_per_shift kısıtı için. |
+| `min_v` | Vardiya açıksa gereken min kişi. Varsayılan `mcfg['min_per_shift']` (V9'da 13); saat-özel `min_per_shift_overrides` varsa onu kullan. |
+| `covered_slot` | Bir slot'taki toplam atama miktarı (K1'in sol tarafının kısaltması; stable + day-specific toplamı). |
+| `cap` | Slot cap tavanı: `ceil(erlang_need × max_ratio)`, en az 3. |
+| `r_min, r_max` | Outsource oranı min/max (`config['outsource_ratio'][queue]`). V9 weekday'de genelde `None`. |
 
 ### K1 — Coverage (Erlang Karşıla)
 
@@ -362,16 +394,36 @@ MINIMIZE Z = Σ_s x[s] × cost(s)                       ← vardiya maliyeti
            + Σ_slot sc_excess[slot] × sc_penalty      ← slot cap aşımı
 ```
 
-`cost(s)` formülü haftaiçi ile aynı: `base_cost(company) × time_multiplier(start_hour)`.
+### Formüldeki semboller
 
-Haftaiçinden farklı olarak:
-- **Stable n_days çarpanı YOK** (tek gün, asimetri sorunu yok)
-- **Coverage shortfall terimi YOK**
-- **Balance penalty YOK**
+| Sembol | Anlamı / Kaynağı |
+|---|---|
+| `cost(s)` | Vardiya `s` için **birim maliyet** (1 kişinin 1 gün maliyeti). Hesabı haftaiçi ile aynı: `base_cost(company) × time_multiplier(start_hour)`. |
+| `small_shift_penalty` | `config['small_shift_penalty']['penalty']`. Default 3.0. PT shift'lerinde uygulanmaz. Az kişili vardiya açmayı caydırır. |
+| `rr_penalty` | `config['rr_penalty']['penalty_per_person']`. Default 5.0. Peak'te `peak_penalty`, gece `× night_multiplier`. |
+| `sc_penalty` | Her saat-bandı için `config['slot_cap']['bands'][i]['penalty']`. Default 50. |
+
+### Haftaiçinden farklı olarak
+
+- **`n_days` çarpanı YOK** (tek gün, asimetri sorunu yok)
+- **Coverage shortfall terimi YOK** (Stage 4 yok → coverage sert kısıt)
+- **Balance penalty YOK** (haftasonu için config'de tanımlı değil)
 
 ---
 
 ## 4.3 Kısıtlar
+
+### Kısıtlarda kullanılan girdi sembolleri
+
+| Sembol | Anlamı / Kaynağı |
+|---|---|
+| `erlang_need[slot]` | Erlang-C ile hesaplanan ihtiyaç (tek gün için). |
+| `s.slots` | Vardiya `s`'nin kapsadığı 30 dk slot listesi. |
+| `M` | Big-M sabiti, **500**. |
+| `min_per_shift` | Vardiya açıksa min kişi (`config['mip']['min_per_shift']`). |
+| `pt_available` | `config['part_time']['count'][queue]` — PT slot sayısı (örn. 42 kişi). |
+| `cap` | Slot cap tavanı: `ceil(erlang_need × max_ratio)`, en az 3. |
+| `r_min, r_max` | Outsource oranı min/max (`config['outsource_ratio'][queue]`). Haftasonu için **aktif**. |
 
 ### K1 — Coverage (SERT)
 
