@@ -330,29 +330,17 @@ cost += (diff_pos + diff_neg) × balance_penalty
 
 # 4. HAFTASONU MIP MODELİ (optimize_queue)
 
-`weekend_forecast_final.py`'deki `optimize_queue()` fonksiyonu — V6 daily
-mantığı. Haftaiçi V9 modelinden **temelde farklı** bir yapı.
-
-## 4.0 Temel farklar (özet tablo)
-
-| Özellik | Haftaiçi (optimize_week) | Haftasonu (optimize_queue) |
-|---|---|---|
-| Kapsam | 5 gün tek MIP | 1 gün tek MIP |
-| Stable inhouse | Var (Pzt-Cum aynı kişi) | YOK (Cmt/Pzr bağımsız) |
-| Day-specific | Outsource + Cuma-özel | — (gerek yok, zaten tek gün) |
-| Stage 4 shortfall | Var | YOK (sert coverage) |
-| Surplus dağıtımı | Var (kadro tavanı altı doldurma) | YOK (MIP1 == MIP2) |
-| Part-time | Sınırlı destek | Tam destek (Σ pt == pt_available) |
-| Outsource ratio | Genelde kapalı | Aktif (min/max %) |
-| Cascading fallback | 4 aşamalı (Bölüm 5) | YOK |
-| Per-day kadro | Var | Yok (tek gün) |
+`weekend_forecast_final.py`'deki `optimize_queue()` fonksiyonu — Cumartesi ya
+da Pazar için **tek gün** çözümleyen MIP. Her kuyruk (kitle / kurumsal / gold)
+ve her gün için ayrı ayrı çağrılır. Toplamda haftasonu için
+**2 gün × 3 kuyruk = 6 MIP** çalışır.
 
 ---
 
 ## 4.1 Karar Değişkenleri
 
-Tek gün için MIP olduğundan değişkenler haftaiçine göre **çok daha sade**.
-`s` = vardiya, `slot` = 30 dk dilim.
+Tek gün için MIP olduğundan değişkenler sade. `s` = vardiya, `slot` = 30 dk
+dilim.
 
 ### Ana değişkenler
 
@@ -360,28 +348,25 @@ Tek gün için MIP olduğundan değişkenler haftaiçine göre **çok daha sade*
 x[s]  ∈ {0, 1, 2, ...}    Integer, lowBound=0
 y[s]  ∈ {0, 1}            Binary
 
-s ∈ shifts = allowed companies (kuyruğun izin verdiği — inhouse/outsource/PT)
+s ∈ shifts = kuyruğun izin verdiği şirket tiplerindeki vardiyalar
+              (inhouse / outsource / part-time)
 ```
 
 | Değişken | Anlamı |
 |---|---|
-| `x[s]` | Vardiya `s`'ye atanan **kişi sayısı**. Sadece o gün için geçerli (haftasonu tek gün MIP). |
-| `y[s]` | Vardiya `s` **açık mı**? `1` → kullanılıyor (`x[s] ≥ min_per_shift`); `0` → kapalı. |
+| `x[s]` | Vardiya `s`'ye atanan **kişi sayısı** (o gün için). Örn. `x['08:00-17:00_inh'] = 25` → o vardiyaya 25 kişi atandı. |
+| `y[s]` | Vardiya `s` **açık mı**? `1` → kullanılıyor (`x[s] ≥ min_per_shift`); `0` → kapalı (`x[s] = 0`). Bunu Big-M kısıtı zorlar (K2). |
 
-Haftaiçinden fark:
-- **Stable/day-specific ayrımı yok** — her vardiya için tek değişken
-- **PT shifts** için ayrı `pt_shift_keys` listesi var, ama yine `x[s]` kullanılıyor (sadece config'de `part_time.enabled=True` ise eklenir)
+**Vardiya türleri:**
+- Standart vardiya: `x[s]` ve `y[s]` her ikisi de var
+- PT (part-time) vardiyası: aynı şekilde `x[s]` ve `y[s]` var, ama `pt_shift_keys` listesinde işaretli; küçük vardiya cezasından muaf
 
 ### Slack değişkenleri (Continuous, ≥ 0)
 
 | Değişken | Anlamı |
 |---|---|
-| `excess[slot]` | RR penalty değişkeni. O slot'ta `covered − erlang_need`'ten büyük; yani Erlang ihtiyacının **üstüne ne kadar fazla** kişi atandığı. |
-| `sc_excess[slot]` | Slot cap penalty değişkeni. O slot'ta `covered − cap`'ten büyük; yani saat bandı tavanının **ne kadar üstüne** çıkıldığı. |
-
-Haftasonu için **olmayan** slack'ler:
-- `bp_diff_pos/neg` (balance penalty yok)
-- `shortfall` (Stage 4 yok → coverage sert kısıt)
+| `excess[slot]` | RR penalty için yardımcı değişken. O slot'ta `covered − erlang_need`'ten büyük olmalı; yani Erlang ihtiyacının **üstüne ne kadar fazla** kişi atandığı. Amaç fonksiyonunda çarpılarak fazlalık caydırılır. |
+| `sc_excess[slot]` | Slot cap penalty için yardımcı değişken. O slot'ta `covered − cap`'ten büyük olmalı; yani saat bandı tavanının **ne kadar üstüne** çıkıldığı. |
 
 ---
 
@@ -394,20 +379,32 @@ MINIMIZE Z = Σ_s x[s] × cost(s)                       ← vardiya maliyeti
            + Σ_slot sc_excess[slot] × sc_penalty      ← slot cap aşımı
 ```
 
+MIP bu dört terimin toplamını **minimize** etmeye çalışır. Her terim farklı bir
+hedefi temsil eder:
+
+1. **Vardiya maliyeti** — daha az kişi atamak ödüllendirilir.
+2. **Küçük vardiya cezası** — küçük vardiya açmak engellenir (operasyonel olarak verimsiz).
+3. **RR fazlalık** — gerekenden fazla kişi atamak caydırılır.
+4. **Slot cap aşımı** — saat bandı tavanını aşmak caydırılır.
+
 ### Formüldeki semboller
 
 | Sembol | Anlamı / Kaynağı |
 |---|---|
-| `cost(s)` | Vardiya `s` için **birim maliyet** (1 kişinin 1 gün maliyeti). Hesabı haftaiçi ile aynı: `base_cost(company) × time_multiplier(start_hour)`. |
+| `cost(s)` | Vardiya `s` için **birim maliyet** (1 kişinin 1 gün maliyeti). Hesabı: `base_cost(company) × time_multiplier(start_hour)`. `base_cost` config'deki şirket bazlı maliyet; `time_multiplier` gece/peak saat çarpanı. |
 | `small_shift_penalty` | `config['small_shift_penalty']['penalty']`. Default 3.0. PT shift'lerinde uygulanmaz. Az kişili vardiya açmayı caydırır. |
-| `rr_penalty` | `config['rr_penalty']['penalty_per_person']`. Default 5.0. Peak'te `peak_penalty`, gece `× night_multiplier`. |
+| `rr_penalty` | `config['rr_penalty']['penalty_per_person']`. Default 5.0. Peak slot'larda `peak_penalty`, gece slot'larında `× night_multiplier` ile büyütülür. |
 | `sc_penalty` | Her saat-bandı için `config['slot_cap']['bands'][i]['penalty']`. Default 50. |
 
-### Haftaiçinden farklı olarak
+### Somut örnek
 
-- **`n_days` çarpanı YOK** (tek gün, asimetri sorunu yok)
-- **Coverage shortfall terimi YOK** (Stage 4 yok → coverage sert kısıt)
-- **Balance penalty YOK** (haftasonu için config'de tanımlı değil)
+Diyelim çözüm sonrası:
+- 4 vardiya kullanıldı, toplam kişi 100 (her birinin maliyeti 1000) → maliyet = 100 × 1000 = **100 000**
+- 4 vardiyada `y[s] = 1` → küçük vardiya cezası = 4 × 3 = **12**
+- 30 slot'ta toplam 50 kişi excess → RR penalty = 50 × 5 = **250**
+- 2 slot'ta toplam 5 kişi sc_excess → slot cap penalty = 5 × 50 = **250**
+
+Toplam `Z = 100 000 + 12 + 250 + 250 = 100 512` — MIP bu değeri minimize ediyor.
 
 ---
 
@@ -417,13 +414,13 @@ MINIMIZE Z = Σ_s x[s] × cost(s)                       ← vardiya maliyeti
 
 | Sembol | Anlamı / Kaynağı |
 |---|---|
-| `erlang_need[slot]` | Erlang-C ile hesaplanan ihtiyaç (tek gün için). |
-| `s.slots` | Vardiya `s`'nin kapsadığı 30 dk slot listesi. |
-| `M` | Big-M sabiti, **500**. |
-| `min_per_shift` | Vardiya açıksa min kişi (`config['mip']['min_per_shift']`). |
+| `erlang_need[slot]` | Erlang-C ile hesaplanan ihtiyaç (o gün, o slot için kaç kişi gerekli). |
+| `s.slots` | Vardiya `s`'nin kapsadığı 30 dk slot listesi (örn. 08:00-17:00 → 16 slot, 30'ar dk). |
+| `M` | Big-M sabiti, **500**. Yeterince büyük üst sınır. |
+| `min_per_shift` | Vardiya açıksa min kişi (`config['mip']['min_per_shift']`). Default 13. |
 | `pt_available` | `config['part_time']['count'][queue]` — PT slot sayısı (örn. 42 kişi). |
 | `cap` | Slot cap tavanı: `ceil(erlang_need × max_ratio)`, en az 3. |
-| `r_min, r_max` | Outsource oranı min/max (`config['outsource_ratio'][queue]`). Haftasonu için **aktif**. |
+| `r_min, r_max` | Outsource oranı min/max (`config['outsource_ratio'][queue]`). Örn. min=0.55, max=0.65. |
 
 ### K1 — Coverage (SERT)
 
@@ -432,18 +429,40 @@ MINIMIZE Z = Σ_s x[s] × cost(s)                       ← vardiya maliyeti
   Σ_(s ∈ shifts, slot ∈ s.slots) x[s]  ≥  erlang_need[slot]
 ```
 
-**Haftaiçinden fark:** shortfall slack değişkeni **YOK**. Coverage karşılanamazsa
-MIP `INFEASIBLE` döner — Stage 4 gibi kurtarıcı mekanizma yok.
+**Türkçesi:** Her slot için, o slot'u kapsayan tüm vardiyalardaki toplam kişi
+sayısı, o slot'taki Erlang ihtiyacından **az olamaz**.
+
+**Sert kısıt:** Coverage karşılanamazsa MIP `INFEASIBLE` döner.
+
+**Örnek:** 10:00-10:30 slot'unu kapsayan 3 vardiya var: `08:00-17:00_inh`,
+`09:00-18:00_out`, `10:00-19:00_out`. Erlang ihtiyacı bu slot'ta 80 kişi.
+MIP:
+```
+x[08:00-17:00_inh] + x[09:00-18:00_out] + x[10:00-19:00_out]  ≥  80
+```
+30 + 25 + 25 = 80 ✓ (tam karşılanıyor)
+ya da 30 + 30 + 30 = 90 ✓ (10 kişi excess, RR penalty alır)
 
 ### K2 — min_per_shift (Big-M)
 
 ```
-x[s] ≤ M × y[s]              (M = 500)
+x[s] ≤ M × y[s]                  (M = 500)
 x[s] ≥ min_per_shift × y[s]
 ```
 
-Haftaiçindeki gibi ama **per-shift override yok** (saat-özel istisna config
-weekend için tanımlı değil).
+İki kısıt birlikte `y[s]`'nin doğru çalışmasını zorlar:
+
+| `y[s]` | İlk kısıt | İkinci kısıt | Sonuç |
+|---|---|---|---|
+| 0 | `x[s] ≤ 0` | `x[s] ≥ 0` | `x[s] = 0` (vardiya kapalı, kişi yok) |
+| 1 | `x[s] ≤ 500` | `x[s] ≥ 13` | `13 ≤ x[s] ≤ 500` (vardiya açık, en az 13 kişi) |
+
+**Neden:** Operasyonel olarak küçük vardiya verimsiz. 3-5 kişilik bir
+vardiya açmak yerine MIP ya en az 13 ya da hiç koymak zorunda.
+
+**Örnek:** `09:00-18:00_out` için MIP 8 kişi istese bile, kısıt nedeniyle
+ya 0 ya 13+ koyacak. 13 koyarsa amaç fonksiyonuna 5 fazla kişi maliyeti
++ RR penalty ekler — yine de uygunsa öyle yapar.
 
 ### K3 — Part-time toplamı SABİT
 
@@ -452,77 +471,144 @@ config['part_time']['enabled'] == True ise:
   Σ_(s ∈ pt_shifts) x[s]  ==  pt_available
 ```
 
-PT kişi sayısı **tam olarak** `config['part_time']['count'][queue]` kadar
-olmalı — ne fazla ne az. Eşitlik kısıtı.
+**Türkçesi:** Tüm PT vardiyalarındaki kişilerin toplamı, mevcut PT slot
+sayısına **eşit** olmalı. Ne fazla ne az.
 
-### K4 — Outsource Ratio (haftaiçinden farklı: AKTİF)
+**Neden eşitlik:** PT havuzundaki tüm kişiler çalışacak — kullanılmayan PT
+slot kalmaması isteniyor. Aynı zamanda PT kapasitesinden fazla atama da
+yapılamaz (gerçek kişi yok).
+
+**Örnek:** kitle için `pt_available = 42`. PT vardiyaları
+`10:00-14:00_pt`, `13:00-17:00_pt`, `16:00-20:00_pt`. MIP:
+```
+x[10:00-14:00_pt] + x[13:00-17:00_pt] + x[16:00-20:00_pt]  ==  42
+```
+Bunlar arasında nasıl dağıtacağı MIP'in kararı — örn. 15+12+15 = 42 ✓
+
+### K4 — Outsource Ratio
 
 `config['outsource_ratio'][queue]` set edilmişse:
 
 ```
-(1 - r_min) × Σ x[out]  ≥  r_min × (Σ x[in] + Σ x[pt])
-(1 - r_max) × Σ x[out]  ≤  r_max × (Σ x[in] + Σ x[pt])
+(1 − r_min) × Σ x[out]  ≥  r_min × (Σ x[in] + Σ x[pt])
+(1 − r_max) × Σ x[out]  ≤  r_max × (Σ x[in] + Σ x[pt])
 ```
 
-`r_min, r_max` config'den (örn. min=0.55, max=0.65 → outsource %55-65 arası).
+**Türkçesi:** Toplam kişiler içinde outsource oranı `r_min ≤ oran ≤ r_max`
+aralığında kalmalı.
 
-Inhouse-only kuyruklarda (gold, kurumsal) bu kısıt **devre dışı**.
+**Örnek:** `r_min = 0.55`, `r_max = 0.65` — outsource'un toplamın
+%55-65'i arasında olmasını istiyoruz.
+
+Toplam = 200, outsource = 130, inhouse+pt = 70 → oran = 130/200 = **0.65** ✓
+Toplam = 200, outsource = 100, inhouse+pt = 100 → oran = 0.50 ✗ (çok düşük)
+
+**Inhouse-only kuyruklar:** gold ve kurumsal'ın outsource çalışanı yok →
+`config['outsource_ratio']` bu kuyruklar için tanımsız → bu kısıt **eklenmez**.
 
 ### K5 — Alt-Kuyruk Min
 
-Haftaiçi K4 ile birebir aynı mantık — `inhouse_only_subqueues` ve
-`outsource_only_subqueues` config'leri.
+Bazı kuyruklarda hem inhouse hem outsource çalışıyorsa, MIP istemediği
+takdirde tamamen birine yığabilir. Bunu önlemek için:
+
+```
+config['inhouse_only_subqueues'] içindeki kuyruklar için:
+  Σ x[in]  ≥  threshold_in × Σ erlang_need
+
+config['outsource_only_subqueues'] içindeki kuyruklar için:
+  Σ x[out]  ≥  threshold_out × Σ erlang_need
+```
+
+**Türkçesi:** Belirli alt-kuyruklarda minimum bir miktar inhouse (ya da
+outsource) bulunmalı. `threshold` küçük bir sayı (örn. 0.1) — toplam
+ihtiyacın belli bir yüzdesi.
+
+**Örnek:** kurumsal kuyruğunda `threshold_in = 0.3` → toplam Erlang
+ihtiyacı 300 ise, en az 90 kişi inhouse olmalı.
 
 ### K6 — RR Penalty (Soft)
 
-Haftaiçi K5 ile aynı — peak slot çarpanı, gece çarpanı dahil.
+```
+∀ slot:
+  excess[slot]  ≥  Σ_(s ∈ shifts, slot ∈ s.slots) x[s]  −  erlang_need[slot]
+```
+
+**Türkçesi:** O slot'taki excess değişkeni, "kapsanan kişiler − Erlang
+ihtiyacı"ndan büyük olmalı. MIP bu `excess`'i amaç fonksiyonunda
+minimize etmeye çalışır.
+
+Aslında bu `max(covered − need, 0)` davranışını sağlar — `excess ≥ 0`
+zaten lower bound'la garantili, böylece negatif değer alamaz.
+
+**Örnek:** Slot 11:30 için Erlang ihtiyacı = 75, kapsanan = 88.
+```
+excess[11:30] ≥ 88 − 75 = 13
+```
+MIP `excess[11:30]`'ü minimize etmek istediği için tam 13'te tutar.
+Amaç fonksiyonuna `13 × rr_penalty` (varsayalım 5 × peak çarpanı = 50
+→ 13 × 50 = 650) ekler.
 
 ### K7 — Slot Cap (Soft)
 
-Haftaiçi K6 ile aynı — `slot_cap.bands` ile saat bantları.
+```
+∀ slot:
+  cap[slot]  =  max(3, ceil(erlang_need[slot] × max_ratio))
+  sc_excess[slot]  ≥  Σ_(s, slot ∈ s.slots) x[s]  −  cap[slot]
+```
 
-### K8 — Balance Penalty: YOK
-### K9 — Stage 4 Shortfall: YOK
-### K10 — Per-day Kadro: YOK (tek gün, kadro scalar)
+**Türkçesi:** Her slot için bir tavan hesaplanır — Erlang ihtiyacının
+`max_ratio` katı (saat bandına göre değişir, örn. 1.2 = %120). Bu
+tavanı aşan kişi sayısı `sc_excess` ile cezalandırılır.
+
+**Örnek:** Slot 14:00 için `erlang_need = 50`, `max_ratio = 1.2`
+→ `cap = ceil(60) = 60`. Kapsanan = 72 ise:
+```
+sc_excess[14:00] ≥ 72 − 60 = 12
+```
+Penalty: `12 × 50 = 600` (yüksek caydırıcılık, slot tavanını aşmak pahalı).
 
 ---
 
-## 4.4 Davranışsal Sonuçları
+## 4.4 Çıktı Davranışı
 
-Haftasonu pipeline'ının çıktısında dikkat:
+Haftasonu pipeline'ı tek geçişte çalışır — alternatif aşama (fallback)
+yok. Çıktıdaki sonuç alanları şu şekildedir:
 
-| Alan | Haftaiçi (V9) | Haftasonu |
-|---|---|---|
-| `mip_info_stage1` | Var (surplus öncesi) | **YOK** (MIP1 ≡ MIP2) |
-| `total_shortfall` | 0 ya da pozitif | **Her zaman 0** |
-| `shortfall_by_slot` | Var olabilir | **Yok** |
-| `solution_stage` | `'STAGE 1: original'` vs. | **Yok** |
-| `surplus_added` | Var olabilir | **Yok** |
-| `_config` | Yok | **Var** (merged override) |
+| Alan | Değer |
+|---|---|
+| `total_shortfall` | **Her zaman 0** (coverage sert kısıt — karşılanamazsa MIP INFEASIBLE döner, sonuç da yoktur) |
+| `shortfall_by_slot` | **Yok** (shortfall slack değişkeni yok) |
+| `mip_info_stage1` | **Yok** (tek MIP koşturuluyor) |
+| `solution_stage` | **Yok** (fallback yok) |
+| `surplus_added` | **Yok** (kadro tavanı altına surplus dağıtımı yok) |
+| `_config` | **Var** (kullanılan merged config — debug için) |
 
 Excel'deki **RR Raporu** ve **Hafta** sheet'lerinde haftasonu satırlarında
-MIP1 = MIP2, Surplus = 0, Eksik = 0 görünmesi normal. `_compute_rr_metrics_for_day`
-helper'ı bunları doğru sarmalıyor (Bölüm 6.5).
+MIP1 = MIP2, Surplus = 0, Eksik = 0 görünmesi normal.
+`_compute_rr_metrics_for_day` helper'ı bunları doğru sarmalıyor
+(bkz. Bölüm 6.5).
 
 ---
 
-## 4.5 Pipeline farkları
+## 4.5 Pipeline Akışı
 
 ```
-Haftaiçi: run_week_all_queues(5 gün)
-            → 4 aşamalı fallback ile optimize_week çağırır
-            → _distribute_surplus_per_day ile surplus eklenir
-            → Stage 4 garantili çözüm
+optimize_queue(gün, kuyruk)
+  ↓ tek MIP çağrısı, tek deneme
+  ↓ çözerse → x[s], y[s] değerleri ile sonuç döner
+  ↓ INFEASIBLE → sonuç None, kuyruk için çözüm yok
+```
 
-Haftasonu: run_all_queues_forecast(1 gün, kuyruk başına)
-            → run_queue_pipeline_forecast içinde optimize_queue çağırır
-            → Tek deneme, fallback yok
-            → INFEASIBLE olursa o kuyruk için sonuç None
+`run_all_queues_forecast(gün)` her kuyruk için sırayla `optimize_queue`
+çağırır:
+```
+for queue in ['kitle', 'kurumsal', 'gold']:
+    result[queue] = optimize_queue(gün, queue, config)
 ```
 
 Aylık akışta (`run_month_forecast`):
-- Pzt-Cum bloklar `run_week_all_queues` ile
-- Cmt/Pzr günler **tek tek** `run_all_queues_forecast` ile
+- Pzt-Cum bloklar → `run_week_all_queues` (haftaiçi MIP, Bölüm 3)
+- Cmt/Pzr günler → her gün tek tek `run_all_queues_forecast` çağrılır
 
 ---
 
