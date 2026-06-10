@@ -91,9 +91,9 @@ CONFIG_WEEKDAY = {
     'forecast_cols': {
         'datetime':       'model_data_date',   # tam timestamp kolon adı
         'date':           'truncddate',         # tarih kolon adı
-        'kitle_total':    'KITLE_NOF_CALL',
-        'kurumsal_total': 'KURUMSAL_NOF_CALL',
-        'gold_total':     'GOLD_NOF_CALL',
+        'kitle_total':    'kitle_nof_call',
+        'kurumsal_total': 'kurumsal_nof_call',
+        'gold_total':     'gold_total_call',
     },
 
     # ---- AHT ----
