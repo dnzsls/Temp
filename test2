@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-AGENT ATAMA MOTORU — tek dosya akışı (hücre hücre, detaylı print)
+AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 ==================================================================
 2. aşama: aylık modelin kova-sayılarına İSİMLİ inhouse agent oturtma.
 
 Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
-`python3 agent_motoru.py` ile baştan sona çalışır.
+`python3 agent_detayli_model.py` ile baştan sona çalışır.
 
 KAPSAM (şu an = Adım 1):
   AKTİF kısıtlar : coverage (sert), günde ≤1 vardiya, izin bloğu,
@@ -42,7 +42,7 @@ AGENT_PATH  = ""               # "" → DUMMY agent master üret (xlsx/csv yolu 
 DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 
 print("=" * 70)
-print(f"AGENT ATAMA MOTORU — kuyruk={QUEUE}  hafta_index={WEEK_INDEX}")
+print(f"AGENT DETAYLI MODEL — kuyruk={QUEUE}  hafta_index={WEEK_INDEX}")
 print(f"  PKL_PATH   = {PKL_PATH or '(boş → dummy)'}")
 print(f"  AGENT_PATH = {AGENT_PATH or '(boş → dummy)'}")
 print("=" * 70)
@@ -51,7 +51,7 @@ print("=" * 70)
 # %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
 def _dummy_results():
     """Gerçek results formatında küçük bir hafta (Pzt–Cum). S3 = outsource
-    (motor süzecek), S1/S2 = inhouse."""
+    (model süzecek), S1/S2 = inhouse."""
     sc = {
         "S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
         "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"},
@@ -113,7 +113,7 @@ def talep_cikar(results, queue, week_dates):
         sc = mi.get("shift_coverage", {})
         for shift, cnt in mi.get("assignments", {}).items():
             if cnt <= 0 or sc.get(shift, {}).get("company") != "inhouse":
-                continue                          # outsource / part_time → motorun işi değil
+                continue                          # outsource / part_time → modelin işi değil
             demand[ds][shift] = cnt
             sc_by_day[ds][shift] = sc[shift]
             shifts.add(shift)
