@@ -1,297 +1,162 @@
-# AGENT ATAMA MOTORU — Tasarım & Gereksinim Spec'i
-
-Aylık vardiya planlamasının **2. aşaması**: aylık modelin ürettiği "hangi gün,
-hangi vardiyada kaç kişi gerekli" çıktısına **isimli agent oturtma** (personnel
-rostering). Bu döküman kod değil; motor yazılmadan önce kararlaştırılan kapsam,
-girdiler, kavramlar, kısıtlar ve mimariyi sabitler.
-
-> Durum: spec kilitli, koda geçilmedi. Açık kalan birkaç nokta için bkz. Bölüm 8.
-
----
-
-## 1. BAĞLAM — Sistemin Neresindeyiz
-
-Mevcut sistem (1. aşama) üç akıştan oluşuyor:
-
-- `forecast_monthly_run_v9_final` — aylık orkestratör
-- `forecast_weekly_weekday_pipeline_final` — haftaiçi stable MIP
-- `weekend_forecast_final` — haftasonu MIP (gün gün)
-
-Çıktısı: `results[date][queue]` içinde her vardiya için **kaç kişi** gerektiği
-(`assignments = {shift_key: kişi_sayısı}` + her vardiyanın `start/end/company`'si).
-Burada henüz **kimse isimli değil**; "inhouse/outsource/part_time" birer şirket
-tipi, kişi değil.
-
-**Bu spec'in konusu:** O sayı-kovalarına isimli, inhouse, tam zamanlı agent
-yerleştirmek. Yani "2026-02-03 Salı, kitle, 09:00-18:00 → 30 kişi" kovasına
-hangi 30 kişinin gireceğine karar vermek.
-
-```
-1. AŞAMA (var)                          2. AŞAMA (bu spec)
-─────────────────                       ─────────────────
-Çağrı tahmini                           Aylık kova-sayıları
-   → Erlang                                + Agent master
-   → MIP (kaç kişi)          ───────►      + Tatil takvimi
-   → kova-sayıları                          → CP-SAT (kim çalışacak)
-                                            → isimli aylık roster
-```
-
----
-
-## 2. KAPSAM
-
-**Sadece inhouse tam zamanlı agentlar.**
-
-- **PT (part-time) hariç:** Sabit havuz + farklı müsaitlik mantığı ayrı bir
-  problem; sonra ayrı ele alınacak.
-- **Outsource hariç:** İç dağılımı vendor yapar; bize sadece kova-sayısı teslim
-  etmek yeterli, isimli atama gerekmiyor.
-
-**Kuyruk ayrışması:** Üç kuyruk (kitle / gold / kurumsal) birbirine yardımlaşmaz;
-her agent tek bir kuyruğa aittir. Dolayısıyla problem **üç bağımsız alt-probleme**
-ayrışır ve ayrı ayrı çözülür. (gold ve kurumsal küçük ve inhouse-only; kitle
-inhouse büyük olan.)
-
-> Not: "lokasyon" ayrı bir kısıt değil — kitle/gold/kurumsal zaten kuyruk/lokasyon
-> ayrımını taşıyor. Agent master'da agentın hangi kuyruğa ait olduğu bilgisi gelir.
-
----
-
-## 3. GİRDİLER
-
-### 3.1 Agent master (inhouse tam zamanlı)
-
-| Alan | Açıklama | Zorunluluk |
-|------|----------|------------|
-| `agent_id` | Benzersiz kimlik | Olmazsa olmaz |
-| `kuyruk` | kitle / gold / kurumsal | Olmazsa olmaz |
-| `takim` | Kuyruk içindeki alt-grup (bkz. 4.4) | Olmazsa olmaz |
-| `calisma_tipi` | `sabit` / `esnek` | Olmazsa olmaz |
-| `sabit_vardiya` | calisma_tipi=sabit ise saat aralığı (ör. `09:00-18:00`) | Sabitse zorunlu |
-| `izin_gunleri` | Ay içindeki planlı izin tarihleri (liste) | Olmazsa olmaz |
-| `hamile` | Hafta sonu + resmi tatil çalışamaz bayrağı | Önemli |
-
-Takım her koşuda **verilen listenin sabit yansıması**dır. İstifa / takım değişikliği
-olursa yeni agent listesiyle güncellenir; motor koşu içinde takımı sabit alır.
-
-### 3.2 Resmi tatil takvimi
-
-Ayrı girdi (agent tablosunda değil): o aya ait resmi tatil tarihleri listesi.
-
-### 3.3 Aylık model çıktısı
-
-1. aşamadan gelen `results[date][queue]`. Motor için kritik alanlar:
-- `assignments = {shift_key: kişi}` — inhouse kovaları (company=inhouse filtreli)
-- her shift'in `start` / `end`
-- `MIP1` (ihtiyaç) ve `MIP2` (fazlalık sonrası) — off günü yerleşimi için
-  (bkz. 5.2 ve 4.3).
-
----
-
-## 4. TEMEL KAVRAMLAR
-
-### 4.1 Sabit vs esnek agent
-
-- **Sabit:** Vardiyası önceden belli, değişmez (ör. her zaman 09:00-18:00). Motor
-  karar vermez; takvime **önceden gömülür** ve o vardiyanın ihtiyacından düşülür.
-  Motora sadece **rezidüel ihtiyaç** kalır.
-- **Esnek:** Hangi gün hangi vardiyada çalışacağına **motor karar verir**.
-  Rotasyona girer.
-
-### 4.2 Mesai vs norm çalışma (swap)
-
-Hafta sonu açığını kapatmanın iki yolu — ayrımı kritik:
-
-- **Mesai:** Hafta toplam 6 güne çıkarsa, 6. gün (hep bir hafta sonu günü)
-  mesaidir. **Aylık 2 kotasından** düşer.
-- **Norm çalışma / swap:** Hafta içinden gün(ler) izinle alınıp yerine hafta sonu
-  çalıştırılır; toplam **5 günde kalır** → mesai değildir, **kotaya saymaz**.
-
-Açık kapatma sırası: **önce swap** (bedava, kota harcamaz), yetmezse **mesai**
-(kişi başı 2 ile sınırlı).
-
-Örnekler:
-- Çar off + Cmt+Pzr çalışma = 6 gün → 1 norm + 1 mesai.
-- Sal+Çar off + Cmt+Pzr çalışma = 5 gün → 2 norm, 0 mesai.
-
-### 4.3 Off günü yerleşimi (talep gevşekliği)
-
-Bir agent normal haftada 5 gün çalışır, 2 gün off. Off günleri rastgele değil,
-**talebin en gevşek olduğu güne** oturtulur: bir gün MIP1≈MIP2 (ucu ucuna
-yetiyorsa) oradan kişi çekilmez; MIP2−MIP1 fazlalığı yüksek olan günlerden,
-fazlalıkla **orantılı** olarak çekilir.
-
-### 4.4 Takım
-
-Kuyruğun içinde sabit bir alt-grup. Tercih, **takımın aynı vardiyada birlikte
-çalışması**.
-
-- Birliktelik **o gün çalışan üyeler** için geçerli — off olan üye takımı bozmuş
-  sayılmaz. (Ali off'sa görmezden gelinir; Ali çalışıyorsa takımıyla aynı
-  vardiyada olmalı.)
-- **Tolerans ±~5:** Bir vardiyadaki takım mevcudu ile o kovanın talebi arasındaki
-  sapma ≤ 5. Takım boyutu N, kova talebi C ise `N−5 ≤ C ≤ N+5` aralığında o takım
-  o vardiyaya yazılabilir. Çok büyük kovalarda birden fazla takım üst üste biner,
-  toleransa toplam üzerinden bakılır.
-
-> Önemli: Takım bir **vardiya bloğu**dur, **izin bloğu değil**. Çalışılan günlerde
-> aynı vardiya; ama off günleri, hafta sonu nöbeti, izin, mesai/swap **bireysel**
-> (kişiden kişiye değişir).
-
-### 4.5 Akşam / gece bandı
-
-Başlangıcı **17:00 / 18:00 / 19:00 / 24:00** olan vardiyalar. "Ayda en fazla 2
-hafta gece" kuralı bu bandı kapsar. 24:00 = gece vardiyası.
-
----
-
-## 5. KISITLAR
-
-### 5.1 Sert kısıtlar (asla ihlal edilmez)
-
-1. **Coverage:** Her gün × vardiya için rezidüel ihtiyaç (sabitler düşülmüş)
-   karşılanır.
-2. **Günde tek vardiya.**
-3. **Haftalık tavan:** Bir hafta (Pzt-Pzr) içinde en fazla 6 çalışma günü, en az
-   1 off.
-4. **Ardışıklık:** En fazla 6 ardışık çalışma günü (hafta sınırını aşan kayan
-   pencere) — 7 gün peş peşe yasak.
-5. **Mesai kotası:** Ay boyunca mesai (kotaya sayan hafta sonu günü) ≤ 2.
-6. **Günlük süre:** ≤ 11 saat.
-7. **Hamile:** Hafta sonu ve resmi tatil çalışamaz.
-8. **Dinlenme geçişi:** Gece (24:00) vardiyasından sonra ertesi gün erken/sabah
-   vardiyası yazılamaz.
-9. **Gece tavanı:** Ay içinde en fazla 2 hafta akşam/gece (17/18/19/24 başlangıçlı)
-   vardiyası.
-10. **İzin-blok:** 5 veya 10 günlük izinde, iznin önündeki ve sonundaki hafta sonu
-    çiftleri (Cmt+Pzr) off verilir.
-11. **Takım toleransı:** Bir vardiyadaki takım mevcudu ile kova talebi arasındaki
-    sapma ≤ ~5 (sert tavan).
-
-### 5.2 Soft hedefler (mümkünse sağla, gerekirse feda et)
-
-1. **Takım birlikteliği:** O gün çalışan takım üyeleri mümkünse aynı vardiyada.
-2. **Çift hafta sonu off:** Ayda bir tam hafta sonu (Cmt+Pzr birlikte) off — tüm
-   tam zamanlı agentlar.
-3. **Yük adaleti:** Hafta sonu / gece / mesai / swap sayıları agentlar arası
-   dengeli (aynı kişiye yığılmasın). Gerekirse swap için de sert kota eklenebilir.
-4. **Off yerleşimi:** Off günlerini talebin gevşek olduğu güne (MIP2−MIP1
-   fazlalığı yüksek) oturt.
-
----
-
-## 6. ÇÖZÜM MİMARİSİ
-
-### 6.1 Neden "ay × agent" tek takvim
-
-Kısıtların çoğu ay boyunca **biriken sayaçlar**: aylık mesai ≤ 2, ≤ 2 hafta gece,
-ayda bir çift hafta sonu, 6-ardışık-gün penceresi hafta sınırını aşıyor. Haftalar
-ayrı çözülürse bu sayaçlar kırılır. Bu yüzden çözüm birimi **bir agent için tüm
-ay**.
-
-### 6.2 Neden CP-SAT (OR-Tools)
-
-- 1. aşama (kaç kişi) **doğrusal/maliyet** problemi → MIP (PuLP) doğru tercihti.
-- 2. aşama (kim çalışacak) **mantıksal/kombinatoryal**: ardışıklık, sayaç,
-  "şunlardan en fazla 2'si", "gece sonrası sabah yok" gibi kurallar. Bunlar MIP'te
-  big-M ile hantal; **CP-SAT** bunları doğrudan ifade eder. Rostering problemleri
-  endüstride neredeyse hep CP-SAT ile çözülür.
-
-Aynı "değişken tanımla → kısıt ekle → amaç optimize et" mantığı; sadece alet
-değişiyor (`solver.Add(...)`), yeni paradigma değil.
-
-### 6.3 İki granülarite (takım katmanı + agent katmanı)
-
-Takım birlikteliği sayesinde hafta içi atama büyük ölçüde **"hangi takım → hangi
-vardiya"** problemine dönüşür (agent sayısı yerine takım sayısı — çok daha küçük
-karar uzayı).
-
-- **Takım katmanı:** Hafta içi vardiya yerleşimi. Takımları boyutlarına uyan
-  kovalara paketle (bin-packing tadında). ±tol sert, birliktelik soft.
-- **Agent katmanı:** Bireysel olan her şey — off günleri, hafta sonu/mesai/swap
-  rotasyonu, izin, hamile, 6-ardışık-gün, 2-hafta-gece, kişisel adalet sayaçları.
-
-İkisi **tek bir CP-SAT modelinde** birlikte çözülür; bu sadece düşünme katmanı.
-
-### 6.4 Akış
-
-```
-GİRDİLER
-  Aylık model çıktısı (kova + MIP1/MIP2)
-  Agent master (inhouse tam zamanlı)
-  Resmi tatil takvimi
-        │
-        ▼
-ÖN-İŞLEME
-  • Kuyruğa göre üçe ayır
-  • Sabit agentları takvime göm → rezidüel ihtiyaç çıkar
-  • Müsaitlik bloklamaları: izin, hamile hafta sonu/tatil,
-    izin-blok komşu hafta sonları
-        │
-        ▼
-CP-SAT MOTORU (ay × agent, kuyruk başına)
-  Karar değişkeni: x[agent, gün, vardiya] ∈ {0,1}
-  + takım-gruplama değişkenleri
-  Sert kısıtlar (5.1) + Soft hedefler (5.2)
-        │
-        ▼
-ÇIKTILAR
-  • Aylık roster (agent × gün → vardiya / off)
-  • Coverage kontrolü (isimli atama sonrası sayılar tutuyor mu)
-  • Adalet raporu (kişi başı hafta sonu/gece/mesai/swap)
-```
-
-### 6.5 Çalışma günü mantığı (özet)
-
-- Normal hafta = 5 çalışma günü.
-- Hafta sonu açığı: önce **swap** (kota harcamaz), yetmezse **mesai** (aylık ≤ 2).
-- Sabit agentlar önceden gömülür; motor esnekleri + takım yerleşimini çözer.
-
----
-
-## 7. ÇIKTILAR
-
-| Çıktı | İçerik |
-|-------|--------|
-| Aylık roster | agent × gün matrisi: o gün hangi vardiya ya da off |
-| Coverage kontrolü | Her gün × vardiya: isimli atama sonrası talep tutuyor mu, açık varsa nerede |
-| Adalet raporu | Kişi başı sayaçlar: hafta sonu, gece, mesai, swap sayıları — yük dengeli mi |
-
----
-
-## 8. AÇIK / NETLEŞTİRİLECEK NOKTALAR
-
-Bunlar mimariyi değiştirmez ama nihai kuralı netleştirince güncellenir:
-
-1. **Resmi tatil (hamile dışı):** Şimdilik "normal gün" varsayıldı. Ek ücret /
-   ayrı kota / hafta sonu gibi davranış olabilir — netleşince güncellenecek.
-2. **Gece→sabah dinlenme eşiği:** "Sabah/erken vardiya" hangi başlangıç saatinden
-   itibaren? (Eşik netleşince yasak-geçiş tam tanımlanır.) 24:00 vardiyası zaten
-   sabaha sarktığı için fiziksel olarak çoğunu engelliyor.
-3. **Swap adalet kotası:** Mesai ayda 2 ile sınırlı; swap'a şimdilik sert tavan
-   yok. Adaletsizliğe yol açarsa sert kota eklenecek ("kişi başı ayda en fazla N
-   swap" gibi).
-4. **Takım toleransı tam değeri:** ±5 başlangıç değeri; denenip ayarlanacak.
-
----
-
-## 9. YOL HARİTASI
-
-1. **Prototip — tek kuyruk, tek hafta:** Minimal CP-SAT — takım→vardiya yerleşimi
-   + off günleri + coverage. Dummy agent master + gerçek aylık çıktı formatı.
-2. **Hafta sonu mantığı:** swap + mesai + kota sayaçları.
-3. **Aya genişletme:** ay×agent sayaçları (gece, mesai, çift hafta sonu, ardışık
-   gün), izin-blok, hamile.
-4. **Adalet katmanı:** yük dengeleme cezaları + adalet raporu.
-5. **Üç kuyruğa orkestrasyon + Excel export** (1. aşamadaki rapor formatına
-   benzer).
-
----
-
-## 10. İLİŞKİLİ DOSYALAR
-
-- `forecast_monthly_run_v9_final.py` — aylık orkestratör (girdi üreten)
-- `forecast_weekly_weekday_pipeline_final.py` — haftaiçi MIP
-- `weekend_forecast_final.py` — haftasonu MIP
-- `V9_MODEL_REHBERI.md` — 1. aşama model rehberi
-- `agent_atama_motoru_spec.md` — **bu döküman** (2. aşama spec)
+# -*- coding: utf-8 -*-
+"""
+ADIM 1 — CP-SAT iskeleti + saf COVERAGE
+========================================
+Amaç: Agent atama motorunun en küçük çekirdeğini görmek.
+  - Karar değişkeni tanımla
+  - Kısıt ekle
+  - Çöz
+  - Roster (agent × gün → vardiya) yazdır
+
+Bu adımda SADECE iki sert kısıt var (spec 5.1-1 ve 5.1-2):
+  (1) Coverage : her gün × vardiya için talep KADAR kişi atanır.
+  (2) Günde tek vardiya.
+
+Henüz YOK (sonraki adımlarda gelecek): off günleri, takım, hafta sonu,
+aylık sayaçlar, adalet. Bu adımda herkes 5 günün hepsinde çalışır.
+
+Veri, GERÇEK aylık model çıktısının (results[date][queue]['mip_info'])
+formatını birebir taklit eder; böylece ileride gerçek çıktıyı takmak kolay.
+"""
+
+from ortools.sat.python import cp_model
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1) GİRDİ — aylık model çıktısı (dummy ama gerçek formatta)
+# ─────────────────────────────────────────────────────────────────────────
+# Gerçekte bu yapı: results[date_str][queue]['mip_info']
+#   'assignments'    = {shift_key: kişi}                  → MIP2 (talep)
+#   'shift_coverage' = {shift_key: {start,end,company}}   → vardiya bilgisi
+# Burada tek hafta (Pzt..Cum) için elle örnek kuruyoruz.
+
+DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum"]   # gün indeksleri 0..4
+
+# Her gün için aylık model çıktısı. company=inhouse olanlarla ilgileniyoruz.
+MONTHLY_OUTPUT = {
+    "Pzt": {
+        "assignments":    {"S1": 4, "S2": 2},
+        "shift_coverage": {"S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
+                           "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"}},
+    },
+    "Sal": {
+        "assignments":    {"S1": 3, "S2": 3},
+        "shift_coverage": {"S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
+                           "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"}},
+    },
+    "Çar": {
+        "assignments":    {"S1": 4, "S2": 2},
+        "shift_coverage": {"S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
+                           "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"}},
+    },
+    "Per": {
+        "assignments":    {"S1": 2, "S2": 4},
+        "shift_coverage": {"S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
+                           "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"}},
+    },
+    "Cum": {
+        "assignments":    {"S1": 3, "S2": 3},
+        "shift_coverage": {"S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
+                           "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"}},
+    },
+}
+
+# Agent master (dummy) — Adım 1'de hepsi tek kuyruk, esnek, izin yok.
+AGENTS = ["A1", "A2", "A3", "A4", "A5", "A6"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2) ÖN-İŞLEME — gerçek formattan motorun ihtiyacı olan talebi süz
+# ─────────────────────────────────────────────────────────────────────────
+# demand[day][shift] = inhouse talebi  (company != inhouse olanları atla)
+def build_demand(monthly):
+    demand = {}
+    shifts = set()
+    for day in DAYS:
+        mi = monthly[day]
+        sc = mi["shift_coverage"]
+        demand[day] = {}
+        for shift, cnt in mi["assignments"].items():
+            if sc.get(shift, {}).get("company") != "inhouse":
+                continue                     # outsource / part_time motorun işi değil
+            demand[day][shift] = cnt
+            shifts.add(shift)
+    return demand, sorted(shifts)
+
+
+demand, SHIFTS = build_demand(MONTHLY_OUTPUT)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 3) CP-SAT MODELİ
+# ─────────────────────────────────────────────────────────────────────────
+model = cp_model.CpModel()
+
+# --- Karar değişkeni: x[agent, gün, vardiya] ∈ {0,1} ---
+# 1 ise "o agent o gün o vardiyada çalışıyor".
+x = {}
+for a in AGENTS:
+    for day in DAYS:
+        for s in SHIFTS:
+            x[(a, day, s)] = model.NewBoolVar(f"x_{a}_{day}_{s}")
+
+# --- KISIT 1: Coverage (sert) — her gün×vardiya talep kadar kişi ---
+# spec 5.1-1
+for day in DAYS:
+    for s in SHIFTS:
+        model.Add(
+            sum(x[(a, day, s)] for a in AGENTS) == demand[day].get(s, 0)
+        )
+
+# --- KISIT 2: Günde tek vardiya (sert) ---
+# spec 5.1-2. Adım 1'de off yok → herkes her gün TAM 1 vardiya (== 1).
+# (Adım 2'de bunu "<= 1" yapıp off'a izin vereceğiz.)
+for a in AGENTS:
+    for day in DAYS:
+        model.Add(sum(x[(a, day, s)] for s in SHIFTS) == 1)
+
+# Adım 1'de amaç fonksiyonu yok — sadece feasibility (kısıtları sağlayan
+# herhangi bir çözüm). Amaç/optimizasyon sonraki adımlarda gelecek.
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4) ÇÖZ
+# ─────────────────────────────────────────────────────────────────────────
+solver = cp_model.CpSolver()
+status = solver.Solve(model)
+
+print("=" * 60)
+print("ADIM 1 — saf coverage")
+print("=" * 60)
+print(f"Çözüm durumu: {solver.StatusName(status)}")
+print(f"Vardiyalar: {SHIFTS}  |  Agentlar: {len(AGENTS)}")
+print()
+
+if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    print("⚠ Çözüm bulunamadı (INFEASIBLE). Talep ile agent sayısı tutmuyor olabilir.")
+    raise SystemExit
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5) ÇIKTI — Roster (agent × gün matrisi)
+# ─────────────────────────────────────────────────────────────────────────
+print("ROSTER (agent × gün → vardiya):")
+print(f"{'Agent':<8}" + "".join(f"{d:<7}" for d in DAYS))
+for a in AGENTS:
+    row = f"{a:<8}"
+    for day in DAYS:
+        cell = "off"
+        for s in SHIFTS:
+            if solver.Value(x[(a, day, s)]) == 1:
+                cell = s
+        row += f"{cell:<7}"
+    print(row)
+
+# --- Coverage kontrolü: isimli atama sonrası sayılar tutuyor mu? (spec Bölüm 7) ---
+print("\nCOVERAGE KONTROLÜ (atanan / talep):")
+print(f"{'Gün':<6}" + "".join(f"{s:>10}" for s in SHIFTS))
+for day in DAYS:
+    row = f"{day:<6}"
+    for s in SHIFTS:
+        atanan = sum(solver.Value(x[(a, day, s)]) for a in AGENTS)
+        row += f"{atanan:>4}/{demand[day].get(s, 0):<5}"
+    print(row)
