@@ -1,24 +1,8 @@
 import pandas as pd
 
-cols = df.columns.tolist()
-
-# Metin olması gereken sütunların adları (CREATE TABLE'daki VARCHAR2 olanlar)
-metin_sutunlari = set(
-    ['AGENT_USER_CODE', 'AGENT_NAME', 'TEAMLEADER_NAME', 'BOLUM',
-     'WORKING_MAIN_GROUP', 'LINE_BASED_MAIN_GROUP', 'DURUM']
-    + [f'GUN_{i}' for i in range(1, 31)]
-)
-
-rows = []
-for row in df.itertuples(index=False):
-    converted = []
-    for sutun_adi, v in zip(cols, row):
-        if pd.isna(v):
-            converted.append(None)
-        elif sutun_adi in metin_sutunlari:
-            converted.append(str(v))        # VARCHAR2 sütunu -> stringe çevir
-        elif hasattr(v, 'item'):
-            converted.append(v.item())      # numpy sayı -> python sayı
-        else:
-            converted.append(v)
-    rows.append(tuple(converted))
+for sutun in df.columns:
+    tipler = set()
+    for hucre in df[sutun]:
+        if not pd.isna(hucre):
+            tipler.add(type(hucre).__name__)
+    print(sutun, "->", tipler)
