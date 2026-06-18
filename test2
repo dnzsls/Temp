@@ -1,2 +1,23 @@
-gun_kolonlari = [f'GUN_{i}' for i in range(1, 31)]
-df[gun_kolonlari] = df[gun_kolonlari].fillna(0)
+import pandas as pd
+
+# 1) off_talebi kolonunu tamamen stringe çevir
+df['off_talebi'] = df['off_talebi'].apply(lambda x: None if pd.isna(x) else str(x))
+
+# 2) rows'u yeniden oluştur
+cols = df.columns.tolist()
+rows = []
+for row in df.itertuples(index=False):
+    converted = tuple(
+        None if pd.isna(v) else (v.item() if hasattr(v, 'item') else v)
+        for v in row
+    )
+    rows.append(converted)
+
+# 3) Oracle'a bas
+placeholders = ', '.join([f':{i+1}' for i in range(len(cols))])
+col_names = ', '.join(cols)
+query_x = f"INSERT INTO tablo_adi ({col_names}) VALUES ({placeholders})"
+
+curs = con_edw.cursor()
+curs.executemany(query_x, rows)
+con_edw.commit()
