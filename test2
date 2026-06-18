@@ -1,13 +1,24 @@
 import pandas as pd
-import numpy as np
 
-# 1) NaN -> None
-df_clean = df.where(pd.notna(df), None)
+cols = df.columns.tolist()
 
-# 2) numpy tiplerini (int64, float64) normal Python tiplerine indir
-def indir(v):
-    if isinstance(v, np.generic):
-        return v.item()
-    return v
+# Metin olması gereken sütunların adları (CREATE TABLE'daki VARCHAR2 olanlar)
+metin_sutunlari = set(
+    ['AGENT_USER_CODE', 'AGENT_NAME', 'TEAMLEADER_NAME', 'BOLUM',
+     'WORKING_MAIN_GROUP', 'LINE_BASED_MAIN_GROUP', 'DURUM']
+    + [f'GUN_{i}' for i in range(1, 31)]
+)
 
-df_clean = df_clean.map(indir)
+rows = []
+for row in df.itertuples(index=False):
+    converted = []
+    for sutun_adi, v in zip(cols, row):
+        if pd.isna(v):
+            converted.append(None)
+        elif sutun_adi in metin_sutunlari:
+            converted.append(str(v))        # VARCHAR2 sütunu -> stringe çevir
+        elif hasattr(v, 'item'):
+            converted.append(v.item())      # numpy sayı -> python sayı
+        else:
+            converted.append(v)
+    rows.append(tuple(converted))
