@@ -1,16 +1,10 @@
-import pandas as pd
-
 gun_kolonlari = [f'GUN_{i}' for i in range(1, 31)]
 
 for k in gun_kolonlari:
     yeni = []
     for hucre in df[k]:
         if pd.isna(hucre):
-            yeni.append(None)
+            yeni.append(0.0)            # null -> 0.0
         else:
-            yeni.append(str(hucre))
+            yeni.append(float(hucre))   # değeri float olarak bırak
     df[k] = yeni
-
-for sutun in gun_kolonlari:
-    tipler = set(type(h).__name__ for h in df[sutun] if not pd.isna(h))
-    print(sutun, "->", tipler)
