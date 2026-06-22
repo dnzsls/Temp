@@ -42,7 +42,6 @@ GİRDİLER (hepsi GERÇEK — dummy yok):
        gun_1 .. gun_30/31   1 → o tarih izinli (gun_N = çalışılan ayın N'inci günü)
 """
 
-import os
 import pickle
 import datetime as dt
 import pandas as pd
@@ -57,26 +56,30 @@ PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 
 DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 
-print("=" * 70)
-print(f"AGENT DETAYLI MODEL — kuyruk={QUEUE}  (çözüm birimi: TÜM AY)")
-print("=" * 70)
-
-
-def _flag(v):
-    """'1'/'0'/'' → bool"""
-    return str(v).strip() in {"1", "1.0", "evet", "true", "True"}
-
 
 # %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
-if not PKL_PATH or not os.path.exists(PKL_PATH):
-    raise SystemExit(f"[H1] PKL_PATH ayarlı değil / yok: {PKL_PATH!r}\n"
-                     f"     H0'da aylık model çıktısı pkl yolunu ver.")
+try:
+    with open(PKL_PATH, "rb") as f:
+        results = pickle.load(f)
+except Exception:
+    raise SystemExit("[H1] pickle yüklenemedi — PKL_PATH yanlış ya da dosya yok.")
 
-with open(PKL_PATH, "rb") as f:
-    results = pickle.load(f)
-print(f"[H1] Pickle yüklendi: {PKL_PATH}  →  {len(results)} gün")
-ok = sum(1 for r in results.values() if r and QUEUE in r and r[QUEUE])
-print(f"[H1] '{QUEUE}' kuyruğu OK gün sayısı: {ok}/{len(results)}")
+print(f"[H1] pickle yüklendi: {len(results)} gün")
+
+# 'planı olan gün' = o kuyrukta sonuç üretilmiş (feasible) gün; None/eksik olanlar hariç
+plani_olan = sorted(ds for ds, r in results.items() if r and QUEUE in r and r[QUEUE])
+print(f"[H1] '{QUEUE}' planı olan gün: {len(plani_olan)}/{len(results)}")
+
+# içerik önizlemesi (df.head gibi) — bir günün yapısı
+if plani_olan:
+    ds0 = plani_olan[0]
+    mi0 = results[ds0][QUEUE]["mip_info"]
+    print(f"[H1] örnek gün {ds0}: mip_info anahtarları = {list(mi0.keys())}")
+    print(f"     assignments (ilk 5): {dict(list(mi0.get('assignments', {}).items())[:5])}")
+    sc0 = mi0.get("shift_coverage", {})
+    if sc0:
+        k0 = next(iter(sc0))
+        print(f"     shift_coverage örnek: {k0} → {sc0[k0]}")
 
 
 # %% [HÜCRE 2] — AYIN GÜNLERİ (hafta içi + sonu) + TALEP ────────────────
@@ -147,6 +150,12 @@ print(f"[H3] Agent master (SQL): {len(df_agents)} satır, kolon: {list(df_agents
 def norm_kuyruk(v):
     """'kitle_cagrilar' → 'kitle'"""
     return str(v).strip().lower().replace("_cagrilar", "").replace("_cagri", "")
+
+
+def _flag(v):
+    """1/0 bayrak kolonunu bool'a çevirir: '1'/1/'evet' → True, gerisi False.
+       Tek başına çıktı basmaz; aşağıda flag kolonlarını okumak için kullanılır."""
+    return str(v).strip() in {"1", "1.0", "evet", "true", "True"}
 
 
 # --- 3a) Özel off tablosu → off_map[code] = set(date) -------------------
