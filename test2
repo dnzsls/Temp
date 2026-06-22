@@ -1,3 +1,25 @@
+# %% [HÜCRE 8] — MODEL GİRDİLERİNİ HAZIRLA ─────────────────────────────
+# df'leri CP-SAT'ın anlayacağı sade yapılara çevir (henüz model/kısıt yok).
+AGENTS = [str(c).strip() for c in df_tam["agent_user_code"]]
+
+# gün → o gün talebi olan vardiyalar  +  (gün, vardiya) → kaç kişi
+# saat[(gün, vardiya)] = (baslangic, bitis)  → saat-bazlı kısıtlar için (sonra)
+gun_vardiyalari = {}
+talep = {}
+saat = {}
+for _, row in df_talep.iterrows():
+    ds, v, kisi = row["tarih"], row["vardiya"], int(row["talep"])
+    gun_vardiyalari.setdefault(ds, []).append(v)
+    talep[(ds, v)] = kisi
+    saat[(ds, v)] = (row["baslangic"], row["bitis"])
+
+PLAN_GUNLER = sorted(gun_vardiyalari)              # talebi olan günler
+
+print(f"agent (tam zamanlı, {QUEUE}): {len(AGENTS)}")
+print(f"planlanacak gün: {len(PLAN_GUNLER)}  ({PLAN_GUNLER[0]} .. {PLAN_GUNLER[-1]})")
+print(f"(gün × vardiya) kova: {len(talep)}  | toplam kişi-slot: {sum(talep.values())}")
+
+
 # %% [HÜCRE 9] — CP-SAT MODEL + KARAR DEĞİŞKENLERİ ─────────────────────
 # x[(agent, gün, vardiya)] = 1 → o agent o gün o vardiyada çalışıyor.
 # İzinli gün için değişken AÇILMAZ (o gün atanamaz). Henüz kısıt yok.
