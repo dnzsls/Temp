@@ -1,5 +1,50 @@
-# %% [HÜCRE 6] — TAKIM KOLONU (groupname + teamleader_name) ─────────────
-df_tam["takim"] = (df_tam["groupname"].str.strip() + " | "
-                   + df_tam["teamleader_name"].str.strip())
-print(f"takım sayısı: {df_tam['takim'].nunique()}")
-print(df_tam[["agent_user_code", "groupname", "teamleader_name", "takim"]].head())
+# %% [HÜCRE 7] — İZİN GÜNLERİNİ BİRLEŞTİR ───────────────────────────────
+# Her agent için tek izin kümesi: özel-off + tekrarlı(Pzt/Cuma) + tam-ay(idari/doğum)
+
+# 1) özel-off tablosu → off_map[code] = {tarih}
+off_map = {}
+if df_off is not None:
+    for _, row in df_off.iterrows():
+        code = str(row["agent_user_code"]).strip()
+        gunler = set()
+        for c in gun_cols:                              # gun_cols H3'te tanımlandı
+            if int(row[c]) == 1:
+                try:
+                    gunler.add(dt.date(AY_YIL, AY_AY, int(c.split("_")[1])))
+                except ValueError:
+                    pass                                # ayda olmayan gün (gun_31 vs.)
+        if gunler:
+            off_map[code] = gunler
+
+# 2) tekrarlı izin günleri (ayın tüm Pzt / Cuma'ları)
+mondays = {d for d in GUN_SET if d.weekday() == 0}
+fridays = {d for d in GUN_SET if d.weekday() == 4}
+
+
+def _b(row, col):
+    """flag (float/str) → bool"""
+    return pd.to_numeric(row.get(col, 0), errors="coerce") == 1
+
+
+# 3) agent başına birleştir → izin_map
+izin_map = {}
+for _, row in df_tam.iterrows():
+    code = str(row["agent_user_code"]).strip()
+    izin = set(off_map.get(code, set()))
+    if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
+        izin |= GUN_SET                                # tüm ay
+    if _b(row, "pazartesi_izinli_flg"):
+        izin |= mondays
+    if _b(row, "cuma_izinli_flg"):
+        izin |= fridays
+    izin_map[code] = izin
+
+df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
+    lambda c: len(izin_map.get(str(c).strip(), set())))
+
+tam_ay = sum(1 for v in izin_map.values() if v >= GUN_SET)
+print(f"özel-off tablosundan izinli agent: {len(off_map)}")
+print(f"tüm-ay izinli (idari/doğum): {tam_ay}")
+print("en çok izinli 10 agent:")
+print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
+      .sort_values("izin_gun_sayisi", ascending=False).head(10).to_string(index=False))
