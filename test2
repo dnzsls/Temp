@@ -1,9 +1,21 @@
-# %% [HÜCRE 4] — KUYRUĞA SÜZ (line_based_main_group → QUEUE) ────────────
-# 'kitle_cagrilar' → 'kitle'. Sadece bu kuyruğun agentlarını tut.
-df_agents["kuyruk"] = (df_agents["line_based_main_group"]
-                       .str.strip().str.lower().str.replace("_cagrilar", "", regex=False))
-df_kuyruk = df_agents[df_agents["kuyruk"] == QUEUE].copy()
+# %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
+# line_based_main_group == "kitle_cagrilar" olanları tut.
+hedef = f"{QUEUE}_cagrilar"                        # "kitle" → "kitle_cagrilar"
+df_kuyruk = df_agents[df_agents["line_based_main_group"].str.strip() == hedef].copy()
+df_kuyruk["kuyruk"] = QUEUE                        # temiz kuyruk kolonu
 
 print(f"[H4] '{QUEUE}' agent: {len(df_kuyruk)} / {len(df_agents)} (diğer kuyruklar elendi)")
 print(df_kuyruk[["agent_user_code", "agent_name",
                  "line_based_main_group", "kuyruk"]].head())
+
+
+# %% [HÜCRE 5] — PART-TIME ELE (kismi_calisan_flg=1 çıkar) ──────────────
+# Bayrak float (1.0/0.0) gelebilir → to_numeric ile sağlamca oku.
+pt_mask = pd.to_numeric(df_kuyruk["kismi_calisan_flg"],
+                        errors="coerce").fillna(0).astype(int) == 1
+df_tam = df_kuyruk[~pt_mask].copy()
+
+print(f"[H5] PT elendi: {int(pt_mask.sum())}  →  kalan tam zamanlı: "
+      f"{len(df_tam)} / {len(df_kuyruk)}")
+print(df_tam[["agent_user_code", "agent_name", "kismi_calisan_flg"]].head())
+
