@@ -1,21 +1,5 @@
-# %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
-# line_based_main_group == "kitle_cagrilar" olanları tut.
-hedef = f"{QUEUE}_cagrilar"                        # "kitle" → "kitle_cagrilar"
-df_kuyruk = df_agents[df_agents["line_based_main_group"].str.strip() == hedef].copy()
-df_kuyruk["kuyruk"] = QUEUE                        # temiz kuyruk kolonu
-
-print(f"[H4] '{QUEUE}' agent: {len(df_kuyruk)} / {len(df_agents)} (diğer kuyruklar elendi)")
-print(df_kuyruk[["agent_user_code", "agent_name",
-                 "line_based_main_group", "kuyruk"]].head())
-
-
-# %% [HÜCRE 5] — PART-TIME ELE (kismi_calisan_flg=1 çıkar) ──────────────
-# Bayrak float (1.0/0.0) gelebilir → to_numeric ile sağlamca oku.
-pt_mask = pd.to_numeric(df_kuyruk["kismi_calisan_flg"],
-                        errors="coerce").fillna(0).astype(int) == 1
-df_tam = df_kuyruk[~pt_mask].copy()
-
-print(f"[H5] PT elendi: {int(pt_mask.sum())}  →  kalan tam zamanlı: "
-      f"{len(df_tam)} / {len(df_kuyruk)}")
-print(df_tam[["agent_user_code", "agent_name", "kismi_calisan_flg"]].head())
-
+# %% [HÜCRE 6] — TAKIM KOLONU (groupname + teamleader_name) ─────────────
+df_tam["takim"] = (df_tam["groupname"].str.strip() + " | "
+                   + df_tam["teamleader_name"].str.strip())
+print(f"takım sayısı: {df_tam['takim'].nunique()}")
+print(df_tam[["agent_user_code", "groupname", "teamleader_name", "takim"]].head())
