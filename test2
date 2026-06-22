@@ -1,23 +1,22 @@
-# %% [HÜCRE 12] — HAFTADA ≥1 OFF (7 gün üst üste çalışamaz) ─────────────
-# Her agent, her ISO-hafta içinde en fazla 6 gün çalışır (≥1 off).
-# Günde ≤1 olduğundan, o haftadaki değişkenlerin toplamı = çalışılan gün sayısı.
-
-# PLAN_GUNLER'i ISO-haftalara grupla
-haftalar = {}
-for ds in PLAN_GUNLER:
-    yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
-    haftalar.setdefault((yil, hafta), []).append(ds)
-
-n = 0
-for a in AGENTS:
-    for hafta_gunleri in haftalar.values():
-        haftalik = []                          # bu agentın o haftadaki tüm vardiya değişkenleri
-        for ds in hafta_gunleri:
-            for v in gun_vardiyalari[ds]:
-                if (a, ds, v) in x:
-                    haftalik.append(x[(a, ds, v)])
-        if haftalik:
-            model.Add(sum(haftalik) <= 6)
-            n += 1
-
-print(f"haftada ≥1 off kısıtı: {n} (agent × hafta)")
+# ─── ALTERNATİF (AKTİF DEĞİL): peş peşe 7 gün çalışamaz ────────────────
+# ISO-hafta yerine KAYAN 7 GÜNLÜK PENCERE → hafta sınırını aşan ardışıklığı
+# da yakalar (spec 5.1-4). Kullanmak istersen yukarıdaki H12 bloğunu kapatıp
+# bu bloğu aç:
+#
+# gunler_d = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
+# n = 0
+# for a in AGENTS:
+#     for i in range(len(gunler_d) - 6):
+#         pencere = gunler_d[i:i + 7]                 # 7 günlük dilim
+#         if (pencere[-1] - pencere[0]).days != 6:    # gerçekten 7 ardışık gün mü?
+#             continue                                # araya boş gün giriyorsa atla
+#         pencere_varlar = []
+#         for d in pencere:
+#             ds = d.isoformat()
+#             for v in gun_vardiyalari[ds]:
+#                 if (a, ds, v) in x:
+#                     pencere_varlar.append(x[(a, ds, v)])
+#         if pencere_varlar:
+#             model.Add(sum(pencere_varlar) <= 6)
+#             n += 1
+# print(f"peş peşe ≤6 gün kısıtı: {n}")
