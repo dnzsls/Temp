@@ -1,228 +1,26 @@
-# -*- coding: utf-8 -*-
-"""
-AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
-==================================================================
-2. aşama: aylık modelin kova-sayılarına İSİMLİ inhouse agent oturtma.
+# %% [HÜCRE 3] — AGENT VERİLERİNİ TEMİZLE (df_agents + df_off) ──────────
+# SQL'den gelen iki DataFrame'i al, temel temizlik yap, içeriğine bak.
+# (Kuyruk süzme, PT eleme, izin birleştirme SONRAKİ adımlarda.)
 
-Çözüm birimi = TÜM AY, hafta içi + hafta sonu BİRLİKTE (spec 6.1).
-
-Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
-kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
-`python3 agent_detayli_model.py` ile baştan sona çalışır.
-
-KAPSAM (şu an):
-  AKTİF : coverage (sert), günde ≤1 vardiya, müsaitlik bloğu
-          (özel-off + tam-ay bayrakları + tekrarlı Pzt/Cuma).
-  OKUNUR ama henüz UYGULANMAZ : takim, sabah_calisir (≤20:00), sut/hamile
-          (saat/hafta sonu/tatil), mesaiye_kalamaz (mesai+gün tavanı),
-          off-kotası (haftada max 6), aylık sayaçlar, adalet.
-          → kendi adımlarında roster üstünde görüp ekleyeceğiz.
-
-GİRDİLER (hepsi GERÇEK — dummy yok):
-  1) PKL_PATH   : aylık modelin results[date][queue] çıktısı (planlama, pkl dosyası).
-  2) df_agents  : agent master (SQL'den DataFrame). Beklenen kolonlar:
-       agent_user_code        agent kimliği (U111111)
-       agent_name
-       teamleader_name        takım parçası
-       groupname              takım parçası (+lokasyon)
-       working_main_group     lokasyon+kuyruk (okunur)
-       line_based_main_group  KUYRUK: kitle_cagrilar | kurumsal_cagrilar | gold_cagrilar
-       idari_izinli_flg       1 → tüm ay müsait değil
-       pazartesi_izinli_flg   1 → her Pazartesi off
-       cuma_izinli_flg        1 → her Cuma off
-       sabah_calisir_flg      1 → yalnız bitişi ≤20:00 vardiya (sonraki adım)
-       mesaiye_kalamaz_flg    1 → mesai yok + gün tavanı (sonraki adım)
-       dogum_izni_flg         1 → tüm ay müsait değil
-       hamile_flg             1 → hafta sonu/tatil yok (sonraki adım)
-       sut_izni_flg           1 → ≤20:00 + 2sa eksik + mesai yok (sonraki adım)
-       kismi_calisan_flg      1 → PART-TIME, ÇIKARILIR (haftaiçi planlamada yok)
-  3) df_off     : özel off tablosu (SQL'den DataFrame). Kolonlar:
-       agent_user_code, agent_name, teamleader_name,
-       off_talebi, off_talebi_desc,
-       gun_1 .. gun_30/31   1 → o tarih izinli (gun_N = çalışılan ayın N'inci günü)
-"""
-
-import pickle
-import datetime as dt
-import pandas as pd
-from ortools.sat.python import cp_model
-
-
-# %% [HÜCRE 0] — KONFİG ─────────────────────────────────────────────────
-QUEUE       = "kitle"          # kitle | kurumsal | gold
-PKL_PATH    = ""               # aylık model çıktısı pkl yolu
-# NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
-#      df_agents ve df_off DataFrame'leri tanımlı olmalı.
-
-DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
-
-
-# %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
-try:
-    with open(PKL_PATH, "rb") as f:
-        results = pickle.load(f)
-except Exception:
-    raise SystemExit("[H1] pickle yüklenemedi — PKL_PATH yanlış ya da dosya yok.")
-
-print(f"[H1] pickle yüklendi: {len(results)} gün")
-
-# 'planı olan gün' = o kuyrukta sonuç üretilmiş (feasible) gün; None/eksik olanlar hariç
-plani_olan = sorted(ds for ds, r in results.items() if r and QUEUE in r and r[QUEUE])
-print(f"[H1] '{QUEUE}' planı olan gün: {len(plani_olan)}/{len(results)}")
-
-# içerik önizlemesi (df.head gibi) — bir günün yapısı
-if plani_olan:
-    ds0 = plani_olan[0]
-    mi0 = results[ds0][QUEUE]["mip_info"]
-    print(f"[H1] örnek gün {ds0}: mip_info anahtarları = {list(mi0.keys())}")
-    print(f"     assignments (ilk 5): {dict(list(mi0.get('assignments', {}).items())[:5])}")
-    sc0 = mi0.get("shift_coverage", {})
-    if sc0:
-        k0 = next(iter(sc0))
-        print(f"     shift_coverage örnek: {k0} → {sc0[k0]}")
-
-
-# %% [HÜCRE 2] — PLANLAMAYI TEMİZ TALEP TABLOSUNA ÇEVİR ────────────────
-# Pickle'daki iç içe sözlüğü tidy DataFrame'e çevir: her satır = gün × inhouse
-# vardiya. Outsource / part_time atılır (modelin işi değil).
-satirlar = []
-for ds in sorted(results.keys()):
-    r = results.get(ds)
-    if not r or QUEUE not in r or not r[QUEUE]:
-        continue
-    mi = r[QUEUE]["mip_info"]
-    sc = mi.get("shift_coverage", {})
-    for shift, kisi in mi.get("assignments", {}).items():
-        info = sc.get(shift, {})
-        if kisi <= 0 or info.get("company") != "inhouse":
-            continue
-        d = dt.date.fromisoformat(ds)
-        satirlar.append({
-            "tarih":      ds,
-            "gun":        DAY_TR[d.weekday()],
-            "hafta_sonu": int(d.weekday() > 4),
-            "vardiya":    shift,
-            "baslangic":  info.get("start"),
-            "bitis":      info.get("end"),
-            "talep":      int(kisi),
-        })
-
-df_talep = pd.DataFrame(satirlar)
-print(f"[H2] talep tablosu: {len(df_talep)} satır (gün × inhouse vardiya)")
-print(df_talep.head(8).to_string(index=False))
-
-# Ay bilgisi (H3'te izin/gün eşlemesi için)
-GUNLER  = sorted(results.keys())
-AY_YIL  = dt.date.fromisoformat(GUNLER[0]).year
-AY_AY   = dt.date.fromisoformat(GUNLER[0]).month
-GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
-print(f"[H2] ay: {AY_YIL}-{AY_AY:02d}  ({len(GUNLER)} gün)")
-
-
-# %% [HÜCRE 3] — AGENT MASTER + ÖZEL OFF YÜKLE (gerçek şema) ────────────
-# Agent master SQL'den gelir: df_agents (ya da df_agent) DataFrame'i hazır olmalı.
 df_agents = globals().get("df_agents", globals().get("df_agent"))
 if df_agents is None:
-    raise SystemExit("[H3] df_agents tanımlı değil — SQL'den df_agents (ya da df_agent) çek.")
-df_agents = df_agents.fillna("")
-print(f"[H3] Agent master (SQL): {len(df_agents)} satır, kolon: {list(df_agents.columns)}")
+    raise SystemExit("[H3] df_agents tanımlı değil — SQL'den df_agents çek.")
 
+df_agents = df_agents.copy()
+df_agents.columns = [str(c).strip().lower() for c in df_agents.columns]   # kolon adı sadeleştir
+df_agents = df_agents.fillna("")                                          # boşları '' yap
 
-def norm_kuyruk(v):
-    """'kitle_cagrilar' → 'kitle'"""
-    return str(v).strip().lower().replace("_cagrilar", "").replace("_cagri", "")
+print(f"[H3] df_agents: {df_agents.shape[0]} satır × {df_agents.shape[1]} kolon")
+print(f"[H3] kolonlar: {list(df_agents.columns)}")
+print(df_agents.head())
 
-
-def _flag(v):
-    """1/0 bayrak kolonunu bool'a çevirir: '1'/1/'evet' → True, gerisi False.
-       Tek başına çıktı basmaz; aşağıda flag kolonlarını okumak için kullanılır."""
-    return str(v).strip() in {"1", "1.0", "evet", "true", "True"}
-
-
-# --- 3a) Özel off tablosu → off_map[code] = set(date) -------------------
-# Özel off SQL'den gelir: df_off DataFrame'i (varsa).
-off_map = {}
 df_off = globals().get("df_off")
 if df_off is not None:
+    df_off = df_off.copy()
+    df_off.columns = [str(c).strip().lower() for c in df_off.columns]
     df_off = df_off.fillna("")
-    gun_kolonlari = [c for c in df_off.columns if str(c).lower().startswith("gun_")]
-    for _, row in df_off.iterrows():
-        d = row.to_dict()
-        code = str(d.get("agent_user_code", "")).strip()
-        if not code:
-            continue
-        gunler = set()
-        for c in gun_kolonlari:
-            if _flag(d.get(c, "")):
-                n = int(str(c).split("_")[1])          # gun_5 → 5
-                try:
-                    gunler.add(dt.date(AY_YIL, AY_AY, n))
-                except ValueError:
-                    pass                                # ayda olmayan gün (gun_31 vs.)
-        if gunler:
-            off_map[code] = gunler
-    print(f"[H3] Özel off (SQL): {len(df_off)} satır, "
-          f"{len(off_map)} agentın özel izni var ({len(gun_kolonlari)} gün kolonu)")
+    print(f"\n[H3] df_off: {df_off.shape[0]} satır × {df_off.shape[1]} kolon")
+    print(f"[H3] kolonlar: {list(df_off.columns)}")
+    print(df_off.head())
 else:
-    print(f"[H3] df_off yok → izin yalnız bayraklardan")
-
-# --- 3b) Agent master → AG sözlüğü --------------------------------------
-PAZARTESI, CUMA = 0, 4
-AG = {}
-pt_elendi = 0
-for _, row in df_agents.iterrows():
-    d = row.to_dict()
-    code = str(d.get("agent_user_code", "")).strip()
-    if not code:
-        continue
-    if norm_kuyruk(d.get("line_based_main_group", "")) != QUEUE:
-        continue                                       # başka kuyruk
-    if _flag(d.get("kismi_calisan_flg", "")):
-        pt_elendi += 1
-        continue                                       # PART-TIME → çıkar
-
-    # tekrarlı + tam-ay + özel off → tek bir izin kümesi
-    izin = set(off_map.get(code, set()))
-    if _flag(d.get("idari_izinli_flg", "")) or _flag(d.get("dogum_izni_flg", "")):
-        izin |= GUN_SET                                # tüm ay müsait değil
-    if _flag(d.get("pazartesi_izinli_flg", "")):
-        izin |= {x for x in GUN_SET if x.weekday() == PAZARTESI}
-    if _flag(d.get("cuma_izinli_flg", "")):
-        izin |= {x for x in GUN_SET if x.weekday() == CUMA}
-
-    AG[code] = {
-        "name":   str(d.get("agent_name", "")).strip(),
-        "takim":  f"{str(d.get('groupname','')).strip()}|{str(d.get('teamleader_name','')).strip()}",
-        "tip":    "esnek",                             # calisma_tipi yok → hepsi esnek
-        "sabit_vardiya": "",
-        "izin":   izin,
-        # aşağıdakiler OKUNUR, sonraki adımlarda uygulanacak
-        "hamile":        _flag(d.get("hamile_flg", "")),
-        "sut":           _flag(d.get("sut_izni_flg", "")),
-        "sabah":         _flag(d.get("sabah_calisir_flg", "")),
-        "mesai_yok":     _flag(d.get("mesaiye_kalamaz_flg", "")),
-        "idari":         _flag(d.get("idari_izinli_flg", "")),
-        "dogum":         _flag(d.get("dogum_izni_flg", "")),
-    }
-
-SABIT = [a for a in AG if AG[a]["tip"] == "sabit"]     # şimdilik boş (calisma_tipi yok)
-ESNEK = [a for a in AG if AG[a]["tip"] == "esnek"]
-
-print(f"[H3] '{QUEUE}' agent: {len(AG)}  (PT elendi: {pt_elendi})")
-print(f"[H3] takım sayısı: {len({AG[a]['takim'] for a in AG})}")
-print(f"[H3] bayraklar — hamile:{sum(AG[a]['hamile'] for a in AG)}  "
-      f"sut:{sum(AG[a]['sut'] for a in AG)}  "
-      f"sabah_calisir:{sum(AG[a]['sabah'] for a in AG)}  "
-      f"mesai_yok:{sum(AG[a]['mesai_yok'] for a in AG)}")
-tam_ay_off = [a for a in AG if AG[a]['izin'] >= GUN_SET]
-print(f"[H3] tüm-ay izinli (idari/doğum): {len(tam_ay_off)} → {tam_ay_off[:10]}"
-      f"{' ...' if len(tam_ay_off) > 10 else ''}")
-izinli = {a: len(AG[a]['izin']) for a in AG if AG[a]['izin'] and a not in tam_ay_off}
-print(f"[H3] kısmi izinli agent sayısı: {len(izinli)}  "
-      f"(kişi başı izin günü, ilk 10): {dict(list(izinli.items())[:10])}")
-
-
-
-# Buraya kadar = H0–H3 (planlama + agent okuma).
-# Sonraki adımlar (H4 ön-işleme, H5 model, H6 çöz, H7 roster) tek tek eklenecek.
-print('[H3] ✓ agent okuma bitti — model adımları henüz eklenmedi.')
+    print("[H3] df_off yok")
