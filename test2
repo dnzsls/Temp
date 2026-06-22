@@ -82,60 +82,41 @@ if plani_olan:
         print(f"     shift_coverage örnek: {k0} → {sc0[k0]}")
 
 
-# %% [HÜCRE 2] — AYIN GÜNLERİ (hafta içi + sonu) + TALEP ────────────────
-def haftalara_bol(results):
-    """Tüm tarihleri ISO-haftaya göre gruplar (hafta sonu DAHİL)."""
-    haftalar = {}
-    for ds in sorted(results.keys()):
-        d = dt.date.fromisoformat(ds)
-        yil, hafta, _ = d.isocalendar()
-        haftalar.setdefault((yil, hafta), []).append(ds)
-    return [sorted(v) for _, v in sorted(haftalar.items())]
-
-
-def talep_cikar(results, queue, gunler):
-    """Verilen günler için inhouse talebi süz."""
-    demand, sc_by_day, shifts = {}, {}, set()
-    for ds in gunler:
-        demand[ds], sc_by_day[ds] = {}, {}
-        r = results.get(ds)
-        if not r or queue not in r or not r[queue]:
+# %% [HÜCRE 2] — PLANLAMAYI TEMİZ TALEP TABLOSUNA ÇEVİR ────────────────
+# Pickle'daki iç içe sözlüğü tidy DataFrame'e çevir: her satır = gün × inhouse
+# vardiya. Outsource / part_time atılır (modelin işi değil).
+satirlar = []
+for ds in sorted(results.keys()):
+    r = results.get(ds)
+    if not r or QUEUE not in r or not r[QUEUE]:
+        continue
+    mi = r[QUEUE]["mip_info"]
+    sc = mi.get("shift_coverage", {})
+    for shift, kisi in mi.get("assignments", {}).items():
+        info = sc.get(shift, {})
+        if kisi <= 0 or info.get("company") != "inhouse":
             continue
-        mi = r[queue]["mip_info"]
-        sc = mi.get("shift_coverage", {})
-        for shift, cnt in mi.get("assignments", {}).items():
-            if cnt <= 0 or sc.get(shift, {}).get("company") != "inhouse":
-                continue                           # outsource / part_time → modelin işi değil
-            demand[ds][shift] = cnt
-            sc_by_day[ds][shift] = sc[shift]
-            shifts.add(shift)
-    return demand, sc_by_day, sorted(shifts)
+        d = dt.date.fromisoformat(ds)
+        satirlar.append({
+            "tarih":      ds,
+            "gun":        DAY_TR[d.weekday()],
+            "hafta_sonu": int(d.weekday() > 4),
+            "vardiya":    shift,
+            "baslangic":  info.get("start"),
+            "bitis":      info.get("end"),
+            "talep":      int(kisi),
+        })
 
+df_talep = pd.DataFrame(satirlar)
+print(f"[H2] talep tablosu: {len(df_talep)} satır (gün × inhouse vardiya)")
+print(df_talep.head(8).to_string(index=False))
 
-HAFTALAR = haftalara_bol(results)
-GUNLER   = sorted(results.keys())                     # ayın TÜM günleri
-demand, sc_by_day, SHIFTS = talep_cikar(results, QUEUE, GUNLER)
-
-# Çalışılan ay (gun_x eşlemesi ve tekrarlı izinler için)
+# Ay bilgisi (H3'te izin/gün eşlemesi için)
+GUNLER  = sorted(results.keys())
 AY_YIL  = dt.date.fromisoformat(GUNLER[0]).year
 AY_AY   = dt.date.fromisoformat(GUNLER[0]).month
 GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
-
-
-def is_hs(ds):
-    return dt.date.fromisoformat(ds).weekday() > 4
-
-
-def etiket(ds):
-    d = dt.date.fromisoformat(ds)
-    return f"{d.day:02d}{DAY_TR[d.weekday()]}" + ("*" if d.weekday() > 4 else " ")
-
-
-hs_gun = sum(1 for ds in GUNLER if is_hs(ds))
-print(f"[H2] Ay: {AY_YIL}-{AY_AY:02d}  ({len(GUNLER)} gün, {len(HAFTALAR)} hafta; "
-      f"hafta içi {len(GUNLER)-hs_gun}, hafta sonu {hs_gun})")
-print(f"[H2] inhouse vardiyalar: {SHIFTS}")
-print(f"[H2] AY toplam inhouse kişi-slot: {sum(sum(g.values()) for g in demand.values())}")
+print(f"[H2] ay: {AY_YIL}-{AY_AY:02d}  ({len(GUNLER)} gün)")
 
 
 # %% [HÜCRE 3] — AGENT MASTER + ÖZEL OFF YÜKLE (gerçek şema) ────────────
