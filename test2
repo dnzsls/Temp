@@ -1,22 +1,18 @@
-# 1) agent listesi mükerrer mi?
-print("AGENTS:", len(AGENTS), "| benzersiz:", len(set(AGENTS)))
+# %% [HÜCRE 13] — SONUÇ / ROSTER ────────────────────────────────────────
+# Çözümdeki 1 olan değişkenleri okunabilir tabloya çevir.
+# solver.Value(x[...]) → 0/1; 1 olanlar atamadır.
+sonuc = []
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari[ds]:
+            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                sonuc.append({"agent": a, "tarih": ds, "vardiya": v})
 
-# 2) talep tablosu (gün,vardiya) bazında mükerrer mi?
-print("df_talep:", len(df_talep),
-      "| benzersiz (tarih,vardiya):", len(df_talep.drop_duplicates(["tarih", "vardiya"])))
+df_sonuc = pd.DataFrame(sonuc)                      # tidy: agent × tarih × vardiya
+print(f"toplam atama: {len(df_sonuc)}")
+print(df_sonuc.head(20).to_string(index=False))
 
-# 3) bir günün vardiya listesinde tekrar var mı?
-g0 = PLAN_GUNLER[0]
-print("ilk gün vardiyaları:", len(gun_vardiyalari[g0]),
-      "| benzersiz:", len(set(gun_vardiyalari[g0])))
-
-# 4) U101 gerçekte hangi (gün,vardiya)'larda 1?  gün başına kaç kez sayılıyor?
-a0 = "U101"
-atamalar = []
-for ds in PLAN_GUNLER:
-    for v in gun_vardiyalari[ds]:
-        if (a0, ds, v) in x and solver.Value(x[(a0, ds, v)]) == 1:
-            atamalar.append((ds, v))
-print(a0, "→ sayılan atama:", len(atamalar),
-      "| benzersiz gün:", len(set(ds for ds, v in atamalar)))
-print("ilk 15:", atamalar[:15])
+# roster matrisi: satır=agent, sütun=gün, hücre=vardiya (boş=off)
+roster = df_sonuc.pivot(index="agent", columns="tarih", values="vardiya").fillna("off")
+print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]} gün")
+print(roster.head(10))
