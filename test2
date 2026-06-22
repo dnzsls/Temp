@@ -1,18 +1,23 @@
-# %% [HÜCRE 13] — SONUÇ / ROSTER ────────────────────────────────────────
-# Çözümdeki 1 olan değişkenleri okunabilir tabloya çevir.
-# solver.Value(x[...]) → 0/1; 1 olanlar atamadır.
-sonuc = []
+# %% [HÜCRE 12] — HAFTADA ≥1 OFF (7 gün üst üste çalışamaz) ─────────────
+# Her agent, her ISO-hafta içinde en fazla 6 gün çalışır (≥1 off).
+# Günde ≤1 olduğundan, o haftadaki değişkenlerin toplamı = çalışılan gün sayısı.
+
+# PLAN_GUNLER'i ISO-haftalara grupla
+haftalar = {}
+for ds in PLAN_GUNLER:
+    yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
+    haftalar.setdefault((yil, hafta), []).append(ds)
+
+n = 0
 for a in AGENTS:
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari[ds]:
-            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
-                sonuc.append({"agent": a, "tarih": ds, "vardiya": v})
+    for hafta_gunleri in haftalar.values():
+        haftalik = []                          # bu agentın o haftadaki tüm vardiya değişkenleri
+        for ds in hafta_gunleri:
+            for v in gun_vardiyalari[ds]:
+                if (a, ds, v) in x:
+                    haftalik.append(x[(a, ds, v)])
+        if haftalik:
+            model.Add(sum(haftalik) <= 6)
+            n += 1
 
-df_sonuc = pd.DataFrame(sonuc)                      # tidy: agent × tarih × vardiya
-print(f"toplam atama: {len(df_sonuc)}")
-print(df_sonuc.head(20).to_string(index=False))
-
-# roster matrisi: satır=agent, sütun=gün, hücre=vardiya (boş=off)
-roster = df_sonuc.pivot(index="agent", columns="tarih", values="vardiya").fillna("off")
-print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]} gün")
-print(roster.head(10))
+print(f"haftada ≥1 off kısıtı: {n} (agent × hafta)")
