@@ -5,3 +5,7 @@ for (ds, v), kisi in talep.items():
     model.Add(sum(x[(a, ds, v)] for a in AGENTS if (a, ds, v) in x) == kisi)
 
 print(f"coverage kısıtı: {len(talep)} kova (her biri 'atanan == talep')")
+
+cov = {}
+for (ds, v), kisi in talep.items():
+    cov[(ds, v)] = model.Add(sum(x[(a, ds, v)] for a in AGENTS if (a, ds, v) in x) == kisi)
