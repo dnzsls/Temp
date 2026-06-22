@@ -4,26 +4,42 @@ AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 ==================================================================
 2. aşama: aylık modelin kova-sayılarına İSİMLİ inhouse agent oturtma.
 
+Çözüm birimi = TÜM AY, hafta içi + hafta sonu BİRLİKTE (spec 6.1).
+
 Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
 `python3 agent_detayli_model.py` ile baştan sona çalışır.
 
-KAPSAM (şu an = Adım 1):
-  AKTİF kısıtlar : coverage (sert), günde ≤1 vardiya, izin bloğu,
-                   sabit-gömme → rezidüel (negatif rezidüel uyarısı).
-  OKUNUR ama henüz kısıtlanMAZ : takim, hamile, calisma_tipi rotasyonu,
-                   off-kotası, hafta sonu, aylık sayaçlar.  (sonraki adımlar)
+KAPSAM (şu an):
+  AKTİF : coverage (sert), günde ≤1 vardiya, müsaitlik bloğu
+          (özel-off + tam-ay bayrakları + tekrarlı Pzt/Cuma).
+  OKUNUR ama henüz UYGULANMAZ : takim, sabah_calisir (≤20:00), sut/hamile
+          (saat/hafta sonu/tatil), mesaiye_kalamaz (mesai+gün tavanı),
+          off-kotası (haftada max 6), aylık sayaçlar, adalet.
+          → kendi adımlarında roster üstünde görüp ekleyeceğiz.
 
-GİRDİLER:
-  1) PICKLE  : aylık modelin results[date][queue] çıktısı (planlama).
-  2) AGENT MASTER (xlsx/csv) — kolonlar:
-       agent_id      str   benzersiz
-       kuyruk        str   kitle|gold|kurumsal
-       takim         str   kuyruk içi alt-grup (Adım 4'te kullanılacak)
-       calisma_tipi  str   sabit|esnek
-       sabit_vardiya str   "09:00-18:00" (yalnız sabitlerde; esnekte boş)
-       izin_gunleri  str   "2026-02-04;2026-02-05" (; veya , ile ayrık ISO)
-       hamile        bool  evet|hayir
+GİRDİLER (hepsi GERÇEK — dummy yok):
+  1) PKL_PATH   : aylık modelin results[date][queue] çıktısı (planlama).
+  2) AGENT_PATH : agent master (xlsx/csv). Beklenen kolonlar:
+       agent_user_code        agent kimliği (U111111)
+       agent_name
+       teamleader_name        takım parçası
+       groupname              takım parçası (+lokasyon)
+       working_main_group     lokasyon+kuyruk (okunur)
+       line_based_main_group  KUYRUK: kitle_cagrilar | kurumsal_cagrilar | gold_cagrilar
+       idari_izinli_flg       1 → tüm ay müsait değil
+       pazartesi_izinli_flg   1 → her Pazartesi off
+       cuma_izinli_flg        1 → her Cuma off
+       sabah_calisir_flg      1 → yalnız bitişi ≤20:00 vardiya (sonraki adım)
+       mesaiye_kalamaz_flg    1 → mesai yok + gün tavanı (sonraki adım)
+       dogum_izni_flg         1 → tüm ay müsait değil
+       hamile_flg             1 → hafta sonu/tatil yok (sonraki adım)
+       sut_izni_flg           1 → ≤20:00 + 2sa eksik + mesai yok (sonraki adım)
+       kismi_calisan_flg      1 → PART-TIME, ÇIKARILIR (haftaiçi planlamada yok)
+  3) OFF_PATH   : özel off tablosu (xlsx/csv). Kolonlar:
+       agent_user_code, agent_name, teamleader_name,
+       off_talebi, off_talebi_desc,
+       gun_1 .. gun_30/31   1 → o tarih izinli (gun_N = çalışılan ayın N'inci günü)
 """
 
 import os
@@ -34,77 +50,57 @@ from ortools.sat.python import cp_model
 
 
 # %% [HÜCRE 0] — KONFİG ─────────────────────────────────────────────────
-QUEUE       = "kitle"          # hangi kuyruk
-WEEK_INDEX  = 0                # ayın kaçıncı hafta-içi bloğu (0 = ilk)
-PKL_PATH    = ""               # "" → DUMMY results üret (gerçek yol koyunca pkl'den çeker)
-AGENT_PATH  = ""               # "" → DUMMY agent master üret (xlsx/csv yolu koyabilirsin)
+QUEUE       = "kitle"          # kitle | kurumsal | gold
+PKL_PATH    = ""               # aylık model çıktısı pkl yolu
+AGENT_PATH  = ""               # agent master xlsx/csv yolu
+OFF_PATH    = ""               # özel off tablosu xlsx/csv yolu ("" → izin yalnız bayraklardan)
 
 DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 
 print("=" * 70)
-print(f"AGENT DETAYLI MODEL — kuyruk={QUEUE}  hafta_index={WEEK_INDEX}")
-print(f"  PKL_PATH   = {PKL_PATH or '(boş → dummy)'}")
-print(f"  AGENT_PATH = {AGENT_PATH or '(boş → dummy)'}")
+print(f"AGENT DETAYLI MODEL — kuyruk={QUEUE}  (çözüm birimi: TÜM AY)")
 print("=" * 70)
 
 
+def _read_table(path):
+    """xlsx ya da csv'yi string olarak oku, boşları '' yap."""
+    if path.lower().endswith(".csv"):
+        return pd.read_csv(path, dtype=str).fillna("")
+    return pd.read_excel(path, dtype=str).fillna("")
+
+
+def _flag(v):
+    """'1'/'0'/'' → bool"""
+    return str(v).strip() in {"1", "1.0", "evet", "true", "True"}
+
+
 # %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
-def _dummy_results():
-    """Gerçek results formatında küçük bir hafta (Pzt–Cum). S3 = outsource
-    (model süzecek), S1/S2 = inhouse."""
-    sc = {
-        "S1": {"start": "09:00", "end": "18:00", "company": "inhouse"},
-        "S2": {"start": "12:00", "end": "21:00", "company": "inhouse"},
-        "S3": {"start": "09:00", "end": "18:00", "company": "outsource"},
-    }
-    gunluk = {
-        "2026-02-02": {"S1": 6, "S2": 3, "S3": 4},
-        "2026-02-03": {"S1": 5, "S2": 4, "S3": 4},
-        "2026-02-04": {"S1": 6, "S2": 3, "S3": 5},
-        "2026-02-05": {"S1": 4, "S2": 5, "S3": 4},
-        "2026-02-06": {"S1": 5, "S2": 4, "S3": 5},
-    }
-    res = {}
-    for ds, asg in gunluk.items():
-        res[ds] = {QUEUE: {"mip_info": {
-            "assignments": dict(asg),
-            "shift_coverage": {k: dict(v) for k, v in sc.items()},
-            "mip_info_stage1": {"assignments": dict(asg)},   # MIP1≈MIP2 (Adım 3'te kullanılacak)
-        }}}
-    return res
+if not PKL_PATH or not os.path.exists(PKL_PATH):
+    raise SystemExit(f"[H1] PKL_PATH ayarlı değil / yok: {PKL_PATH!r}\n"
+                     f"     H0'da aylık model çıktısı pkl yolunu ver.")
 
-
-if PKL_PATH and os.path.exists(PKL_PATH):
-    with open(PKL_PATH, "rb") as f:
-        results = pickle.load(f)
-    print(f"[H1] Pickle yüklendi: {PKL_PATH}  →  {len(results)} gün")
-else:
-    results = _dummy_results()
-    print(f"[H1] ⚠ DUMMY MOD (gerçek pkl yok) → {len(results)} günlük örnek hafta üretildi")
-
-# Kuyruk durum özeti
+with open(PKL_PATH, "rb") as f:
+    results = pickle.load(f)
+print(f"[H1] Pickle yüklendi: {PKL_PATH}  →  {len(results)} gün")
 ok = sum(1 for r in results.values() if r and QUEUE in r and r[QUEUE])
 print(f"[H1] '{QUEUE}' kuyruğu OK gün sayısı: {ok}/{len(results)}")
 
 
-# %% [HÜCRE 2] — HAFTA SEÇ + TALEP ÇIKAR ────────────────────────────────
-def haftaici_bloklari(results):
-    """results tarihlerini ISO-haftaya göre gruplar; her grubun Pzt–Cum'unu döner."""
+# %% [HÜCRE 2] — AYIN GÜNLERİ (hafta içi + sonu) + TALEP ────────────────
+def haftalara_bol(results):
+    """Tüm tarihleri ISO-haftaya göre gruplar (hafta sonu DAHİL)."""
     haftalar = {}
     for ds in sorted(results.keys()):
         d = dt.date.fromisoformat(ds)
-        if d.weekday() > 4:                       # Cmt/Pzr atla (hafta sonu ayrı)
-            continue
         yil, hafta, _ = d.isocalendar()
         haftalar.setdefault((yil, hafta), []).append(ds)
     return [sorted(v) for _, v in sorted(haftalar.items())]
 
 
-def talep_cikar(results, queue, week_dates):
-    """Seçili hafta için inhouse talebi süz.
-       demand[ds][shift]=kişi, sc_by_day[ds][shift]={start,end,company}"""
+def talep_cikar(results, queue, gunler):
+    """Verilen günler için inhouse talebi süz."""
     demand, sc_by_day, shifts = {}, {}, set()
-    for ds in week_dates:
+    for ds in gunler:
         demand[ds], sc_by_day[ds] = {}, {}
         r = results.get(ds)
         if not r or queue not in r or not r[queue]:
@@ -113,122 +109,134 @@ def talep_cikar(results, queue, week_dates):
         sc = mi.get("shift_coverage", {})
         for shift, cnt in mi.get("assignments", {}).items():
             if cnt <= 0 or sc.get(shift, {}).get("company") != "inhouse":
-                continue                          # outsource / part_time → modelin işi değil
+                continue                           # outsource / part_time → modelin işi değil
             demand[ds][shift] = cnt
             sc_by_day[ds][shift] = sc[shift]
             shifts.add(shift)
     return demand, sc_by_day, sorted(shifts)
 
 
-bloklar = haftaici_bloklari(results)
-if WEEK_INDEX >= len(bloklar):
-    raise SystemExit(f"[H2] WEEK_INDEX={WEEK_INDEX} yok; sadece {len(bloklar)} hafta-içi blok var.")
-WEEK = bloklar[WEEK_INDEX]
-demand, sc_by_day, SHIFTS = talep_cikar(results, QUEUE, WEEK)
+HAFTALAR = haftalara_bol(results)
+GUNLER   = sorted(results.keys())                     # ayın TÜM günleri
+demand, sc_by_day, SHIFTS = talep_cikar(results, QUEUE, GUNLER)
 
-print(f"[H2] Hafta-içi blok sayısı: {len(bloklar)}  →  seçilen blok {WEEK_INDEX}: "
-      f"{WEEK[0]} .. {WEEK[-1]}")
-print(f"[H2] inhouse vardiyalar: {SHIFTS}")
-print(f"[H2] TALEP (inhouse kişi-slot):")
-hdr = "      " + "  ".join(f"{s:>6}" for s in SHIFTS) + "   | gün-top"
-print(hdr)
-for ds in WEEK:
+# Çalışılan ay (gun_x eşlemesi ve tekrarlı izinler için)
+AY_YIL  = dt.date.fromisoformat(GUNLER[0]).year
+AY_AY   = dt.date.fromisoformat(GUNLER[0]).month
+GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
+
+
+def is_hs(ds):
+    return dt.date.fromisoformat(ds).weekday() > 4
+
+
+def etiket(ds):
     d = dt.date.fromisoformat(ds)
-    satir = f"  {DAY_TR[d.weekday()]} " + "  ".join(f"{demand[ds].get(s,0):>6}" for s in SHIFTS)
-    satir += f"   | {sum(demand[ds].values()):>5}"
-    print(satir)
-print(f"[H2] Hafta toplam inhouse kişi-slot: {sum(sum(g.values()) for g in demand.values())}")
+    return f"{d.day:02d}{DAY_TR[d.weekday()]}" + ("*" if d.weekday() > 4 else " ")
 
 
-# %% [HÜCRE 3] — AGENT MASTER YÜKLE + DOĞRULA ───────────────────────────
-SCHEMA = ["agent_id", "kuyruk", "takim", "calisma_tipi",
-          "sabit_vardiya", "izin_gunleri", "hamile"]
+hs_gun = sum(1 for ds in GUNLER if is_hs(ds))
+print(f"[H2] Ay: {AY_YIL}-{AY_AY:02d}  ({len(GUNLER)} gün, {len(HAFTALAR)} hafta; "
+      f"hafta içi {len(GUNLER)-hs_gun}, hafta sonu {hs_gun})")
+print(f"[H2] inhouse vardiyalar: {SHIFTS}")
+print(f"[H2] AY toplam inhouse kişi-slot: {sum(sum(g.values()) for g in demand.values())}")
 
 
-def _dummy_agents():
-    """Şema ile birebir uyumlu dummy agent master (DataFrame)."""
-    rows = [
-        # sabitler (09:00-18:00 = S1'e gömülür)
-        ("K01", "kitle", "T1", "sabit", "09:00-18:00", "",                       "hayir"),
-        ("K02", "kitle", "T1", "sabit", "09:00-18:00", "",                       "hayir"),
-        ("K03", "kitle", "T2", "sabit", "09:00-18:00", "",                       "hayir"),
-        # esnekler
-        ("K04", "kitle", "T1", "esnek", "", "2026-02-04",                        "hayir"),
-        ("K05", "kitle", "T1", "esnek", "", "2026-02-03;2026-02-04",             "hayir"),
-        ("K06", "kitle", "T2", "esnek", "", "",                                  "hayir"),
-        ("K07", "kitle", "T2", "esnek", "", "",                                  "hayir"),
-        ("K08", "kitle", "T2", "esnek", "", "",                                  "hayir"),
-        ("K09", "kitle", "T3", "esnek", "", "",                                  "hayir"),
-        ("K10", "kitle", "T3", "esnek", "", "",                                  "hayir"),
-        ("K11", "kitle", "T3", "esnek", "", "",                                  "hayir"),
-        ("K12", "kitle", "T3", "esnek", "", "",                                  "hayir"),
-        ("K13", "kitle", "T1", "esnek", "", "",                                  "evet"),   # hamile
-        # başka kuyruk (filtre çalışsın diye)
-        ("G01", "gold",  "G1", "esnek", "", "",                                  "hayir"),
-    ]
-    return pd.DataFrame(rows, columns=SCHEMA)
+# %% [HÜCRE 3] — AGENT MASTER + ÖZEL OFF YÜKLE (gerçek şema) ────────────
+if not AGENT_PATH or not os.path.exists(AGENT_PATH):
+    raise SystemExit(f"[H3] AGENT_PATH ayarlı değil / yok: {AGENT_PATH!r}")
+
+df_agents = _read_table(AGENT_PATH)
+print(f"[H3] Agent master yüklendi: {len(df_agents)} satır, kolon: {list(df_agents.columns)}")
 
 
-def parse_izin(val):
-    """ 'a;b,c' → [date, ...]; NaN/'' → [] """
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return []
-    s = str(val).strip()
-    if not s:
-        return []
-    parcalar = s.replace(",", ";").split(";")
-    out = []
-    for p in parcalar:
-        p = p.strip()
-        if p:
-            out.append(dt.date.fromisoformat(p))
-    return out
+def norm_kuyruk(v):
+    """'kitle_cagrilar' → 'kitle'"""
+    return str(v).strip().lower().replace("_cagrilar", "").replace("_cagri", "")
 
 
-def parse_bool(val):
-    return str(val).strip().lower() in {"evet", "true", "1", "yes", "var", "x"}
-
-
-if AGENT_PATH and os.path.exists(AGENT_PATH):
-    if AGENT_PATH.lower().endswith(".csv"):
-        df_agents = pd.read_csv(AGENT_PATH, dtype=str).fillna("")
-    else:
-        df_agents = pd.read_excel(AGENT_PATH, dtype=str).fillna("")
-    print(f"[H3] Agent master yüklendi: {AGENT_PATH}  →  {len(df_agents)} satır")
+# --- 3a) Özel off tablosu → off_map[code] = set(date) -------------------
+off_map = {}
+if OFF_PATH and os.path.exists(OFF_PATH):
+    df_off = _read_table(OFF_PATH)
+    gun_kolonlari = [c for c in df_off.columns if c.lower().startswith("gun_")]
+    for _, row in df_off.iterrows():
+        d = row.to_dict()
+        code = str(d.get("agent_user_code", "")).strip()
+        if not code:
+            continue
+        gunler = set()
+        for c in gun_kolonlari:
+            if _flag(d.get(c, "")):
+                n = int(c.split("_")[1])               # gun_5 → 5
+                try:
+                    gunler.add(dt.date(AY_YIL, AY_AY, n))
+                except ValueError:
+                    pass                                # ayda olmayan gün (gun_31 vs.)
+        if gunler:
+            off_map[code] = gunler
+    print(f"[H3] Özel off yüklendi: {len(df_off)} satır, "
+          f"{len(off_map)} agentın özel izni var ({len(gun_kolonlari)} gün kolonu)")
 else:
-    df_agents = _dummy_agents()
-    print(f"[H3] ⚠ DUMMY MOD (gerçek agent master yok) → {len(df_agents)} agent üretildi")
+    print(f"[H3] Özel off tablosu yok (OFF_PATH boş) → izin yalnız bayraklardan")
 
-# Şema kontrolü
-eksik = [c for c in SCHEMA if c not in df_agents.columns]
-if eksik:
-    raise SystemExit(f"[H3] HATA: agent master'da eksik kolon(lar): {eksik}")
-
-# Kuyruğa süz + alanları parse et → AG sözlüğü
+# --- 3b) Agent master → AG sözlüğü --------------------------------------
+PAZARTESI, CUMA = 0, 4
 AG = {}
-for _, r in df_agents.iterrows():
-    if str(r["kuyruk"]).strip() != QUEUE:
+pt_elendi = 0
+for _, row in df_agents.iterrows():
+    d = row.to_dict()
+    code = str(d.get("agent_user_code", "")).strip()
+    if not code:
         continue
-    aid = str(r["agent_id"]).strip()
-    AG[aid] = {
-        "takim":  str(r["takim"]).strip(),
-        "tip":    str(r["calisma_tipi"]).strip().lower(),
-        "sabit_vardiya": str(r["sabit_vardiya"]).strip(),
-        "izin":   set(parse_izin(r["izin_gunleri"])),
-        "hamile": parse_bool(r["hamile"]),
+    if norm_kuyruk(d.get("line_based_main_group", "")) != QUEUE:
+        continue                                       # başka kuyruk
+    if _flag(d.get("kismi_calisan_flg", "")):
+        pt_elendi += 1
+        continue                                       # PART-TIME → çıkar
+
+    # tekrarlı + tam-ay + özel off → tek bir izin kümesi
+    izin = set(off_map.get(code, set()))
+    if _flag(d.get("idari_izinli_flg", "")) or _flag(d.get("dogum_izni_flg", "")):
+        izin |= GUN_SET                                # tüm ay müsait değil
+    if _flag(d.get("pazartesi_izinli_flg", "")):
+        izin |= {x for x in GUN_SET if x.weekday() == PAZARTESI}
+    if _flag(d.get("cuma_izinli_flg", "")):
+        izin |= {x for x in GUN_SET if x.weekday() == CUMA}
+
+    AG[code] = {
+        "name":   str(d.get("agent_name", "")).strip(),
+        "takim":  f"{str(d.get('groupname','')).strip()}|{str(d.get('teamleader_name','')).strip()}",
+        "tip":    "esnek",                             # calisma_tipi yok → hepsi esnek
+        "sabit_vardiya": "",
+        "izin":   izin,
+        # aşağıdakiler OKUNUR, sonraki adımlarda uygulanacak
+        "hamile":        _flag(d.get("hamile_flg", "")),
+        "sut":           _flag(d.get("sut_izni_flg", "")),
+        "sabah":         _flag(d.get("sabah_calisir_flg", "")),
+        "mesai_yok":     _flag(d.get("mesaiye_kalamaz_flg", "")),
+        "idari":         _flag(d.get("idari_izinli_flg", "")),
+        "dogum":         _flag(d.get("dogum_izni_flg", "")),
     }
 
-SABIT = [a for a in AG if AG[a]["tip"] == "sabit"]
+SABIT = [a for a in AG if AG[a]["tip"] == "sabit"]     # şimdilik boş (calisma_tipi yok)
 ESNEK = [a for a in AG if AG[a]["tip"] == "esnek"]
-print(f"[H3] '{QUEUE}' agent sayısı: {len(AG)}  (sabit={len(SABIT)}, esnek={len(ESNEK)})")
-print(f"[H3] hamile: {sum(1 for a in AG if AG[a]['hamile'])}  | "
-      f"takımlar: {sorted({AG[a]['takim'] for a in AG})}")
-izinli = {a: sorted(str(d) for d in AG[a]['izin']) for a in AG if AG[a]['izin']}
-print(f"[H3] izinli agentlar: {izinli or '(yok)'}")
+
+print(f"[H3] '{QUEUE}' agent: {len(AG)}  (PT elendi: {pt_elendi})")
+print(f"[H3] takım sayısı: {len({AG[a]['takim'] for a in AG})}")
+print(f"[H3] bayraklar — hamile:{sum(AG[a]['hamile'] for a in AG)}  "
+      f"sut:{sum(AG[a]['sut'] for a in AG)}  "
+      f"sabah_calisir:{sum(AG[a]['sabah'] for a in AG)}  "
+      f"mesai_yok:{sum(AG[a]['mesai_yok'] for a in AG)}")
+tam_ay_off = [a for a in AG if AG[a]['izin'] >= GUN_SET]
+print(f"[H3] tüm-ay izinli (idari/doğum): {len(tam_ay_off)} → {tam_ay_off[:10]}"
+      f"{' ...' if len(tam_ay_off) > 10 else ''}")
+izinli = {a: len(AG[a]['izin']) for a in AG if AG[a]['izin'] and a not in tam_ay_off}
+print(f"[H3] kısmi izinli agent sayısı: {len(izinli)}  "
+      f"(kişi başı izin günü, ilk 10): {dict(list(izinli.items())[:10])}")
 
 
 # %% [HÜCRE 4] — ÖN-İŞLEME (sabit gömme → rezidüel + müsaitlik) ─────────
-# Saat 'HH:MM-HH:MM' → o günkü shift_key eşlemesi
 def saat_to_shift(ds, saat):
     for s, info in sc_by_day[ds].items():
         if f"{info.get('start')}-{info.get('end')}" == saat:
@@ -236,14 +244,14 @@ def saat_to_shift(ds, saat):
     return None
 
 
-fixed_roster = {}        # fixed_roster[agent][ds] = shift_key  (sabitlerin gömülü planı)
-sabit_count = {ds: {s: 0 for s in SHIFTS} for ds in WEEK}
+fixed_roster = {}
+sabit_count = {ds: {s: 0 for s in SHIFTS} for ds in GUNLER}
 uyari_sabit = []
 
-for a in SABIT:
+for a in SABIT:                                        # şimdilik boş
     sv = AG[a]["sabit_vardiya"]
     fixed_roster[a] = {}
-    for ds in WEEK:
+    for ds in GUNLER:
         d = dt.date.fromisoformat(ds)
         if d in AG[a]["izin"]:
             fixed_roster[a][ds] = "izin"
@@ -256,82 +264,68 @@ for a in SABIT:
             fixed_roster[a][ds] = s
             sabit_count[ds][s] += 1
 
-# Rezidüel = max(0, talep − sabit);  negatifse uyar (kararımız: kırp + raporla)
-residual = {ds: {} for ds in WEEK}
+residual = {ds: {} for ds in GUNLER}
 uyari_negatif = []
-for ds in WEEK:
+for ds in GUNLER:
     for s in SHIFTS:
         ham = demand[ds].get(s, 0) - sabit_count[ds][s]
         residual[ds][s] = max(0, ham)
         if ham < 0:
             uyari_negatif.append((ds, s, demand[ds].get(s, 0), sabit_count[ds][s]))
 
-print(f"[H4] Sabit gömüldü ({len(SABIT)} agent). REZİDÜEL talep (esneklerin dolduracağı):")
-print("      " + "  ".join(f"{s:>6}" for s in SHIFTS) + "   (sabit gömülü ↓)")
-for ds in WEEK:
-    d = dt.date.fromisoformat(ds)
-    rez = "  ".join(f"{residual[ds][s]:>6}" for s in SHIFTS)
-    sab = "  ".join(f"{sabit_count[ds][s]:>2}" for s in SHIFTS)
-    print(f"  {DAY_TR[d.weekday()]} {rez}   | sabit: {sab}")
-
-if uyari_sabit:
-    print(f"[H4] ⚠ sabit vardiyası o gün talep kovasında yok: {uyari_sabit}")
 if uyari_negatif:
-    print(f"[H4] ⚠ NEGATİF rezidüel (sabit > talep) — kırpıldı, kontrol et: {uyari_negatif}")
+    print(f"[H4] ⚠ NEGATİF rezidüel (sabit > talep) — kırpıldı: {uyari_negatif[:8]}")
 else:
-    print(f"[H4] ✓ negatif rezidüel yok")
+    print(f"[H4] ✓ negatif rezidüel yok (sabit agent: {len(SABIT)})")
 
-# Müsaitlik ön-kontrol: her gün esnek-müsait sayısı, rezidüel talebi karşılıyor mu?
 print(f"[H4] MÜSAİTLİK ÖN-KONTROL (esnek-müsait vs rezidüel talep):")
-for ds in WEEK:
+yetersiz = []
+for ds in GUNLER:
     d = dt.date.fromisoformat(ds)
     musait = [a for a in ESNEK if d not in AG[a]["izin"]]
     rez_top = sum(residual[ds].values())
-    bayrak = "OK" if len(musait) >= rez_top else "⚠ YETERSİZ"
-    print(f"  {DAY_TR[d.weekday()]} müsait_esnek={len(musait):>3}  rezidüel_talep={rez_top:>3}  → {bayrak}")
+    if len(musait) < rez_top:
+        yetersiz.append((etiket(ds).strip(), len(musait), rez_top))
+if yetersiz:
+    print(f"  ⚠ YETERSİZ günler (müsait<talep): {yetersiz}")
+else:
+    print(f"  ✓ her gün esnek-müsait ≥ rezidüel talep")
 
 
 # %% [HÜCRE 5] — CP-SAT MODEL ───────────────────────────────────────────
 model = cp_model.CpModel()
 
-# Karar değişkeni: yalnız ESNEK agentlar için, ve izin günü hariç.
 x = {}
 for a in ESNEK:
-    for ds in WEEK:
+    for ds in GUNLER:
         d = dt.date.fromisoformat(ds)
         if d in AG[a]["izin"]:
-            continue                              # izin → o gün hiç değişken yok (atanamaz)
+            continue                                   # izin → o gün hiç değişken yok
         for s in SHIFTS:
             x[(a, ds, s)] = model.NewBoolVar(f"x_{a}_{ds}_{s}")
 
 # KISIT 1 — Coverage (sert): esnek atama == rezidüel talep
-for ds in WEEK:
+for ds in GUNLER:
     for s in SHIFTS:
-        model.Add(
-            sum(x[(a, ds, s)] for a in ESNEK if (a, ds, s) in x) == residual[ds][s]
-        )
+        model.Add(sum(x[(a, ds, s)] for a in ESNEK if (a, ds, s) in x) == residual[ds][s])
 
-# KISIT 2 — Günde ≤1 vardiya (off'a izin var; off-kotası Adım 2'de)
+# KISIT 2 — Günde ≤1 vardiya
 for a in ESNEK:
-    for ds in WEEK:
-        gunun_varlari = [x[(a, ds, s)] for s in SHIFTS if (a, ds, s) in x]
-        if gunun_varlari:
-            model.Add(sum(gunun_varlari) <= 1)
+    for ds in GUNLER:
+        gunun = [x[(a, ds, s)] for s in SHIFTS if (a, ds, s) in x]
+        if gunun:
+            model.Add(sum(gunun) <= 1)
 
-print(f"[H5] Model kuruldu. Karar değişkeni (x): {len(x)}  "
-      f"(esnek={len(ESNEK)} × gün={len(WEEK)} × vardiya={len(SHIFTS)} − izin günleri)")
-print(f"[H5] Sert kısıt: coverage ({len(WEEK)*len(SHIFTS)} adet) + günde≤1 vardiya")
-print(f"[H5] Amaç fonksiyonu: yok (Adım 1 = feasibility)")
+print(f"[H5] Model kuruldu. Karar değişkeni (x): {len(x)}")
+print(f"[H5] Sert kısıt: coverage ({len(GUNLER)*len(SHIFTS)} adet) + günde≤1 vardiya")
 
 
 # %% [HÜCRE 6] — ÇÖZ ────────────────────────────────────────────────────
 solver = cp_model.CpSolver()
 status = solver.Solve(model)
-print(f"[H6] Çözüm durumu: {solver.StatusName(status)}  "
-      f"(süre: {solver.WallTime():.3f} sn)")
+print(f"[H6] Çözüm durumu: {solver.StatusName(status)}  (süre: {solver.WallTime():.3f} sn)")
 if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    print("[H6] ⚠ INFEASIBLE — büyük ihtimal bir günde esnek-müsait < rezidüel talep "
-          "(H4 ön-kontrolüne bak).")
+    print("[H6] ⚠ INFEASIBLE — bir günde esnek-müsait < rezidüel talep olabilir (H4'e bak).")
     raise SystemExit
 
 
@@ -348,20 +342,17 @@ def hucre(a, ds):
     return "off"
 
 
-print(f"[H7] ROSTER (agent × gün)  —  S=sabit, E=esnek")
-baslik = f"  {'agent':<6}{'tip':<4}{'takım':<6}" + "".join(f"{DAY_TR[dt.date.fromisoformat(ds).weekday()]:<6}" for ds in WEEK)
-print(baslik)
-for a in SABIT + ESNEK:
-    tip = "S" if a in SABIT else "E"
-    row = f"  {a:<6}{tip:<4}{AG[a]['takim']:<6}" + "".join(f"{hucre(a, ds):<6}" for ds in WEEK)
-    print(row)
+print(f"[H7] ROSTER (agent × gün, hafta hafta; * = hafta sonu)")
+for i, hafta in enumerate(HAFTALAR):
+    print(f"  ── Hafta {i+1} ──")
+    print(f"  {'agent':<9}" + "".join(f"{etiket(ds):<7}" for ds in hafta))
+    for a in SABIT + ESNEK:
+        row = f"  {a:<9}" + "".join(f"{hucre(a, ds):<7}" for ds in hafta)
+        print(row)
 
-# Coverage kontrolü: sabit + esnek == talep mi?
-print(f"[H7] COVERAGE KONTROLÜ (sabit+esnek / talep):")
-print("      " + "  ".join(f"{s:>9}" for s in SHIFTS))
+print(f"[H7] COVERAGE KONTROLÜ (atanan / talep) — sadece SAPANLAR:")
 tum_ok = True
-for ds in WEEK:
-    d = dt.date.fromisoformat(ds)
+for ds in GUNLER:
     parcalar = []
     for s in SHIFTS:
         esnek_atanan = sum(solver.Value(x[(a, ds, s)]) for a in ESNEK if (a, ds, s) in x)
@@ -369,13 +360,14 @@ for ds in WEEK:
         talep = demand[ds].get(s, 0)
         if toplam != talep:
             tum_ok = False
-        parcalar.append(f"{toplam:>3}/{talep:<4}")
-    print(f"  {DAY_TR[d.weekday()]} " + "  ".join(parcalar))
-print(f"[H7] {'✓ TÜM COVERAGE TUTUYOR' if tum_ok else '⚠ COVERAGE SAPMASI VAR (negatif rezidüel olabilir)'}")
+            parcalar.append(f"{s}:{toplam}/{talep}✗")
+    if parcalar:
+        print(f"  {etiket(ds).strip()}: " + "  ".join(parcalar))
+print(f"[H7] {'✓ TÜM AY COVERAGE TUTUYOR' if tum_ok else '⚠ COVERAGE SAPMASI VAR'}")
 
-# Kişi başı çalışma günü (Adım 7 adalet raporunun çekirdeği)
-print(f"[H7] kişi başı çalışılan gün (esnek):")
+print(f"[H7] kişi başı AY sayaçları (esnek)  — hs = hafta sonu çalışma:")
 for a in ESNEK:
-    calisma = sum(1 for ds in WEEK if hucre(a, ds) in SHIFTS)
-    izin_say = len(AG[a]["izin"] & {dt.date.fromisoformat(ds) for ds in WEEK})
-    print(f"  {a}: çalışma={calisma}  off={len(WEEK)-calisma-izin_say}  izin={izin_say}")
+    calisma = sum(1 for ds in GUNLER if hucre(a, ds) in SHIFTS)
+    hs_cal  = sum(1 for ds in GUNLER if is_hs(ds) and hucre(a, ds) in SHIFTS)
+    izin_say = len(AG[a]["izin"] & GUN_SET)
+    print(f"  {a:<9} çalışma={calisma:>2}  hs={hs_cal:>2}  izin={izin_say:>2}")
