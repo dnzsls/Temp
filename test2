@@ -1,23 +1,39 @@
-# %% [HÜCRE 14] — HAMİLE / SÜT: HAFTA SONU ÇALIŞAMAZ ──────────────────
-# hamile_flg / sut_izni_flg = 1 → Cmt/Pzr çalışamaz.
-# (≤20:00 bu agentlarda zaten sabah_calisir ile sağlanıyor.
-#  Resmi tatil kısmı, tatil takvimi girdisi gelince eklenecek.)
-hafta_sonu_yasak = set()
-for _, row in df_tam.iterrows():
-    hamile = pd.to_numeric(row.get("hamile_flg", 0), errors="coerce") == 1
-    sut    = pd.to_numeric(row.get("sut_izni_flg", 0), errors="coerce") == 1
-    if hamile or sut:
-        hafta_sonu_yasak.add(str(row["agent_user_code"]).strip())
+# %% [HÜCRE 15] — 11 SAAT DİNLENME (vardiyalar arası) ─────────────────
+# Ardışık iki gün arasında ≥11 saat dinlenme:
+#   önceki bitiş + 11 saat ≤ sonraki başlangıç.
+# Gece yarısını aşan vardiya (bitiş ≤ başlangıç) ertesi güne sarkar (+1 gün).
+DINLENME = 11 * 60                                  # 660 dk
+
+
+def bitis_abs(bas, bit):
+    """gün başından itibaren mutlak bitiş dakikası (aşıyorsa +1 gün)."""
+    b0, b1 = dakika(bas), dakika(bit)
+    return b1 if b1 > b0 else b1 + 1440
+
+
+# ardışık (peş peşe takvim) gün çiftleri
+gunler_d = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
+ardisik = []
+for i in range(len(gunler_d) - 1):
+    if (gunler_d[i + 1] - gunler_d[i]).days == 1:
+        ardisik.append((gunler_d[i].isoformat(), gunler_d[i + 1].isoformat()))
 
 n = 0
-for a in hafta_sonu_yasak:
-    for ds in PLAN_GUNLER:
-        if dt.date.fromisoformat(ds).weekday() < 5:    # hafta içi → serbest
-            continue
-        for v in gun_vardiyalari[ds]:                  # Cmt/Pzr → yasak
-            if (a, ds, v) in x:
-                model.Add(x[(a, ds, v)] == 0)
-                n += 1
+for a in AGENTS:
+    for ds1, ds2 in ardisik:
+        for v1 in gun_vardiyalari[ds1]:
+            if (a, ds1, v1) not in x:
+                continue
+            bas1, bit1 = saat[(ds1, v1)]
+            b1_abs = bitis_abs(bas1, bit1)          # gün1 başına göre bitiş
+            for v2 in gun_vardiyalari[ds2]:
+                if (a, ds2, v2) not in x:
+                    continue
+                bas2, _ = saat[(ds2, v2)]
+                b2_abs = dakika(bas2) + 1440        # gün2 başlangıcı (gün1 + 1440)
+                if b2_abs - b1_abs < DINLENME:      # dinlenme < 11s → ikisi birden olamaz
+                    model.Add(x[(a, ds1, v1)] + x[(a, ds2, v2)] <= 1)
+                    n += 1
 
-print(f"hafta sonu yasaklı agent (hamile/süt): {len(hafta_sonu_yasak)}  |  "
-      f"yasaklanan (agent,gün,vardiya): {n}")
+print(f"11 saat dinlenme kısıtı: {n} (yasaklanan ardışık vardiya çifti)")
+
