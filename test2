@@ -1,11 +1,11 @@
-# %% [HÜCRE 10] — COVERAGE KISITI ───────────────────────────────────────
-# Her (gün, vardiya) kovasında atanan kişi = talep (sert kısıt).
-# İzinli agentın o gün değişkeni yok → toplama girmez.
-for (ds, v), kisi in talep.items():
-    model.Add(sum(x[(a, ds, v)] for a in AGENTS if (a, ds, v) in x) == kisi)
+# %% [HÜCRE 11] — GÜNDE ≤1 VARDİYA ──────────────────────────────────────
+# Bir agent bir günde en fazla 1 vardiyada çalışır (0 = o gün off).
+n = 0
+for a in AGENTS:
+    for ds in PLAN_GUNLER:
+        gunun = [x[(a, ds, v)] for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        if gunun:
+            model.Add(sum(gunun) <= 1)
+            n += 1
 
-print(f"coverage kısıtı: {len(talep)} kova (her biri 'atanan == talep')")
-
-cov = {}
-for (ds, v), kisi in talep.items():
-    cov[(ds, v)] = model.Add(sum(x[(a, ds, v)] for a in AGENTS if (a, ds, v) in x) == kisi)
+print(f"günde ≤1 vardiya kısıtı: {n} (agent × gün)")
