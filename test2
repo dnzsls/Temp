@@ -1,29 +1,22 @@
-# %% [HÜCRE 12] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
-solver = cp_model.CpSolver()
-status = solver.Solve(model)
-print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
+# 1) agent listesi mükerrer mi?
+print("AGENTS:", len(AGENTS), "| benzersiz:", len(set(AGENTS)))
 
-if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    raise SystemExit("çözüm yok (INFEASIBLE) — bir günde talep, müsait agent sayısını "
-                     "aşıyor olabilir.")
+# 2) talep tablosu (gün,vardiya) bazında mükerrer mi?
+print("df_talep:", len(df_talep),
+      "| benzersiz (tarih,vardiya):", len(df_talep.drop_duplicates(["tarih", "vardiya"])))
 
-# coverage gerçekten tuttu mu? (sapan çift sayısı)
-sapan = 0
-for (ds, v), kisi in talep.items():
-    atanan = 0
-    for a in AGENTS:
-        if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
-            atanan += 1
-    if atanan != kisi:
-        sapan += 1
-print("coverage: " + ("✓ tüm çiftler tutuyor" if sapan == 0 else f"⚠ {sapan} çift sapıyor"))
+# 3) bir günün vardiya listesinde tekrar var mı?
+g0 = PLAN_GUNLER[0]
+print("ilk gün vardiyaları:", len(gun_vardiyalari[g0]),
+      "| benzersiz:", len(set(gun_vardiyalari[g0])))
 
-# dağılım sağlaması: kişi başı çalışma günü (ilk 10 agent)
-print("kişi başı çalışma günü (ilk 10):")
-for a in AGENTS[:10]:
-    calisma = 0
-    for ds in PLAN_GUNLER:
-        for v in gun_vardiyalari[ds]:
-            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
-                calisma += 1
-    print(f"  {a}: {calisma} gün")
+# 4) U101 gerçekte hangi (gün,vardiya)'larda 1?  gün başına kaç kez sayılıyor?
+a0 = "U101"
+atamalar = []
+for ds in PLAN_GUNLER:
+    for v in gun_vardiyalari[ds]:
+        if (a0, ds, v) in x and solver.Value(x[(a0, ds, v)]) == 1:
+            atamalar.append((ds, v))
+print(a0, "→ sayılan atama:", len(atamalar),
+      "| benzersiz gün:", len(set(ds for ds, v in atamalar)))
+print("ilk 15:", atamalar[:15])
