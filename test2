@@ -1,39 +1,108 @@
-# %% [HÜCRE 15] — 11 SAAT DİNLENME (vardiyalar arası) ─────────────────
-# Ardışık iki gün arasında ≥11 saat dinlenme:
-#   önceki bitiş + 11 saat ≤ sonraki başlangıç.
-# Gece yarısını aşan vardiya (bitiş ≤ başlangıç) ertesi güne sarkar (+1 gün).
-DINLENME = 11 * 60                                  # 660 dk
+# %% [HÜCRE 16] — MESAİYE KALAMAZ (gün tavanı + tatil yasağı) ─────────
+# mesaiye_kalamaz_flg=1 → (a) resmi tatilde çalışamaz,
+#                          (b) toplam çalışma günü ≤ ayın iş günü sayısı.
+# Hafta sonu yasak DEĞİL: hafta içi izin alıp hafta sonu çalışsa bile tavanı
+# (örn. 22) aşmadığı sürece mesai sayılmaz.
+TATIL = set(dt.date.fromisoformat(d) for d in RESMI_TATILLER)
+
+# ayın iş günü sayısı = hafta içi günler − resmi tatiller
+AYLIK_IS_GUNU = 0
+for d in GUN_SET:
+    if d.weekday() < 5 and d not in TATIL:
+        AYLIK_IS_GUNU += 1
+
+mesai_yok = set()
+for _, row in df_tam.iterrows():
+    if pd.to_numeric(row.get("mesaiye_kalamaz_flg", 0), errors="coerce") == 1:
+        mesai_yok.add(str(row["agent_user_code"]).strip())
+
+# (a) resmi tatilde çalışamaz
+yasak = 0
+for a in mesai_yok:
+    for ds in PLAN_GUNLER:
+        if dt.date.fromisoformat(ds) in TATIL:
+            for v in gun_vardiyalari[ds]:
+                if (a, ds, v) in x:
+                    model.Add(x[(a, ds, v)] == 0)
+                    yasak += 1
+
+# (b) toplam çalışma günü ≤ ayın iş günü sayısı
+for a in mesai_yok:
+    tum = []
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari[ds]:
+            if (a, ds, v) in x:
+                tum.append(x[(a, ds, v)])
+    if tum:
+        model.Add(sum(tum) <= AYLIK_IS_GUNU)
+
+print(f"ayın iş günü: {AYLIK_IS_GUNU}  |  mesaiye kalamaz agent: {len(mesai_yok)}  |  "
+      f"tatil yasağı (agent,gün,vardiya): {yasak}")
 
 
-def bitis_abs(bas, bit):
-    """gün başından itibaren mutlak bitiş dakikası (aşıyorsa +1 gün)."""
-    b0, b1 = dakika(bas), dakika(bit)
-    return b1 if b1 > b0 else b1 + 1440
+# %% [HÜCRE 17] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
+solver = cp_model.CpSolver()
+status = solver.Solve(model)
+print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
+
+if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    raise SystemExit("çözüm yok (INFEASIBLE) — bir günde talep, müsait agent sayısını "
+                     "aşıyor olabilir.")
+
+# coverage gerçekten tuttu mu? (sapan çift sayısı)
+sapan = 0
+for (ds, v), kisi in talep.items():
+    atanan = 0
+    for a in AGENTS:
+        if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+            atanan += 1
+    if atanan != kisi:
+        sapan += 1
+print("coverage: " + ("✓ tüm çiftler tutuyor" if sapan == 0 else f"⚠ {sapan} çift sapıyor"))
+
+# dağılım sağlaması: kişi başı çalışma günü (ilk 10 agent)
+print("kişi başı çalışma günü (ilk 10):")
+for a in AGENTS[:10]:
+    calisma = 0
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari[ds]:
+            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                calisma += 1
+    print(f"  {a}: {calisma} gün")
 
 
-# ardışık (peş peşe takvim) gün çiftleri
-gunler_d = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
-ardisik = []
-for i in range(len(gunler_d) - 1):
-    if (gunler_d[i + 1] - gunler_d[i]).days == 1:
-        ardisik.append((gunler_d[i].isoformat(), gunler_d[i + 1].isoformat()))
-
-n = 0
+# %% [HÜCRE 18] — SONUÇ / ROSTER ────────────────────────────────────────
+# Çözümdeki 1 olan değişkenleri okunabilir tabloya çevir.
+# solver.Value(x[...]) → 0/1; 1 olanlar atamadır.
+sonuc = []
 for a in AGENTS:
-    for ds1, ds2 in ardisik:
-        for v1 in gun_vardiyalari[ds1]:
-            if (a, ds1, v1) not in x:
-                continue
-            bas1, bit1 = saat[(ds1, v1)]
-            b1_abs = bitis_abs(bas1, bit1)          # gün1 başına göre bitiş
-            for v2 in gun_vardiyalari[ds2]:
-                if (a, ds2, v2) not in x:
-                    continue
-                bas2, _ = saat[(ds2, v2)]
-                b2_abs = dakika(bas2) + 1440        # gün2 başlangıcı (gün1 + 1440)
-                if b2_abs - b1_abs < DINLENME:      # dinlenme < 11s → ikisi birden olamaz
-                    model.Add(x[(a, ds1, v1)] + x[(a, ds2, v2)] <= 1)
-                    n += 1
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari[ds]:
+            if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                bas, bit = saat[(ds, v)]               # H8'deki saat sözlüğünden
+                sonuc.append({"agent": a, "tarih": ds, "vardiya": v,
+                              "saat": f"{bas}-{bit}"})
 
-print(f"11 saat dinlenme kısıtı: {n} (yasaklanan ardışık vardiya çifti)")
+df_sonuc = pd.DataFrame(sonuc)                      # tidy: agent × tarih × vardiya × saat
+print(f"toplam atama: {len(df_sonuc)}")
+print(df_sonuc.head(20).to_string(index=False))
 
+# roster matrisi: TÜM agentlar × gün; hücre = izin / saat / off
+hucreler = []
+for a in AGENTS:
+    izinli = izin_map.get(a, set())
+    for ds in PLAN_GUNLER:
+        if dt.date.fromisoformat(ds) in izinli:
+            deger = "izin"
+        else:
+            deger = "off"
+            for v in gun_vardiyalari[ds]:
+                if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+                    bas, bit = saat[(ds, v)]
+                    deger = f"{bas}-{bit}"
+                    break
+        hucreler.append({"agent": a, "tarih": ds, "deger": deger})
+
+roster = pd.DataFrame(hucreler).pivot(index="agent", columns="tarih", values="deger")
+print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]} gün (izin/saat/off)")
+print(roster.head(10))
