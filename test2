@@ -537,7 +537,34 @@ for T, uyeler in takimlar.items():
 print(f"takım birlikteliği: {len(takimlar)} takım, {n} team_uses değişkeni (cezaya eklendi)")
 
 
-# %% [HÜCRE 18] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
+# %% [HÜCRE 18] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
+# Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
+# (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
+# Her (agent, hafta) için kullanılan başlangıç-saati tipi ≤ 1.
+n = 0
+for a in AGENTS:
+    for wi, hafta_gunleri in enumerate(haftalar.values()):
+        tip_varlar = {}                       # baslangic_saati -> [x değişkenleri]
+        for ds in hafta_gunleri:
+            for v in gun_vardiyalari[ds]:
+                if (a, ds, v) in x:
+                    bas = saat[(ds, v)][0]    # başlangıç saati = vardiya tipi
+                    tip_varlar.setdefault(bas, []).append(x[(a, ds, v)])
+        if len(tip_varlar) <= 1:
+            continue                          # zaten tek tip → kısıt gerekmez
+        tip_kullan = []
+        for bas, varlar in tip_varlar.items():
+            tk = model.NewBoolVar(f"tip_{a}_w{wi}_{bas}".replace(":", ""))
+            for xv in varlar:
+                model.Add(tk >= xv)           # bu tipte çalışırsa gösterge 1
+            tip_kullan.append(tk)
+        model.Add(sum(tip_kullan) <= 1)       # haftada en fazla 1 vardiya tipi
+        n += 1
+
+print(f"haftada aynı vardiya kısıtı: {n} (agent × hafta)")
+
+
+# %% [HÜCRE 19] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + takım) küçült
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
@@ -575,7 +602,7 @@ for a in AGENTS[:10]:
     print(f"  {a}: {calisma} gün")
 
 
-# %% [HÜCRE 19] — SONUÇ / ROSTER ────────────────────────────────────────
+# %% [HÜCRE 20] — SONUÇ / ROSTER ────────────────────────────────────────
 # Çözümdeki 1 olan değişkenleri okunabilir tabloya çevir.
 # solver.Value(x[...]) → 0/1; 1 olanlar atamadır.
 sonuc = []
