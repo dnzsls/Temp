@@ -540,6 +540,9 @@ print(f"takım birlikteliği: {len(takimlar)} takım, {n} team_uses değişkeni 
 # %% [HÜCRE 18] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + takım) küçült
 solver = cp_model.CpSolver()
+solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
+solver.parameters.max_time_in_seconds = 300        # süre sınırı → en iyi BULUNAN'ı al (optimal şart değil)
+solver.parameters.log_search_progress = True       # ilerlemeyi terminale bas (feasible bulundu mu görürsün)
 status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
 
