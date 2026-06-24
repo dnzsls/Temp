@@ -504,8 +504,41 @@ print(f"ayın iş günü: {AYLIK_IS_GUNU}  |  mesaiye kalamaz agent: {len(mesai_
       f"tatil yasağı (agent,gün,vardiya): {yasak}")
 
 
-# %% [HÜCRE 17] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
-model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + …) küçült
+# %% [HÜCRE 17] — TAKIM BİRLİKTELİĞİ (yumuşak: aynı vardiya) ──────────
+# Aynı takımın o gün çalışan üyeleri mümkünse AYNI vardiyada olsun.
+# team_uses[(T, gün, vardiya)] = 1 → takım T o gün o vardiyayı KULLANIYOR.
+# Bir takım bir günde ne kadar çok vardiya kullanırsa (bölünürse) o kadar ceza.
+# (Hamile/süt üyesi o vardiyaya giremiyorsa mecbur bölünür → ceza yenir, sert
+#  kısıt ihlal edilmez.)
+
+# takım → üye agent kodları
+takimlar = {}
+for _, row in df_tam.iterrows():
+    takimlar.setdefault(row["takim"], []).append(str(row["agent_user_code"]).strip())
+
+team_uses = {}
+n = 0
+for T, uyeler in takimlar.items():
+    for ds in PLAN_GUNLER:
+        for v in gun_vardiyalari[ds]:
+            uye_varlar = []                        # bu (gün,vardiya)'da değişkeni olan üyeler
+            for a in uyeler:
+                if (a, ds, v) in x:
+                    uye_varlar.append(x[(a, ds, v)])
+            if not uye_varlar:
+                continue
+            tu = model.NewBoolVar(f"tu_{T}_{ds}_{v}")
+            for xv in uye_varlar:
+                model.Add(tu >= xv)                # bir üye çalışıyorsa takım o vardiyayı kullanıyor
+            team_uses[(T, ds, v)] = tu
+            amac.append(tu)                        # her kullanılan vardiya = 1 ceza puanı
+            n += 1
+
+print(f"takım birlikteliği: {len(takimlar)} takım, {n} team_uses değişkeni (cezaya eklendi)")
+
+
+# %% [HÜCRE 18] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
+model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + takım) küçült
 solver = cp_model.CpSolver()
 status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
@@ -539,7 +572,7 @@ for a in AGENTS[:10]:
     print(f"  {a}: {calisma} gün")
 
 
-# %% [HÜCRE 18] — SONUÇ / ROSTER ────────────────────────────────────────
+# %% [HÜCRE 19] — SONUÇ / ROSTER ────────────────────────────────────────
 # Çözümdeki 1 olan değişkenleri okunabilir tabloya çevir.
 # solver.Value(x[...]) → 0/1; 1 olanlar atamadır.
 sonuc = []
