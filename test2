@@ -541,6 +541,13 @@ print(f"takım birlikteliği: {len(takimlar)} takım, {n} team_uses değişkeni 
 # Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
 # (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
 # Her (agent, hafta) için kullanılan başlangıç-saati tipi ≤ 1.
+
+# ISO-haftalar (H12 peş-peşe moddaysa burada da kurulur → bağımsız çalışır)
+haftalar = {}
+for ds in PLAN_GUNLER:
+    yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
+    haftalar.setdefault((yil, hafta), []).append(ds)
+
 n = 0
 for a in AGENTS:
     for wi, hafta_gunleri in enumerate(haftalar.values()):
@@ -640,8 +647,8 @@ for a in AGENTS:
                     break
         hucreler.append({"takim": tk, "agent": a, "tarih": ds, "deger": deger})
 
-roster = (pd.DataFrame(hucreler)
-          .pivot(index=["takim", "agent"], columns="tarih", values="deger")
-          .sort_index())
-print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]} gün (izin/saat/off)")
+roster = pd.DataFrame(hucreler).pivot(index="agent", columns="tarih", values="deger")
+roster.insert(0, "takim", roster.index.map(lambda a: agent_takim.get(a, "")))  # takım = kolon
+roster = roster.sort_values("takim")                                           # takıma göre grupla
+print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]-1} gün (izin/saat/off)")
 print(roster.head(15))
