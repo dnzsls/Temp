@@ -591,10 +591,16 @@ df_sonuc = pd.DataFrame(sonuc)                      # tidy: agent × tarih × va
 print(f"toplam atama: {len(df_sonuc)}")
 print(df_sonuc.head(20).to_string(index=False))
 
+# agent → takım eşlemesi (roster'da takımı göstermek için)
+agent_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
+                       df_tam["takim"]))
+
 # roster matrisi: TÜM agentlar × gün; hücre = izin / saat / off
+# index = (takım, agent) → aynı takım üyeleri yan yana
 hucreler = []
 for a in AGENTS:
     izinli = izin_map.get(a, set())
+    tk = agent_takim.get(a, "")
     for ds in PLAN_GUNLER:
         if dt.date.fromisoformat(ds) in izinli:
             deger = "izin"
@@ -605,8 +611,10 @@ for a in AGENTS:
                     bas, bit = saat[(ds, v)]
                     deger = f"{bas}-{bit}"
                     break
-        hucreler.append({"agent": a, "tarih": ds, "deger": deger})
+        hucreler.append({"takim": tk, "agent": a, "tarih": ds, "deger": deger})
 
-roster = pd.DataFrame(hucreler).pivot(index="agent", columns="tarih", values="deger")
+roster = (pd.DataFrame(hucreler)
+          .pivot(index=["takim", "agent"], columns="tarih", values="deger")
+          .sort_index())
 print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]} gün (izin/saat/off)")
-print(roster.head(10))
+print(roster.head(15))
