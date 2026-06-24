@@ -1,12 +1,10 @@
-# %% [HÜCRE 21] — AGENT ÖZET (çalışma / off / izin gün sayısı) ──────────
-# roster hücreleri "izin" / "off" / saat → her agent için say.
-gun_kolon = [c for c in roster.columns if c != "takim"]
-df_ozet = pd.DataFrame({
-    "takim":   roster["takim"],
-    "calisma": (~roster[gun_kolon].isin(["off", "izin"])).sum(axis=1),  # saat = çalışma
-    "off":     (roster[gun_kolon] == "off").sum(axis=1),
-    "izin":    (roster[gun_kolon] == "izin").sum(axis=1),
-})
-df_ozet["toplam"] = df_ozet[["calisma", "off", "izin"]].sum(axis=1)     # = gün sayısı (sağlama)
-print(f"agent özet: {len(df_ozet)} agent (toplam {len(gun_kolon)} gün/agent olmalı)")
-print(df_ozet.head(15))
+toplam_slot   = sum(talep.values())          # ay boyunca tüm inhouse kişi-slot
+gun_sayisi    = len(PLAN_GUNLER)
+agent_sayisi  = len(AGENTS)
+
+print(f"toplam inhouse kişi-slot (ay)     : {toplam_slot}")
+print(f"agent sayısı                       : {agent_sayisi}")
+print(f"planlanan gün                      : {gun_sayisi}")
+print(f"günlük ortalama inhouse ihtiyaç    : {toplam_slot/gun_sayisi:.0f} kişi/gün")
+print(f"agent başına ORTALAMA çalışma      : {toplam_slot/agent_sayisi:.1f} gün/ay")
+print(f"22 gün için gereken kapasite       : {agent_sayisi*22}  (mevcut talep: {toplam_slot})")
