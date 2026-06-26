@@ -604,9 +604,12 @@ for T, uyeler in takimlar.items():
         tum_uye = [xv for uv in vardiya_uye.values() for xv in uv]
         tw = model.NewBoolVar(f"tw_{T}_{ds}")
         model.Add(tw <= sum(tum_uye))            # kimse çalışmıyorsa tw=0
-        model.Add(tw <= sum(tu_list))            # tw ≤ kullanılan vardiya → ceza HER ZAMAN ≥0 (LP bound kırılmaz!)
-        # ceza = kullanılan vardiya sayısı − çalışıyor mu  (≥0, sadece fazla bölünme)
-        amac.append(W_TAKIM * (sum(tu_list) - tw))
+        model.Add(tw <= sum(tu_list))            # tw ≤ kullanılan vardiya sayısı
+        # bölünme = max(0, kullanılan vardiya − çalışıyor mu) → ≥0 DEĞİŞKEN
+        # (amaca '−tw' koymuyoruz; negatif katsayı alt sınırı negatife düşürüyordu)
+        bolunme_v = model.NewIntVar(0, len(tu_list), f"bol_{T}_{ds}")
+        model.Add(bolunme_v >= sum(tu_list) - tw)
+        amac.append(W_TAKIM * bolunme_v)         # pozitif katsayı, ≥0 değişken → alt sınır ≥0
         n += 1
 
 print(f"takım birlikteliği: {len(takimlar)} takım, {n} (takım,gün) bölünme cezası "
