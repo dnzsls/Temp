@@ -1,3 +1,36 @@
+# %% [HÜCRE 26] — VARDİYA TABLOLARI (talep vs atanan) ──────────────────
+# df_sonuc'a takım eşlemesi (yoksa)
+if "takim" not in df_sonuc.columns:
+    df_sonuc["takim"] = df_sonuc["agent"].map(agent_takim)
+
+# --- TABLO A: gün × vardiya × TAKIM → talep, atanan (takım kırılımı) ---
+# Bir vardiya birden çok takımdan karşılanıyorsa satır çoğalır.
+df_takim_detay = (df_sonuc.groupby(["tarih", "vardiya", "saat", "takim"])
+                  .size().reset_index(name="atanan"))
+df_takim_detay["talep"] = df_takim_detay.apply(
+    lambda r: talep[(r["tarih"], r["vardiya"])], axis=1)
+df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep", "takim", "atanan"]]
+df_takim_detay = df_takim_detay.sort_values(["tarih", "vardiya", "takim"])
+print(f"TABLO A (takım kırılımı): {len(df_takim_detay)} satır")
+print(df_takim_detay.head(20).to_string(index=False))
+
+# --- TABLO B: gün × vardiya → ihtiyaç vs gerçekleşen (takımsız, tekil) ---
+satir = []
+for (ds, v), kisi in talep.items():
+    atanan = 0
+    for a in AGENTS:
+        if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+            atanan += 1
+    bas, bit = saat[(ds, v)]
+    satir.append({"tarih": ds, "vardiya": v, "saat": f"{bas}-{bit}",
+                  "ihtiyac": kisi, "gerceklesen": atanan, "fark": atanan - kisi})
+df_vardiya = pd.DataFrame(satir).sort_values(["tarih", "vardiya"])
+print(f"\nTABLO B (vardiya bazında, takımsız): {len(df_vardiya)} satır")
+print(df_vardiya.head(20).to_string(index=False))
+
+
+
+
 # 1) tamamen boş kovalar (talep var, atanan 0)
 bos = df_vardiya[(df_vardiya["gerceklesen"] == 0) & (df_vardiya["ihtiyac"] > 0)]
 print(f"boş kova sayısı: {len(bos)}")
