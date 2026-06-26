@@ -1,4 +1,4 @@
- # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 ==================================================================
@@ -59,9 +59,11 @@ PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 RESMI_TATILLER   = []          # manuel resmi tatil tarihleri, ör. ["2026-07-15", "2026-08-30"]
 TOL_COVERAGE     = 15          # coverage SERT band: talep ± TOL (asla aşılmaz)
 SERBEST_COVERAGE = 5           # serbest bölge: talep ± SERBEST bedava (ceza yok)
+AGIR_ESIK        = 15          # bunu aşan sapma AĞIR cezalı (konveks → sapma yayılır)
 # amaç fonksiyonu ağırlıkları (yüksek = o hedef daha öncelikli)
-W_COVERAGE = 1                 # coverage sapma (serbest dışı)
-W_TAKIM    = 5                 # takım bölünmesi  ← yüksek tut: takımlar bütün kalsın
+W_COVERAGE  = 1                # coverage sapma (5–15 arası)
+W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
+W_TAKIM     = 5                # takım bölünmesi  ← yüksek tut: takımlar bütün kalsın
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
@@ -304,12 +306,16 @@ for (ds, v), kisi in talep.items():
     sapma = model.NewIntVar(0, UB, f"sapma_{ds}_{v}")
     model.Add(sapma >= atanan - kisi)         # sapma ≥ |atanan - talep|
     model.Add(sapma >= kisi - atanan)
-    ceza = model.NewIntVar(0, UB, f"covceza_{ds}_{v}")
-    model.Add(ceza >= sapma - SERBEST_COVERAGE)   # sadece SERBEST'i aşan kısım cezalı
-    amac.append(W_COVERAGE * ceza)
+    # konveks ceza: 0–5 bedava | 5–15 normal | 15+ ağır
+    ceza1 = model.NewIntVar(0, UB, f"covceza1_{ds}_{v}")
+    model.Add(ceza1 >= sapma - SERBEST_COVERAGE)  # SERBEST'i (5) aşan kısım
+    ceza2 = model.NewIntVar(0, UB, f"covceza2_{ds}_{v}")
+    model.Add(ceza2 >= sapma - AGIR_ESIK)         # AGIR_ESIK'i (15) aşan kısım (ekstra)
+    amac.append(W_COVERAGE * ceza1 + W_COVERAGE2 * ceza2)
     cov[(ds, v)] = sapma
 
-print(f"coverage: {len(cov)} çift (serbest ±{SERBEST_COVERAGE}, sert band YOK; sapma cezalı)")
+print(f"coverage: {len(cov)} çift (serbest ±{SERBEST_COVERAGE}, ağır eşik ±{AGIR_ESIK}; "
+      f"sert sınır YOK, konveks ceza)")
 
 
 # %% [HÜCRE 11] — GÜNDE ≤1 VARDİYA ──────────────────────────────────────
@@ -644,7 +650,7 @@ print(f"haftada aynı vardiya kısıtı: {n} (agent × hafta)")
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + takım) küçült
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
-solver.parameters.max_time_in_seconds = 300        # süre sınırı → en iyi BULUNAN'ı al (optimal şart değil)
+solver.parameters.max_time_in_seconds = 600        # süre sınırı → en iyi BULUNAN'ı al (optimal şart değil)
 solver.parameters.log_search_progress = True       # ilerlemeyi terminale bas (feasible bulundu mu görürsün)
 status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
