@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+ # -*- coding: utf-8 -*-
 """
 AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 ==================================================================
@@ -288,10 +288,11 @@ print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
       f"izin günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
 
 
-# %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST + sert band ±TOL) ───
-# Sert band: talep ± TOL (asla aşılmaz).
-# Serbest bölge: talep ± SERBEST arası BEDAVA; sadece SERBEST'i aşan sapma cezalanır.
-# (Takım boyutları tam tutmadığından küçük sapmalar ücretsiz olmalı.)
+# %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST, SERT BAND YOK) ─────
+# Sert üst/alt sınır YOK → kova talebi aşılabilir veya eksik bırakılabilir.
+# (Sert min-çalışma feasible olsun diye coverage serbest esner.)
+# Serbest bölge: talep ± SERBEST arası BEDAVA; ötesi cezalı (W_COVERAGE ağırlık).
+UB = len(AGENTS)                              # sapma üst sınırı (en fazla tüm agentlar)
 amac = []                                     # amaç fonksiyonu terimleri (minimize edilecek)
 cov = {}
 for (ds, v), kisi in talep.items():
@@ -300,17 +301,15 @@ for (ds, v), kisi in talep.items():
         if (a, ds, v) in x:
             katilan.append(x[(a, ds, v)])
     atanan = sum(katilan)
-    model.Add(atanan >= kisi - TOL_COVERAGE)  # sert alt sınır
-    model.Add(atanan <= kisi + TOL_COVERAGE)  # sert üst sınır
-    sapma = model.NewIntVar(0, TOL_COVERAGE, f"sapma_{ds}_{v}")
+    sapma = model.NewIntVar(0, UB, f"sapma_{ds}_{v}")
     model.Add(sapma >= atanan - kisi)         # sapma ≥ |atanan - talep|
     model.Add(sapma >= kisi - atanan)
-    ceza = model.NewIntVar(0, TOL_COVERAGE, f"covceza_{ds}_{v}")
+    ceza = model.NewIntVar(0, UB, f"covceza_{ds}_{v}")
     model.Add(ceza >= sapma - SERBEST_COVERAGE)   # sadece SERBEST'i aşan kısım cezalı
-    amac.append(ceza)
+    amac.append(W_COVERAGE * ceza)
     cov[(ds, v)] = sapma
 
-print(f"coverage: {len(cov)} çift (serbest ±{SERBEST_COVERAGE}, sert band ±{TOL_COVERAGE})")
+print(f"coverage: {len(cov)} çift (serbest ±{SERBEST_COVERAGE}, sert band YOK; sapma cezalı)")
 
 
 # %% [HÜCRE 11] — GÜNDE ≤1 VARDİYA ──────────────────────────────────────
@@ -759,3 +758,27 @@ bolunme = df_takim.groupby(["takim", "tarih"]).size()
 print(f"\n(takım,gün) toplam: {len(bolunme)}  |  bölünmüş (>1 vardiya): {int((bolunme > 1).sum())}")
 print("en çok bölünen 10 (takım,gün):")
 print(bolunme[bolunme > 1].sort_values(ascending=False).head(10))
+
+
+# %% [HÜCRE 25] — COVERAGE RAPORU (talep / atanan / fazla / eksik) ─────
+# Sert band kaldırıldığı için her kova talebi aşabilir/eksik kalabilir.
+# Burada her (gün,vardiya) için talep vs atanan ve sapma görülür.
+satir = []
+for (ds, v), kisi in talep.items():
+    atanan = 0
+    for a in AGENTS:
+        if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
+            atanan += 1
+    bas, bit = saat[(ds, v)]
+    satir.append({"tarih": ds, "vardiya": v, "saat": f"{bas}-{bit}",
+                  "talep": kisi, "atanan": atanan, "fark": atanan - kisi})
+
+df_cov = pd.DataFrame(satir)                    # tüm kovaların talep/atanan/fark detayı
+toplam_fazla = int(df_cov.loc[df_cov["fark"] > 0, "fark"].sum())
+toplam_eksik = int(-df_cov.loc[df_cov["fark"] < 0, "fark"].sum())
+tam = int((df_cov["fark"] == 0).sum())
+print(f"coverage raporu: {len(df_cov)} kova  |  tam tutan: {tam}  |  "
+      f"toplam FAZLA: +{toplam_fazla}  |  toplam EKSİK: -{toplam_eksik}")
+print("en çok sapan 12 kova:")
+print(df_cov.reindex(df_cov["fark"].abs().sort_values(ascending=False).index)
+      .head(12).to_string(index=False))
