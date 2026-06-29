@@ -10,13 +10,30 @@ Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
 `python3 agent_detayli_model.py` ile baştan sona çalışır.
 
-KAPSAM (şu an):
-  AKTİF : coverage (sert), günde ≤1 vardiya, müsaitlik bloğu
-          (özel-off + tam-ay bayrakları + tekrarlı Pzt/Cuma).
-  OKUNUR ama henüz UYGULANMAZ : takim, sabah_calisir (≤20:00), sut/hamile
-          (saat/hafta sonu/tatil), mesaiye_kalamaz (mesai+gün tavanı),
-          off-kotası (haftada max 6), aylık sayaçlar, adalet.
-          → kendi adımlarında roster üstünde görüp ekleyeceğiz.
+KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
+
+  SERT KISITLAR (ihlal edilemez):
+    H9  müsaitlik    : izinli gün → değişken yok (atanamaz).
+    H10 gece coverage: gece kovaları (00:00/24:00) talep ± GECE_BUFFER(3) bandı.
+    H11 günde ≤1     : bir agent bir günde en çok 1 vardiya.
+    H12 haftada ≤6   : her ISO-hafta ≤6 gün (≥1 off).
+    H13 sabah_calisir: bitişi ≤20:00, gece/ertesi-güne-sarkan vardiya yok.
+    H14 hamile/süt   : Cmt/Pzr çalışamaz.
+    H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
+    H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
+    H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
+                       kota = ayın iş günü − hafta içi izin.
+    H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
+    H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu serbest).
+
+  YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
+    H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
+    H19 takım bölünme : W_TAKIM(5) × fazladan bölünme (sadece hafta içi).
+    H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
+    H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
+
+  HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu, vardiya-saati adaleti,
+    mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
 
 GİRDİLER (hepsi GERÇEK — dummy yok):
   1) PKL_PATH   : aylık modelin results[date][queue] çıktısı (planlama, pkl dosyası).
