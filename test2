@@ -75,7 +75,6 @@ pd.set_option("display.expand_frame_repr", False)
 QUEUE       = "kitle"          # kitle | kurumsal | gold
 PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 RESMI_TATILLER   = []          # manuel resmi tatil tarihleri, ör. ["2026-07-15", "2026-08-30"]
-TOL_COVERAGE     = 15          # coverage SERT band: talep ± TOL (asla aşılmaz)
 SERBEST_COVERAGE = 5           # serbest bölge: talep ± SERBEST bedava (ceza yok)
 AGIR_ESIK        = 15          # bunu aşan sapma AĞIR cezalı (konveks → sapma yayılır)
 GECE_BASLANGIC   = ("00:00", "24:00")   # gece vardiyası başlangıçları
@@ -776,7 +775,7 @@ for (ds, v), kisi in talep.items():
     if fark:
         sapan += 1
         toplam_sapma += fark
-print(f"coverage: {sapan} çift talepten sapıyor (toplam sapma {toplam_sapma}, band ±{TOL_COVERAGE})")
+print(f"coverage: {sapan} çift talepten sapıyor (toplam sapma {toplam_sapma})")
 
 # dağılım sağlaması: kişi başı çalışma günü (ilk 10 agent)
 print("kişi başı çalışma günü (ilk 10):")
