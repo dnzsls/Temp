@@ -1,6 +1,10 @@
-print("talepli gün (PLAN_GUNLER):", len(PLAN_GUNLER))
-print("takvim günü (GUNLER):     ", len(GUNLER))
-eksik = sorted(set(GUNLER) - set(PLAN_GUNLER))
-print("PLAN_GUNLER'de OLMAYAN günler:", eksik)
-print("df_ozet toplam (ilk 5):")
-print(df_ozet["toplam"].head())
+a = "U______"   # planlamada 9 off görünen agent
+
+print("roster satırı (30 gün):")
+print(roster.loc[a])
+
+print("\nhücre değer sayımı (off/izin/saat kaç kez):")
+print(roster.loc[a].drop("takim").value_counts(dropna=False))   # dropna=False → NaN'ı da göster
+
+print("\ndf_ozet bu agent:")
+print(df_ozet.loc[a])
