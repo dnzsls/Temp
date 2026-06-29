@@ -31,9 +31,10 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H19 takım bölünme : W_TAKIM(5) × fazladan bölünme (sadece hafta içi).
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
+    H20C hafta sonu adaleti: W_ADALET_HS(2) × max_hs [en çok hafta sonu çalışanı bastır → yük yayılsın].
 
-  HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu, vardiya-saati adaleti,
-    mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
+  HENÜZ YOK (sonraki adımlar): vardiya-saati adaleti (akşam 18:00+ , agent bazında),
+    gece/uydu rotasyonu, mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
 
 GİRDİLER (hepsi GERÇEK — dummy yok):
   1) PKL_PATH   : aylık modelin results[date][queue] çıktısı (planlama, pkl dosyası).
@@ -85,6 +86,7 @@ W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapma
 W_TAKIM     = 5                # takım bölünmesi  ← yüksek tut: takımlar bütün kalsın
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
+W_ADALET_HS = 2                # hafta sonu adaleti: en çok hafta sonu çalışanı bastır (yük yayılsın)
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
@@ -725,6 +727,26 @@ for a in AGENTS:
 
 print(f"haftalık off dengesi: {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})")
 print(f"hafta sonu önceliği: {n2} agent hafta-içi-off cezası (ağ. {W_HI_OFF})")
+
+
+# %% [HÜCRE 20C] — HAFTA SONU ADALETİ (agent bazında, min-max) ─────────
+# Hafta sonu çalışma kişiler arası dengeli dağılsın: kimse aşırı hafta sonu
+# çalışmasın. En çok hafta sonu çalışan agentın gün sayısını (max_hs) bastırırız
+# → herkes birbirine yaklaşır (yük yayılır). Yumuşak: coverage gerekince esner.
+# Not: hamile/süt zaten hafta sonu çalışamaz (H14) → değişkeni yok → sayılmaz.
+hs_gunler = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
+max_hs = model.NewIntVar(0, len(hs_gunler), "max_hafta_sonu")
+nh = 0
+for a in AGENTS:
+    hs_var = [x[(a, ds, v)] for ds in hs_gunler
+              for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+    if hs_var:
+        model.Add(max_hs >= sum(hs_var))     # bu agentın hafta sonu çalışması ≤ max_hs
+        nh += 1
+amac.append(W_ADALET_HS * max_hs)            # max'ı küçült → hafta sonu yükü yayılır
+
+print(f"hafta sonu adaleti: {nh} agent, max_hs bastırılıyor "
+      f"(ağ. {W_ADALET_HS}, {len(hs_gunler)} hafta sonu günü)")
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
