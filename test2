@@ -943,8 +943,16 @@ df_takim_detay["talep"] = df_takim_detay.apply(
     lambda r: talep[(r["tarih"], r["vardiya"])], axis=1)
 takim_boyut = df_tam["takim"].value_counts().to_dict()        # takım → toplam üye sayısı
 df_takim_detay["takim_kisi"] = df_takim_detay["takim"].map(takim_boyut)  # takımın mevcudu
-df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep",
-                                 "takim", "takim_kisi", "atanan"]]
+# takımda O GÜN izinli üye sayısı (tarih'e bağlı; takimlar+izin_map H19/H7'den)
+df_takim_detay["izinli"] = df_takim_detay.apply(
+    lambda r: sum(1 for a in takimlar.get(r["takim"], [])
+                  if dt.date.fromisoformat(r["tarih"]) in izin_map.get(a, set())), axis=1)
+# takımdaki süt+hamile üye sayısı (flag bazlı, takım toplamı; biri ikisi de olsa tek sayılır)
+sut_hamile_boyut = {T: sum(1 for a in uyeler if a in hafta_sonu_yasak)
+                    for T, uyeler in takimlar.items()}
+df_takim_detay["sut_hamile"] = df_takim_detay["takim"].map(sut_hamile_boyut)
+df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep", "takim",
+                                 "takim_kisi", "izinli", "sut_hamile", "atanan"]]
 df_takim_detay = df_takim_detay.sort_values(["tarih", "vardiya", "takim"])
 print(f"TABLO A (takım kırılımı): {len(df_takim_detay)} satır")
 print(df_takim_detay.head(20).to_string(index=False))
