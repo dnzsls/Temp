@@ -941,7 +941,10 @@ df_takim_detay = (df_sonuc.groupby(["tarih", "vardiya", "saat", "takim"])
                   .size().reset_index(name="atanan"))
 df_takim_detay["talep"] = df_takim_detay.apply(
     lambda r: talep[(r["tarih"], r["vardiya"])], axis=1)
-df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep", "takim", "atanan"]]
+takim_boyut = df_tam["takim"].value_counts().to_dict()        # takım → toplam üye sayısı
+df_takim_detay["takim_kisi"] = df_takim_detay["takim"].map(takim_boyut)  # takımın mevcudu
+df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep",
+                                 "takim", "takim_kisi", "atanan"]]
 df_takim_detay = df_takim_detay.sort_values(["tarih", "vardiya", "takim"])
 print(f"TABLO A (takım kırılımı): {len(df_takim_detay)} satır")
 print(df_takim_detay.head(20).to_string(index=False))
