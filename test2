@@ -25,11 +25,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
-    H19 takım base   : takım hafta içi TEK base vardiyada (HARD); sabah_calisir base uygunsa (≤20:00) katılır, değilse serbest.
     H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu serbest).
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
+    H19 takım bölünme : W_TAKIM(10)×o gün fazla vardiya + W_TAKIM_KISI(3)×ana-gruptan-sapan üye (hafta içi).
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
     H20C hafta sonu adaleti: W_ADALET_HS(6) × (hafta sonu günü − FAIR_HS)+ [adil-pay üstü cezalı → yük yayılsın].
@@ -85,6 +85,8 @@ HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (cov
 # amaç fonksiyonu ağırlıkları (yüksek = o hedef daha öncelikli)
 W_COVERAGE  = 1                # coverage sapma (5–15 arası)
 W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
+W_TAKIM      = 10              # takım BAZ bölünme: o gün her fazla vardiya (1 kişi bile sapsa)
+W_TAKIM_KISI = 3               # takım KİŞİ bölünme: ana gruptan sapan her üye (çok sapma daha pahalı)
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
 W_ADALET_HS = 6                # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza (yayılma zayıfsa artır)
@@ -602,75 +604,60 @@ for a in AGENTS:
 print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), {len(hs_ciftleri)} hafta sonu")
 
 
-# %% [HÜCRE 19] — TAKIM HAFTALIK BASE VARDİYA (HARD: takım bir arada) ──
-# Takım o hafta TEK base vardiya-tipi seçer; NORMAL üyeler hafta içi SADECE o
-# base'de çalışabilir (ya da off) → takım KESİN bir arada (bölünme YASAK, hard).
-# İSTİSNA: sabah_calisir üyeler (süt/hamile zaten bu flag'li) MUAF → base'e
-#   giremezse kendi uygun vardiyasında serbest çalışır, bütünlük bozulmaz.
-# Hafta SONU: kural yok (takım serbest, ihtiyaca göre dağılabilir).
-# (Eski SOFT takım cezası KALKTI → yerini bu HARD yapı aldı. H20 agent tek-tip kalır.)
-
-# ISO-haftalar (H19 kendi içinde kursun → hücre tek başına da çalışsın)
-haftalar = {}
-for ds in PLAN_GUNLER:
-    yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
-    haftalar.setdefault((yil, hafta), []).append(ds)
+# %% [HÜCRE 19] — TAKIM BİRLİKTELİĞİ (yumuşak: aynı vardiya, sadece hafta içi) ─
+# Takım o gün tek vardiyada toplanmalı — YUMUŞAK ceza (hard DEĞİL → coverage esner).
+# İki bileşen (ikisi de ≥0 değişken + pozitif katsayı → alt sınır temiz):
+#   BAZ : o gün kullanılan FAZLA vardiya sayısı (1 kişi bile sapsa) → W_TAKIM
+#   KİŞİ: ana gruptan (en kalabalık vardiya) SAPAN üye sayısı → W_TAKIM_KISI
+# Yalnız HAFTA İÇİ. Hamile/süt o vardiyaya giremiyorsa mecbur ayrılır → ceza yenir,
+# sert kısıt kırılmaz. (HARD team-base denendi ama coverage çok saptı → soft'a dönüldü.)
 
 # takım → üye agent kodları
 takimlar = {}
 for _, row in df_tam.iterrows():
     takimlar.setdefault(row["takim"], []).append(str(row["agent_user_code"]).strip())
 
-# tüm vardiya başlangıç tipleri (base seçenekleri)
-TIP_SET = sorted({saat[(ds, v)][0] for (ds, v) in talep})
-
-# (1) team_week_base[(T, wkey, bas)] = takım T, hafta wkey → base tipi bas (haftada ≤1)
-team_week_base = {}
-nb = 0
-for T in takimlar:
-    for wkey in haftalar:
-        opts = []
-        for bas in TIP_SET:
-            b = model.NewBoolVar(f"base_{T}_{wkey[0]}{wkey[1]}_{bas}".replace(":", ""))
-            team_week_base[(T, wkey, bas)] = b
-            opts.append(b)
-        model.Add(sum(opts) <= 1)            # takım o hafta en fazla 1 base tipi
-        nb += 1
-
-# (2) Üye hafta içi takım base tipinde çalışmalı (HARD).
-#  - NORMAL üye: her zaman base'e kilitli.
-#  - İSTİSNA (sabah_calisir): takım base'i KENDİNE UYGUNSA (≤20:00) yine base'e
-#    KATILIR; base uygun DEĞİLSE (>20:00) serbest → kendi ≤20:00 vardiyasında.
-istisna = set(sabah_agents)
-# sabah_calisir'ın çalışabileceği (≤20:00, aynı gün biten) base tipleri
-COMP_TIPLER = {saat[(ds, v)][0] for (ds, v) in talep
-               if dakika(saat[(ds, v)][0]) < dakika(saat[(ds, v)][1])
-               and dakika(saat[(ds, v)][1]) <= LIMIT}
-
-nlink = 0
+n = 0
 for T, uyeler in takimlar.items():
-    for a in uyeler:
-        ozel = a in istisna
-        for wkey, gunler in haftalar.items():
-            if ozel:                          # takımın bu haftaki base'i istisnaya uygun mu? (0/1)
-                base_uygun = sum(team_week_base[(T, wkey, b)] for b in COMP_TIPLER)
-            for ds in gunler:
-                if dt.date.fromisoformat(ds).weekday() >= 5:
-                    continue                 # hafta sonu serbest
-                for v in gun_vardiyalari[ds]:
-                    if (a, ds, v) not in x:
-                        continue
-                    bas = saat[(ds, v)][0]
-                    if not ozel:
-                        model.Add(x[(a, ds, v)] <= team_week_base[(T, wkey, bas)])
-                    else:
-                        # base uygunsa (base_uygun=1) → base'e kilitle; uygun değilse (=0) serbest
-                        model.Add(x[(a, ds, v)] <= team_week_base[(T, wkey, bas)]
-                                  + 1 - base_uygun)
-                    nlink += 1
+    for ds in PLAN_GUNLER:
+        if dt.date.fromisoformat(ds).weekday() >= 5:   # hafta sonu → takım kısıtı YOK
+            continue
+        # o gün vardiya başına üye değişkenleri
+        vardiya_uye = {}
+        for v in gun_vardiyalari[ds]:
+            uv = [x[(a, ds, v)] for a in uyeler if (a, ds, v) in x]
+            if uv:
+                vardiya_uye[v] = uv
+        if not vardiya_uye:
+            continue
+        # her vardiya için: kullanım göstergesi (tu) + üye sayısı (cnt)
+        tu_list, cnt_list = [], []
+        for v, uv in vardiya_uye.items():
+            tu = model.NewBoolVar(f"tu_{T}_{ds}_{v}")
+            for xv in uv:
+                model.Add(tu >= xv)
+            tu_list.append(tu)
+            c = model.NewIntVar(0, len(uv), f"cnt_{T}_{ds}_{v}")
+            model.Add(c == sum(uv))            # bu vardiyadaki takım üyesi sayısı
+            cnt_list.append(c)
+        tum_uye = [xv for uv in vardiya_uye.values() for xv in uv]
+        tw = model.NewBoolVar(f"tw_{T}_{ds}")
+        model.Add(tw <= sum(tum_uye))          # kimse çalışmıyorsa tw=0
+        model.Add(tw <= sum(tu_list))          # tw ≤ kullanılan vardiya sayısı
+        # (1) BAZ ceza: fazladan kullanılan vardiya (≥0 değişken)
+        bolunme_v = model.NewIntVar(0, len(tu_list), f"bol_{T}_{ds}")
+        model.Add(bolunme_v >= sum(tu_list) - tw)
+        amac.append(W_TAKIM * bolunme_v)
+        # (2) KİŞİ ceza: ana gruptan (en kalabalık vardiya) sapan üye sayısı
+        ana = model.NewIntVar(0, len(uyeler), f"ana_{T}_{ds}")
+        model.AddMaxEquality(ana, cnt_list)    # en kalabalık vardiyadaki üye
+        sapan_kisi = model.NewIntVar(0, len(uyeler), f"sapankisi_{T}_{ds}")
+        model.Add(sapan_kisi >= sum(tum_uye) - ana)   # toplam − en kalabalık = sapan
+        amac.append(W_TAKIM_KISI * sapan_kisi)
+        n += 1
 
-print(f"takım haftalık base (HARD): {nb} (takım,hafta) tek base; {nlink} üye link "
-      f"(hafta içi); istisna (uygun base'e katılır): {len(istisna)}")
+print(f"takım birlikteliği (yumuşak): {len(takimlar)} takım, {n} (takım,gün); "
+      f"baz ağ.{W_TAKIM} + kişi ağ.{W_TAKIM_KISI} (sadece hafta içi)")
 
 
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
