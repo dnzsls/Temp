@@ -85,7 +85,6 @@ HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (cov
 # amaç fonksiyonu ağırlıkları (yüksek = o hedef daha öncelikli)
 W_COVERAGE  = 1                # coverage sapma (5–15 arası)
 W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
-W_TAKIM     = 5                # takım bölünmesi  ← yüksek tut: takımlar bütün kalsın
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
 W_ADALET_HS = 6                # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza (yayılma zayıfsa artır)
@@ -609,7 +608,7 @@ print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), {len(hs_ciftleri
 # İSTİSNA: sabah_calisir üyeler (süt/hamile zaten bu flag'li) MUAF → base'e
 #   giremezse kendi uygun vardiyasında serbest çalışır, bütünlük bozulmaz.
 # Hafta SONU: kural yok (takım serbest, ihtiyaca göre dağılabilir).
-# (Eski SOFT takım cezası KALKTI → W_TAKIM artık kullanılmıyor. H20 agent tek-tip kalır.)
+# (Eski SOFT takım cezası KALKTI → yerini bu HARD yapı aldı. H20 agent tek-tip kalır.)
 
 # takım → üye agent kodları
 takimlar = {}
@@ -788,7 +787,7 @@ print(f"vardiya-saati adaleti: {len(aksam_gv)} akşam/gece kovası, {len(elig)} 
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
-model.Minimize(sum(amac))                          # amaç: toplam cezayı (sapma + takım) küçült
+model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
 solver.parameters.max_time_in_seconds = 600        # süre sınırı → en iyi BULUNAN'ı al (optimal şart değil)
