@@ -29,11 +29,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
-    H19 takım bölünme : W_TAKIM(20) × takımın o hafta FAZLADAN kullandığı vardiya-tipi (haftalık, hafta içi).
+    H19 takım bölünme : W_TAKIM(100) × takımın o hafta FAZLADAN kullandığı vardiya-tipi (haftalık, hafta içi).
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
     H20C hafta sonu adaleti: W_ADALET_HS(6) × (hafta sonu günü − FAIR_HS)+ [adil-pay üstü cezalı → yük yayılsın].
-    H20D vardiya-saati adaleti: W_ADALET_AKSAM(3) × (akşam/gece günü − adil pay)+ [başlangıç 17:00+ & gece yayılsın].
+    H20D vardiya-saati adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+ [17:00+ & gece rotasyonu].
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -85,13 +85,14 @@ HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (cov
 # amaç fonksiyonu ağırlıkları (yüksek = o hedef daha öncelikli)
 W_COVERAGE  = 1                # coverage sapma (5–15 arası)
 W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
-W_TAKIM      = 20              # takım bölünme: takımın o hafta fazladan kullandığı her vardiya-tipi (yumuşak, HAFTALIK)
+W_TAKIM      = 100             # takım bölünme: takımın o hafta fazladan kullandığı her vardiya-tipi (HAFTALIK; günlükten ~5× yüksek olmalı)
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
 W_ADALET_HS = 6                # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza (yayılma zayıfsa artır)
 FAIR_HS     = 2                # agent başına "adil" hafta sonu günü; üstü cezalı (yük yayılsın)
-W_ADALET_AKSAM = 3             # akşam+gece vardiya adaleti: adil pay üstü her akşam/gece gününe ceza
+W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
+FAIR_AKSAM_HAFTA = 1           # agent başına "adil" akşam/gece HAFTA sayısı; üstü cezalı (H20 haftalık tiple uyumlu)
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
@@ -760,31 +761,36 @@ print(f"hafta sonu adaleti: {nh} agent, FAIR_HS={FAIR_HS} üstü cezalı "
       f"(ağ. {W_ADALET_HS}, {len(hs_gunler)} hafta sonu günü)")
 
 
-# %% [HÜCRE 20D] — VARDİYA-SAATİ ADALETİ (akşam 17:00+ & gece, agent bazında) ─
-# Gündüz-dışı vardiyalar (başlangıç ≥ AKSAM_BASLANGIC; gece 00:00 → dakika()=1440
-# olduğu için OTOMATİK dahil) kişiler arası dengeli dağılsın → kimse hep akşam/gece
-# çalışmasın. Adil pay = ortalama (toplam akşam/gece talebi ÷ uygun agent); üstü
-# cezalı, gradient'li (H20C ile aynı mantık).
-# Not: sabah_calisir geç vardiyaya zaten giremez → değişkeni yok → sayılmaz.
-#      Uydu/gece rotasyonu ileride devreye girince gece buradan çıkarılır (çakışmasın).
-AKSAM_DK = dakika(AKSAM_BASLANGIC)                    # 17:00 → 1020  (00:00 → 1440 ≥ bu → gece dahil)
-aksam_gv = [(ds, v) for (ds, v) in talep
-            if dakika(saat[(ds, v)][0]) >= AKSAM_DK]  # başlangıcı 17:00+ veya gece olan kovalar
-aksam_var = {a: [x[(a, ds, v)] for (ds, v) in aksam_gv if (a, ds, v) in x]
-             for a in AGENTS}
-elig = [a for a in AGENTS if aksam_var[a]]            # akşam/gece çalışabilen agentlar
-toplam_aksam = sum(talep[gv] for gv in aksam_gv)      # toplam akşam/gece kişi-günü (talep)
-FAIR_AKSAM = (toplam_aksam + len(elig) - 1) // max(1, len(elig))   # adil pay ≈ ortalama (tavan)
+# %% [HÜCRE 20D] — VARDİYA-SAATİ ADALETİ (akşam+gece, HAFTA bazında) ────
+# Akşam/gece HAFTALIK gelir (H20: agent hafta boyu tek tip) → GÜN değil HAFTA say:
+# agent kaç FARKLI HAFTA akşam/gece çalışmış; adil pay (FAIR_AKSAM_HAFTA) üstü cezalı.
+# Böylece "bir hafta akşamcı olmak" cezalı görünmez; asıl amaç: kimse çok HAFTA
+# akşam/gece yapmasın (rotasyon). Gradient'li (H20C ile aynı mantık).
+# Not: sabah_calisir geç vardiyaya giremez → değişkeni yok → o hafta akşam sayılmaz.
+#      Uydu/gece rotasyonu ileride gelince gece buradan çıkarılır (çakışmasın).
+AKSAM_DK = dakika(AKSAM_BASLANGIC)                    # 17:00 → 1020 (00:00→1440 → gece dahil)
+aksam_gv_set = {(ds, v) for (ds, v) in talep if dakika(saat[(ds, v)][0]) >= AKSAM_DK}
 
 na = 0
-for a in elig:
-    fazla = model.NewIntVar(0, len(aksam_gv), f"fazlaaksam_{a}")
-    model.Add(fazla >= sum(aksam_var[a]) - FAIR_AKSAM)   # adil pay üstü her gün cezalı
+for a in AGENTS:
+    hafta_ind = []                                   # her hafta: agent o hafta akşam/gece mi (0/1)
+    for wk, gunler in haftalar.items():
+        wv = [x[(a, ds, v)] for ds in gunler for v in gun_vardiyalari[ds]
+              if (a, ds, v) in x and (ds, v) in aksam_gv_set]
+        if wv:
+            ind = model.NewBoolVar(f"aksamhaf_{a}_{wk[0]}{wk[1]}")
+            for xv in wv:
+                model.Add(ind >= xv)                 # o hafta akşam/gece biri varsa 1
+            hafta_ind.append(ind)
+    if not hafta_ind:
+        continue
+    fazla = model.NewIntVar(0, len(hafta_ind), f"fazlaaksamh_{a}")
+    model.Add(fazla >= sum(hafta_ind) - FAIR_AKSAM_HAFTA)   # adil pay (HAFTA) üstü cezalı
     amac.append(W_ADALET_AKSAM * fazla)
     na += 1
 
-print(f"vardiya-saati adaleti: {len(aksam_gv)} akşam/gece kovası, {len(elig)} uygun agent, "
-      f"adil pay={FAIR_AKSAM} gün (ağ. {W_ADALET_AKSAM})")
+print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} hafta "
+      f"(ağ. {W_ADALET_AKSAM})")
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
@@ -980,9 +986,10 @@ print(df_vardiya.head(20).to_string(index=False))
 from collections import Counter
 
 
-def _adalet_ozet(baslik, gv_list, fair):
-    sayilar = [sum(solver.Value(x[(a, ds, v)]) for (ds, v) in gv_list if (a, ds, v) in x)
-               for a in AGENTS]
+def _adalet_ozet(baslik, gv_list, fair, sebep_fn=None):
+    agent_c = {a: sum(solver.Value(x[(a, ds, v)]) for (ds, v) in gv_list if (a, ds, v) in x)
+               for a in AGENTS}
+    sayilar = list(agent_c.values())
     dag = Counter(sayilar)
     ust = sum(1 for c in sayilar if c > fair)
     print(f"\n=== {baslik}  (adil pay = {fair}) ===")
@@ -991,15 +998,46 @@ def _adalet_ozet(baslik, gv_list, fair):
     print("gün → kaç agent:")
     for k in sorted(dag):
         isaret = "  ← cezalı (adil pay üstü)" if k > fair else ""
-        print(f"  {k:2d} gün: {dag[k]:4d} agent{isaret}")
+        ek = ""
+        if k == 0 and sebep_fn is not None:                      # 0 gün → neden 0'da?
+            ek = "   → " + sebep_fn([a for a in AGENTS if agent_c[a] == 0])
+        print(f"  {k:2d} gün: {dag[k]:4d} agent{isaret}{ek}")
 
 
 # hafta sonu (H20C) — hafta sonu günlerindeki kovalar
 hs_gv = [(ds, v) for (ds, v) in talep
          if dt.date.fromisoformat(ds).weekday() >= 5]
-_adalet_ozet("HAFTA SONU adaleti (H20C)", hs_gv, FAIR_HS)
+hs_tarih = sorted({ds for (ds, _) in hs_gv})                    # hafta sonu tarihleri
 
-# akşam+gece (H20D) — başlangıcı 17:00+ veya gece olan kovalar
+
+def _hs_sebep(agents):
+    # öncelikli kategori (bir agent birden fazlaysa ilk uyanı say)
+    hs = sum(1 for a in agents if a in hafta_sonu_yasak)                    # hamile/süt (HS yasak)
+    ms = sum(1 for a in agents if a not in hafta_sonu_yasak and a in mesai_yok)  # mesaiye_kalamaz
+    iz = sum(1 for a in agents if a not in hafta_sonu_yasak and a not in mesai_yok
+             and all(dt.date.fromisoformat(ds) in izin_map.get(a, set()) for ds in hs_tarih))
+    kalan = len(agents) - hs - ms - iz                                     # kısıtsız (çözücü tercih)
+    return f"hamile/süt {hs} | mesaiye_kalamaz {ms} | tüm-HS-izinli {iz} | kısıtsız {kalan}"
+
+
+_adalet_ozet("HAFTA SONU adaleti (H20C)", hs_gv, FAIR_HS, _hs_sebep)
+
+# akşam+gece (H20D) — HAFTA bazında (agent kaç FARKLI HAFTA akşam/gece çalışmış)
 AKSAM_DK = dakika(AKSAM_BASLANGIC)
-aksam_gv = [(ds, v) for (ds, v) in talep if dakika(saat[(ds, v)][0]) >= AKSAM_DK]
-_adalet_ozet("AKŞAM+GECE adaleti (H20D)", aksam_gv, FAIR_AKSAM)
+aksam_gv_set = {(ds, v) for (ds, v) in talep if dakika(saat[(ds, v)][0]) >= AKSAM_DK}
+hafta_say = []
+for a in AGENTS:
+    hw = sum(1 for _, gunler in haftalar.items()
+             if any(solver.Value(x[(a, ds, v)])
+                    for ds in gunler for v in gun_vardiyalari[ds]
+                    if (a, ds, v) in x and (ds, v) in aksam_gv_set))
+    hafta_say.append(hw)
+dag = Counter(hafta_say)
+ust = sum(1 for c in hafta_say if c > FAIR_AKSAM_HAFTA)
+print(f"\n=== AKŞAM+GECE adaleti (H20D, HAFTA)  (adil pay = {FAIR_AKSAM_HAFTA} hafta) ===")
+print(f"max={max(hafta_say)}  ortalama={sum(hafta_say) / len(hafta_say):.2f}  "
+      f"adil pay ÜSTÜ agent={ust}")
+print("hafta → kaç agent:")
+for k in sorted(dag):
+    isaret = "  ← cezalı" if k > FAIR_AKSAM_HAFTA else ""
+    print(f"  {k} hafta: {dag[k]:4d} agent{isaret}")
