@@ -1056,19 +1056,16 @@ from IPython.display import display
 agent_wmg = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
                      df_tam["working_main_group"].astype(str).str.strip()))
 df_sonuc["wmg"] = df_sonuc["agent"].map(agent_wmg)
+df_sonuc["gun"] = df_sonuc["tarih"].map(
+    lambda ds: DAY_TR[dt.date.fromisoformat(ds).weekday()])     # Pzt/Sal/...
 
-# 1) TİDY: lokasyon × gün × saat → kişi
-df_loc = (df_sonuc.groupby(["wmg", "tarih", "saat"]).size()
-          .reset_index(name="kisi").sort_values(["wmg", "tarih", "saat"]))
-print(f"lokasyon çizelgesi (tidy): {len(df_loc)} satır")
-display(df_loc)
+# ÜÇLÜ PIVOT: satır (tarih, gün, saat) × sütun working_main_group → kişi sayısı
+pivot3 = pd.pivot_table(df_sonuc, index=["tarih", "gun", "saat"],
+                        columns="wmg", aggfunc="size", fill_value=0)
+print(f"gün × saat × lokasyon pivotu: {pivot3.shape[0]} satır × {pivot3.shape[1]} lokasyon")
+display(pivot3)
 
-# 2) ÖZET: lokasyon × saat → AY BOYU toplam (hangi lokasyon hangi vardiyayı taşıyor)
+# BONUS özet: lokasyon × saat → ay boyu toplam (hangi lokasyon hangi vardiyayı taşıyor)
 ozet_saat = df_sonuc.groupby(["wmg", "saat"]).size().unstack("saat", fill_value=0)
-print("lokasyon × saat (ay boyu toplam atanan):")
+print("lokasyon × saat (ay boyu toplam):")
 display(ozet_saat)
-
-# 3) ÖZET: lokasyon × gün → günlük toplam atanan
-ozet_gun = df_sonuc.groupby(["wmg", "tarih"]).size().unstack("tarih", fill_value=0)
-print("lokasyon × gün (günlük toplam atanan):")
-display(ozet_gun)
