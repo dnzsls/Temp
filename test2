@@ -1050,7 +1050,9 @@ for k in sorted(dag):
 
 # %% [HÜCRE 28] — LOKASYON (working_main_group) BAZLI ÇİZELGE ───────────
 # working_main_group (ör. gebze_kitle, samsun_kitle, uydu_lokasyonlar) bazında:
-# hangi gün / hangi saatte kaç kişi atanmış. (df_sonuc H22'de, agent atamaları.)
+# hangi gün / hangi saatte kaç kişi atanmış. Çıktılar DataFrame olarak (display).
+from IPython.display import display
+
 agent_wmg = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
                      df_tam["working_main_group"].astype(str).str.strip()))
 df_sonuc["wmg"] = df_sonuc["agent"].map(agent_wmg)
@@ -1059,14 +1061,14 @@ df_sonuc["wmg"] = df_sonuc["agent"].map(agent_wmg)
 df_loc = (df_sonuc.groupby(["wmg", "tarih", "saat"]).size()
           .reset_index(name="kisi").sort_values(["wmg", "tarih", "saat"]))
 print(f"lokasyon çizelgesi (tidy): {len(df_loc)} satır")
-print(df_loc.head(25).to_string(index=False))
+display(df_loc)
 
 # 2) ÖZET: lokasyon × saat → AY BOYU toplam (hangi lokasyon hangi vardiyayı taşıyor)
 ozet_saat = df_sonuc.groupby(["wmg", "saat"]).size().unstack("saat", fill_value=0)
-print("\nlokasyon × saat (ay boyu toplam atanan):")
-print(ozet_saat)
+print("lokasyon × saat (ay boyu toplam atanan):")
+display(ozet_saat)
 
 # 3) ÖZET: lokasyon × gün → günlük toplam atanan
 ozet_gun = df_sonuc.groupby(["wmg", "tarih"]).size().unstack("tarih", fill_value=0)
-print("\nlokasyon × gün (günlük toplam atanan, ilk günler):")
-print(ozet_gun)
+print("lokasyon × gün (günlük toplam atanan):")
+display(ozet_gun)
