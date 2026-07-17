@@ -907,6 +907,22 @@ roster = roster.sort_values("takim")                                           #
 print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]-1} gün (izin/saat/off)")
 print(roster.head(15))
 
+# roster_2: roster + flag kolonları (süt izni / hamile / mesaiye_kalamaz)
+def _flag_set(col):                              # o flag'i 1 olan agent kodları
+    m = pd.to_numeric(df_tam[col], errors="coerce").fillna(0).astype(int) == 1
+    return set(df_tam.loc[m, "agent_user_code"].astype(str).str.strip())
+
+sut_set    = _flag_set("sut_izni_flg")
+hamile_set = _flag_set("hamile_flg")             # mesaiye_kalamaz zaten mesai_yok kümesinde
+
+roster_2 = roster.copy()
+roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.index])
+roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
+roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
+print(f"\nroster_2: {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon "
+      f"(takim + 3 flag + gün)")
+print(roster_2.head(15))
+
 
 # %% [HÜCRE 23] — AGENT ÖZET (çalışma / off / izin gün sayısı) ──────────
 # roster hücreleri "izin" / "off" / saat → her agent için say.
