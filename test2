@@ -23,6 +23,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
     H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
     H16B arife yarım gün: arife (öğleden sonra tatil) → süt/hamile/mesai flag'liler sadece SABAH (başlangıç ≤09:00).
+    H16C mesaiye_kalamaz: haftada ≤5 gün (6. gün mesai olur; günler serbest, hafta sonu dahil).
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
@@ -575,6 +576,23 @@ print(f"arife yarım gün: {len(ARIFE)} arife günü, {len(arife_kisitli)} flag'
       f"yasaklanan (agent,gün,vardiya): {arife_yasak}")
 
 
+# %% [HÜCRE 16C] — MESAİYE KALAMAZ: HAFTADA ≤5 GÜN (6. gün = mesai) ─────
+# mesaiye_kalamaz agent haftada EN FAZLA 5 gün çalışır — 6. gün mesai/overtime
+# sayılır, yapamaz. Günler serbest: Salı izinliyse Cmt/hafta sonu çalışabilir,
+# ama o hafta TOPLAM yine ≤5. (H12 herkese ≤6 diyor; bu mesai için ≤5'e sıkar.)
+# H17 zaten aylık=kota; bu, o kotayı "haftada ≤5" olarak yayar (6-gün haftası olmaz).
+nm = 0
+for a in mesai_yok:
+    for hafta_gunleri in haftalar.values():
+        haftalik = [x[(a, ds, v)] for ds in hafta_gunleri
+                    for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        if haftalik:
+            model.Add(sum(haftalik) <= 5)
+            nm += 1
+
+print(f"mesaiye kalamaz haftada ≤5 gün: {len(mesai_yok)} agent, {nm} (agent,hafta) kısıtı")
+
+
 # %% [HÜCRE 17] — ÇALIŞMA GÜN ARALIĞI (kota ≤ çalışma ≤ kota+mesai) ───
 # Her agent kotası = AYLIK_IS_GUNU − hafta içi izin (SERT, doldurmak zorunda).
 #   normal           → kota ≤ çalışma ≤ kota+2   (≤2 mesai)
@@ -897,6 +915,10 @@ for a in AGENTS:
             for v in gun_vardiyalari[ds]:
                 if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
                     bas, bit = saat[(ds, v)]
+                    # arife günü flag'li agent → yarım gün: gerçek bitiş = başlangıç + 4 saat (≈13:00)
+                    if dt.date.fromisoformat(ds) in ARIFE and a in arife_kisitli:
+                        m = dakika(bas) + 4 * 60
+                        bit = f"{m // 60:02d}:{m % 60:02d}"
                     deger = f"{bas}-{bit}"
                     break
         hucreler.append({"takim": tk, "agent": a, "tarih": ds, "deger": deger})
