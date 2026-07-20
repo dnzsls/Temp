@@ -22,7 +22,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H14 hamile/süt   : Cmt/Pzr çalışamaz.
     H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
     H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
-    H16B arife yarım gün: arife (öğleden sonra tatil) → süt/hamile/mesai flag'liler sadece SABAH (başlangıç ≤09:00).
+    H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün.
     H16C mesaiye_kalamaz: haftada ≤5 gün (6. gün mesai olur; günler serbest, hafta sonu dahil).
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
@@ -298,6 +298,23 @@ for _, row in df_talep.iterrows():
     talep[(ds, v)] = kisi
     saat[(ds, v)] = (row["baslangic"], row["bitis"])
 
+# ── ARİFE YARIM-GÜN SÖZDE-VARDİYASI (09:00-13:00) ──────────────────────
+# Arife günü kısıtlılar (süt/hamile/mesai) öğleden sonrayı yapamaz → onlara
+# özel SABİT 09:00-13:00 yarım vardiya. Bu vardiya COVERAGE'A GİRMEZ
+# (talep'e EKLENMEZ) → 9-18 (ve diğer) talebi DÜŞMEZ: 20 ihtiyaç varsa 3'ü
+# arife 9-13 çalışsa bile talep yine 20 (ek/bonus). Ama gun_vardiyalari +
+# saat'e girer → H11/H12/H16C/H17 onu İŞ GÜNÜ sayar (kota/haftalık/günde-1).
+# Kim alır/almaz (kısıtlı sadece bunu, normal alamaz) → H16B'de.
+ARIFE = set(dt.date.fromisoformat(d) for d in ARIFE_GUNLERI)
+ARIFE_YARIM = "__ARIFE_YARIM__"                    # sözde-vardiya kodu (talep'te YOK)
+_ay_h, _ay_m = ARIFE_SON_BASLANGIC.split(":")
+_ay_bit = int(_ay_h) * 60 + int(_ay_m) + 4 * 60    # 09:00 + 4 saat → 13:00
+ARIFE_YARIM_SAAT = (ARIFE_SON_BASLANGIC, f"{_ay_bit // 60:02d}:{_ay_bit % 60:02d}")
+for ds in list(gun_vardiyalari):
+    if dt.date.fromisoformat(ds) in ARIFE:
+        gun_vardiyalari[ds].append(ARIFE_YARIM)
+        saat[(ds, ARIFE_YARIM)] = ARIFE_YARIM_SAAT  # talep'e EKLENMEZ → coverage dışı
+
 PLAN_GUNLER = sorted(gun_vardiyalari)              # talebi olan günler
 
 print(f"agent (tam zamanlı, {QUEUE}): {len(AGENTS)}")
@@ -552,28 +569,33 @@ print(f"ayın iş günü: {AYLIK_IS_GUNU}  |  mesaiye kalamaz agent: {len(mesai_
       f"tatil yasağı (agent,gün,vardiya): {yasak}  (gün tavanı → H17)")
 
 
-# %% [HÜCRE 16B] — ARİFE YARIM GÜN (süt/hamile/mesai → sadece sabah) ────
-# Arife günü öğleden sonra resmi tatil → yarım gün. NORMAL agentlar tam gün
-# çalışır (öğleden sonra mesai). Ama SÜT/HAMİLE/MESAİYE_KALAMAZ flag'liler
-# öğleden sonrayı (tatil/mesai) yapamaz → sadece SABAH çalışabilir:
-# başlangıcı ≤ ARIFE_SON_BASLANGIC(09:00) olan vardiyalar (4 saat → 13:00'da çıkar).
-# Başlangıcı 09:00'dan SONRA olan vardiyalar o gün YASAK. (00:00 gece → 1440 > 540 → yasak.)
-ARIFE = set(dt.date.fromisoformat(d) for d in ARIFE_GUNLERI)
+# %% [HÜCRE 16B] — ARİFE ATAMA KURALI (kısıtlı → sadece 09:00-13:00 ek) ──
+# Arife sözde-vardiyası (ARIFE_YARIM 09:00-13:00) H8'de eklendi; coverage'a
+# GİRMEZ. Burada KİM neyi alır:
+#  • kısıtlı (süt/hamile/mesai) → arife günü SADECE ARIFE_YARIM; tüm GERÇEK
+#    kovalar YASAK (öğleden sonra tatil/mesai yapamaz). Yarım vardiya 9-18
+#    talebine sayılmaz → o talep tam gün çalışan normal agentlarla dolar.
+#  • normal agent → ARIFE_YARIM'ı ALAMAZ (gerçek kovada tam gün; öğleden
+#    sonra mesai). Böylece 9-13 çalışanlar "ek/bonus" olur, talebi düşürmez.
 arife_kisitli = hafta_sonu_yasak | mesai_yok        # süt/hamile + mesaiye_kalamaz
-ARIFE_LIMIT = dakika(ARIFE_SON_BASLANGIC)           # 09:00 → 540
-
-arife_yasak = 0
-for a in arife_kisitli:
-    for ds in PLAN_GUNLER:
-        if dt.date.fromisoformat(ds) not in ARIFE:
-            continue
+arife_gercek_yasak = 0                               # kısıtlıya yasaklanan gerçek kova
+arife_pseudo_yasak = 0                               # normale yasaklanan yarım vardiya
+for ds in PLAN_GUNLER:
+    if dt.date.fromisoformat(ds) not in ARIFE:
+        continue
+    for a in AGENTS:
         for v in gun_vardiyalari[ds]:
-            if (a, ds, v) in x and dakika(saat[(ds, v)][0]) > ARIFE_LIMIT:
-                model.Add(x[(a, ds, v)] == 0)       # başlangıç >09:00 → arife günü giremez
-                arife_yasak += 1
+            if (a, ds, v) not in x:
+                continue
+            if a in arife_kisitli and v != ARIFE_YARIM:
+                model.Add(x[(a, ds, v)] == 0)       # kısıtlı → gerçek kova yasak
+                arife_gercek_yasak += 1
+            elif a not in arife_kisitli and v == ARIFE_YARIM:
+                model.Add(x[(a, ds, v)] == 0)       # normal → yarım vardiya yasak
+                arife_pseudo_yasak += 1
 
-print(f"arife yarım gün: {len(ARIFE)} arife günü, {len(arife_kisitli)} flag'li agent (süt/hamile/mesai), "
-      f"yasaklanan (agent,gün,vardiya): {arife_yasak}")
+print(f"arife atama: {len(ARIFE)} gün, {len(arife_kisitli)} kısıtlı agent (süt/hamile/mesai) → "
+      f"gerçek kova yasağı {arife_gercek_yasak}, normale yarım-vardiya yasağı {arife_pseudo_yasak}")
 
 
 # %% [HÜCRE 16C] — MESAİYE KALAMAZ: HAFTADA ≤5 GÜN (6. gün = mesai) ─────
