@@ -1036,7 +1036,10 @@ if "takim" not in df_sonuc.columns:
 
 # --- TABLO A: gün × vardiya × TAKIM → talep, atanan (takım kırılımı) ---
 # Bir vardiya birden çok takımdan karşılanıyorsa satır çoğalır.
-df_takim_detay = (df_sonuc.groupby(["tarih", "vardiya", "saat", "takim"])
+# ARIFE_YARIM (9-13 ek) gerçek talep kovası değil (coverage dışı) → talep
+# tablosuna girmez (talep[...] yok → KeyError olurdu), bu tablodan çıkarılır.
+df_gercek = df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
+df_takim_detay = (df_gercek.groupby(["tarih", "vardiya", "saat", "takim"])
                   .size().reset_index(name="atanan"))
 df_takim_detay["talep"] = df_takim_detay.apply(
     lambda r: talep[(r["tarih"], r["vardiya"])], axis=1)
