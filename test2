@@ -51,6 +51,9 @@ GİRDİLER (hepsi GERÇEK — dummy yok):
        line_based_main_group  KUYRUK: kitle_cagrilar | kurumsal_cagrilar | gold_cagrilar
        idari_izinli_flg       1 → tüm ay müsait değil
        pazartesi_izinli_flg   1 → her Pazartesi off
+       sali_izinli_flg        1 → her Salı off
+       carsamba_izinli_flg    1 → her Çarşamba off
+       persembe_izinli_flg    1 → her Perşembe off
        cuma_izinli_flg        1 → her Cuma off
        sabah_calisir_flg      1 → yalnız bitişi ≤20:00 vardiya (sonraki adım)
        mesaiye_kalamaz_flg    1 → mesai yok + gün tavanı (sonraki adım)
@@ -249,9 +252,17 @@ if df_off is not None:
                 except ValueError:
                     pass                                # ayda olmayan gün (gun_31 vs.)
 
-# 2) tekrarlı izin günleri (ayın tüm Pzt / Cuma'ları)
-mondays = {d for d in GUN_SET if d.weekday() == 0}
-fridays = {d for d in GUN_SET if d.weekday() == 4}
+# 2) tekrarlı hafta içi izin: flag → hafta günü (0=Pzt .. 4=Cuma)
+#    Yeni gün eklemek için tek yer burası (tek format).
+HAFTAICI_IZIN_FLG = {
+    "pazartesi_izinli_flg": 0,
+    "sali_izinli_flg":      1,
+    "carsamba_izinli_flg":  2,
+    "persembe_izinli_flg":  3,
+    "cuma_izinli_flg":      4,
+}
+gunluk_izin = {wd: {d for d in GUN_SET if d.weekday() == wd}
+               for wd in set(HAFTAICI_IZIN_FLG.values())}   # hafta günü → o ayın tüm o günleri
 
 
 def _b(row, col):
@@ -266,10 +277,9 @@ for _, row in df_tam.iterrows():
     izin = set(off_map.get(code, set()))
     if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
         izin |= GUN_SET                                # tüm ay
-    if _b(row, "pazartesi_izinli_flg"):
-        izin |= mondays
-    if _b(row, "cuma_izinli_flg"):
-        izin |= fridays
+    for flg, wd in HAFTAICI_IZIN_FLG.items():          # tekrarlı hafta içi izin günleri
+        if _b(row, flg):
+            izin |= gunluk_izin[wd]
     izin_map[code] = izin
 
 df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
