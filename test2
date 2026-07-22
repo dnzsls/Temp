@@ -24,6 +24,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
     H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün. Mesai HAFTA SONU arifede off.
     H16C mesaiye_kalamaz: haftada ≤5 gün (6. gün mesai olur; günler serbest, hafta sonu dahil).
+    H16D akşam/gece  : agent ayda ≤MAX_AKSAM_HAFTA(2) hafta akşam/gece (başlangıç ≥17:00); hafta bazında sayım.
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
@@ -101,6 +102,7 @@ FAIR_HS     = 2                # agent başına "adil" hafta sonu günü; üstü
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
 FAIR_AKSAM_HAFTA = 1           # agent başına "adil" akşam/gece HAFTA sayısı; üstü cezalı (H20 haftalık tiple uyumlu)
+MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar hafta akşam/gece (H16D)
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
@@ -646,12 +648,44 @@ for a in mesai_yok:
 print(f"mesaiye kalamaz haftada ≤5 gün: {len(mesai_yok)} agent, {nm} (agent,hafta) kısıtı")
 
 
-# %% [HÜCRE 17] — ÇALIŞMA GÜN ARALIĞI (kota ≤ çalışma ≤ kota+mesai) ───
+# %% [HÜCRE 16D] — AKŞAM/GECE: AYDA ≤ MAX_AKSAM_HAFTA (sert rotasyon) ────
+# Bir agent ay içinde EN FAZLA MAX_AKSAM_HAFTA(2) ISO haftada akşam/gece
+# vardiyası çalışabilir (3. hafta yasak). Akşam/gece = başlangıç ≥ AKSAM_BASLANGIC
+# (17:00; gece 00:00→1440 dahil). H20 gereği agent hafta boyu tek tipte → "gece
+# başladıysa hafta boyu gece" → sayım HAFTA bazında. H20D bunun YUMUŞAK adalet
+# hali (>1 haftaya ceza); bu SERT tavan (>MAX imkânsız).
+# NOT: "2 ayda 1" (aylar arası) kısmı tek-ay modelinde yapılamaz.
+_aksam_dk = dakika(AKSAM_BASLANGIC)
+gece_gv_set = {(ds, v) for (ds, v) in talep if dakika(saat[(ds, v)][0]) >= _aksam_dk}
+ng = 0
+for a in AGENTS:
+    hafta_ind = []                                   # her hafta: agent o hafta akşam/gece mi (0/1)
+    for wk, gunler in haftalar.items():
+        wv = [x[(a, ds, v)] for ds in gunler for v in gun_vardiyalari[ds]
+              if (a, ds, v) in x and (ds, v) in gece_gv_set]
+        if wv:
+            ind = model.NewBoolVar(f"gecehaf_{a}_{wk[0]}{wk[1]}")
+            for xv in wv:
+                model.Add(ind >= xv)                 # o hafta akşam/gece varsa gösterge 1
+            hafta_ind.append(ind)
+    if hafta_ind:
+        model.Add(sum(hafta_ind) <= MAX_AKSAM_HAFTA)  # ayda ≤ MAX akşam/gece haftası
+        ng += 1
+
+print(f"akşam/gece ayda ≤{MAX_AKSAM_HAFTA} hafta (sert): {ng} agent, "
+      f"{len(gece_gv_set)} akşam/gece kovası")
+
+
+# %% [HÜCRE 17] — ÇALIŞMA GÜN ARALIĞI (kota ≤ çalışma ≤ kota+mesai+tatil) ─
 # Her agent kotası = AYLIK_IS_GUNU − hafta içi izin (SERT, doldurmak zorunda).
-#   normal           → kota ≤ çalışma ≤ kota+2   (≤2 mesai)
-#   hamile/süt/mesai → çalışma = kota            (mesai yok)
-# Örn: 3 gün hafta içi izin → kota=19 → normal 19..21, özel flag tam 19.
+#   normal           → kota ≤ çalışma ≤ kota+2+tatil  (≤2 mesai + resmi tatilde çalışma)
+#   hamile/süt/mesai → çalışma = kota                 (mesai/tatil yok)
+# Tatil payı: resmi tatil günleri kotadan düşük (H16); normal agent, talep varsa
+# bunları EKSTRA çalışabilir → tavana TÜM resmi tatil günü sayısı eklenir
+# (hafta içi + hafta sonu). Sadece izin verir, zorlamaz (talep yoksa boş kalır).
+# Örn: 3 gün hafta içi izin + 1 resmi tatil → kota=18 → normal 18..21, özel 18.
 ozel_agents = hafta_sonu_yasak | mesai_yok       # hamile/süt + mesaiye_kalamaz
+tatil_gun = len(TATIL)                            # resmi tatil günü sayısı (H16'dan)
 
 for a in AGENTS:
     tum = []
@@ -667,12 +701,12 @@ for a in AGENTS:
     kota = max(0, AYLIK_IS_GUNU - hi_izin)
     if kota == 0:
         continue
-    ust = kota if a in ozel_agents else kota + 2          # tavan
+    ust = kota if a in ozel_agents else kota + 2 + tatil_gun   # +2 mesai + resmi tatil
     model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
     model.Add(calisma <= ust)                             # SERT tavan
 
-print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=22−haftaiçi_izin; "
-      f"normal kota..kota+2, özel flag={len(ozel_agents)} =kota)")
+print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=iş günü−haftaiçi_izin; "
+      f"normal kota..kota+2+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
 
 
 # %% [HÜCRE 18] — AYDA ≥1 ÇİFT HAFTA SONU OFF (sert) ──────────────────
@@ -1015,7 +1049,7 @@ print(df_ozet.head(15))
 # df_ozet_fark: df_ozet'e DOKUNMADAN ayrı df — çalışması H17'deki [kota, ust]
 # aralığı DIŞINDA kalan agentlar (kotanın altında EKSİK / tavanın üstünde AŞAN).
 # Tek tek bakmak yerine sadece uyumsuzlar. kota/ust H17 ile AYNI formül
-# (kota = AYLIK_IS_GUNU − hafta içi izin; özel flag = kota, normal kota+2).
+# (kota = AYLIK_IS_GUNU − hafta içi izin; özel = kota, normal kota+2+tatil_gun).
 _fark = []
 for a in df_ozet.index:
     if not any((a, ds, v) in x for ds in PLAN_GUNLER for v in gun_vardiyalari[ds]):
@@ -1025,7 +1059,7 @@ for a in df_ozet.index:
     kota = max(0, AYLIK_IS_GUNU - hi_izin)
     if kota == 0:
         continue                                     # tam izinli → kısıt yok
-    ust = kota if a in ozel_agents else kota + 2
+    ust = kota if a in ozel_agents else kota + 2 + tatil_gun
     c = int(df_ozet.loc[a, "calisma"])
     if c < kota:
         durum = f"EKSİK -{kota - c}"
