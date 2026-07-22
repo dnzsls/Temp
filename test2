@@ -1008,10 +1008,15 @@ takim_roster = (df_takim.groupby(["takim", "tarih"])["hucre"]
 print(f"takım dağılımı: {df_takim['takim'].nunique()} takım")
 print(takim_roster.head(15))
 
-# bölünme özeti: kaç (takım,gün) birden çok vardiyaya bölünmüş
-bolunme = df_takim.groupby(["takim", "tarih"]).size()
-print(f"\n(takım,gün) toplam: {len(bolunme)}  |  bölünmüş (>1 vardiya): {int((bolunme > 1).sum())}")
-print("en çok bölünen 10 (takım,gün):")
+# bölünme özeti: kaç (takım,gün) birden çok vardiyaya bölünmüş.
+# Takım bütünlüğü (H19/H20) SADECE HAFTA İÇİ geçerli → hafta sonu takım kuralı
+# dışında; bölünme metriği de hafta içiyle sınırlanır (yoksa hafta sonu şişirir).
+df_takim_hi = df_takim[df_takim["tarih"].map(
+    lambda ds: dt.date.fromisoformat(ds).weekday() < 5)]
+bolunme = df_takim_hi.groupby(["takim", "tarih"]).size()
+print(f"\n(takım,gün) HAFTA İÇİ toplam: {len(bolunme)}  |  "
+      f"bölünmüş (>1 vardiya): {int((bolunme > 1).sum())}")
+print("en çok bölünen 10 (takım,gün, hafta içi):")
 print(bolunme[bolunme > 1].sort_values(ascending=False).head(10))
 
 
