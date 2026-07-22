@@ -22,7 +22,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H14 hamile/süt   : Cmt/Pzr çalışamaz.
     H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
     H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
-    H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün.
+    H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün. Mesai HAFTA SONU arifede off.
     H16C mesaiye_kalamaz: haftada ≤5 gün (6. gün mesai olur; günler serbest, hafta sonu dahil).
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
@@ -270,6 +270,13 @@ def _b(row, col):
     return pd.to_numeric(row.get(col, 0), errors="coerce") == 1
 
 
+# süt izni ↔ resmi tatil emilimi: bir ISO haftada HAFTA İÇİ resmi tatil varsa,
+# o hafta süt izni "tatile sayılır" → süt agent o hafta süt iznini KULLANMAZ
+# (normal gününde çalışır), tatil günü zaten off. Sadece süt izni için geçerli;
+# hafta sonu tatil emilmez (zaten AYLIK_IS_GUNU'yu da etkilemez).
+_TATIL = set(dt.date.fromisoformat(t) for t in RESMI_TATILLER)   # H16 ile aynı liste
+tatil_haftalari = {d.isocalendar()[:2] for d in _TATIL if d.weekday() < 5}
+
 # 3) agent başına birleştir → izin_map
 izin_map = {}
 for _, row in df_tam.iterrows():
@@ -277,9 +284,14 @@ for _, row in df_tam.iterrows():
     izin = set(off_map.get(code, set()))
     if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
         izin |= GUN_SET                                # tüm ay
+    sut = _b(row, "sut_izni_flg")                      # süt izni → tatil haftası emilimi
     for flg, wd in HAFTAICI_IZIN_FLG.items():          # tekrarlı hafta içi izin günleri
         if _b(row, flg):
-            izin |= gunluk_izin[wd]
+            gunler = gunluk_izin[wd]
+            if sut:                                    # süt: tatil haftasındaki izni EMME
+                gunler = {d for d in gunler
+                          if d.isocalendar()[:2] not in tatil_haftalari}
+            izin |= gunler
     izin_map[code] = izin
 
 df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
@@ -587,10 +599,15 @@ print(f"ayın iş günü: {AYLIK_IS_GUNU}  |  mesaiye kalamaz agent: {len(mesai_
 #    talebine sayılmaz → o talep tam gün çalışan normal agentlarla dolar.
 #  • normal agent → ARIFE_YARIM'ı ALAMAZ (gerçek kovada tam gün; öğleden
 #    sonra mesai). Böylece 9-13 çalışanlar "ek/bonus" olur, talebi düşürmez.
+#  • mesai (mesaiye_kalamaz) → HAFTA SONU arifede ARIFE_YARIM da YASAK →
+#    hafta sonu arifede OFF, hafta içi çalışır (iş birimi Ctesi yarım-gün
+#    istemedi). Süt/hamile hafta sonu zaten off (H14).
 arife_kisitli = hafta_sonu_yasak | mesai_yok        # süt/hamile + mesaiye_kalamaz
 arife_gercek_yasak = 0                               # kısıtlıya yasaklanan gerçek kova
 arife_pseudo_yasak = 0                               # normale yasaklanan yarım vardiya
+arife_mesai_hs_yasak = 0                             # mesai hafta sonu arifede off
 for ds in PLAN_GUNLER:
+    hafta_sonu = dt.date.fromisoformat(ds).weekday() >= 5
     if dt.date.fromisoformat(ds) not in ARIFE:
         continue
     for a in AGENTS:
@@ -600,12 +617,16 @@ for ds in PLAN_GUNLER:
             if a in arife_kisitli and v != ARIFE_YARIM:
                 model.Add(x[(a, ds, v)] == 0)       # kısıtlı → gerçek kova yasak
                 arife_gercek_yasak += 1
+            elif a in mesai_yok and hafta_sonu and v == ARIFE_YARIM:
+                model.Add(x[(a, ds, v)] == 0)       # mesai hafta sonu arifede off
+                arife_mesai_hs_yasak += 1
             elif a not in arife_kisitli and v == ARIFE_YARIM:
                 model.Add(x[(a, ds, v)] == 0)       # normal → yarım vardiya yasak
                 arife_pseudo_yasak += 1
 
 print(f"arife atama: {len(ARIFE)} gün, {len(arife_kisitli)} kısıtlı agent (süt/hamile/mesai) → "
-      f"gerçek kova yasağı {arife_gercek_yasak}, normale yarım-vardiya yasağı {arife_pseudo_yasak}")
+      f"gerçek kova yasağı {arife_gercek_yasak}, normale yarım-vardiya yasağı {arife_pseudo_yasak}, "
+      f"mesai hafta sonu off {arife_mesai_hs_yasak}")
 
 
 # %% [HÜCRE 16C] — MESAİYE KALAMAZ: HAFTADA ≤5 GÜN (6. gün = mesai) ─────
