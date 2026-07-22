@@ -991,6 +991,37 @@ df_ozet["toplam"] = df_ozet[["calisma", "off", "izin"]].sum(axis=1)     # = gün
 print(f"agent özet: {len(df_ozet)} agent (toplam {len(gun_kolon)} gün/agent olmalı)")
 print(df_ozet.head(15))
 
+# df_ozet_fark: df_ozet'e DOKUNMADAN ayrı df — çalışması H17'deki [kota, ust]
+# aralığı DIŞINDA kalan agentlar (kotanın altında EKSİK / tavanın üstünde AŞAN).
+# Tek tek bakmak yerine sadece uyumsuzlar. kota/ust H17 ile AYNI formül
+# (kota = AYLIK_IS_GUNU − hafta içi izin; özel flag = kota, normal kota+2).
+_fark = []
+for a in df_ozet.index:
+    if not any((a, ds, v) in x for ds in PLAN_GUNLER for v in gun_vardiyalari[ds]):
+        continue                                     # değişkeni yok → kapsam dışı
+    hi_izin = sum(1 for d in izin_map.get(a, set())
+                  if d in GUN_SET and d.weekday() < 5)
+    kota = max(0, AYLIK_IS_GUNU - hi_izin)
+    if kota == 0:
+        continue                                     # tam izinli → kısıt yok
+    ust = kota if a in ozel_agents else kota + 2
+    c = int(df_ozet.loc[a, "calisma"])
+    if c < kota:
+        durum = f"EKSİK -{kota - c}"
+    elif c > ust:
+        durum = f"AŞAN +{c - ust}"
+    else:
+        continue                                     # aralıkta → uyumlu
+    _fark.append({"agent": a, "takim": df_ozet.loc[a, "takim"],
+                  "calisma": c, "kota": kota, "ust": ust, "durum": durum})
+
+df_ozet_fark = pd.DataFrame(_fark)
+if len(df_ozet_fark):
+    print(f"\n⚠ df_ozet_fark: {len(df_ozet_fark)} agent [kota, ust] aralığı DIŞINDA:")
+    print(df_ozet_fark.to_string(index=False))
+else:
+    print("\n✓ df_ozet_fark boş — tüm agentlar kota aralığında (uyumsuz yok)")
+
 
 # %% [HÜCRE 24] — TAKIM BAZLI DAĞILIM (günlük takım → vardiya) ─────────
 # Bir takım o gün hangi vardiya(lar)da, kaç kişi. Bölünme buradan görünür.
