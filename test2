@@ -1047,16 +1047,37 @@ roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.inde
 roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
 
-# roster_2 SONUNA özet kolonlar: çalışma / mesai / off gün sayısı
-#   calisma_gun = toplam çalışılan gün (arife + normal + mesai dahil; off/izin hariç)
-#   mesai_gun   = kota üstü çalışma = max(0, calisma − kota) → +2 mesai + resmi tatil
+# roster_2 SONUNA özet kolonlar: çalışma / mesai / off gün sayısı (HAFTALIK)
+#   mesai_gun   = Σ hafta [ (o hafta çalışılan resmi tatil günü)
+#                           + max(0, (o hafta tatil-dışı çalışılan gün) − 5) ]
+#                 = haftada 5'ten fazla çalışılan her gün + her resmi tatil günü.
+#   calisma_gun = toplam çalışma − mesai_gun (normal + arife; mesai hariç)
 #   off_gun     = off gün sayısı
-_gun = [c for c in roster.columns if c != "takim"]                 # sadece gün kolonları
-_cal = (~roster[_gun].isin(["off", "izin"])).sum(axis=1)          # çalışma (mesai dahil)
-_off = (roster[_gun] == "off").sum(axis=1)
-roster_2["calisma_gun"] = [int(_cal[a]) for a in roster_2.index]
-roster_2["mesai_gun"]   = [max(0, int(_cal[a]) - kota_map.get(a, int(_cal[a])))
-                           for a in roster_2.index]
+#   NOT: hafta içi izin alıp yerine hafta sonu çalışma (swap, o hafta ≤5) → mesai DEĞİL
+#        → mesaiye_kalamaz swap'ları mesai görünmez; gerçek fazla (6+ gün) görünür.
+_gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
+_hafta_kol = {}                                    # (yıl,hafta) → {"normal":[kol], "tatil":[kol]}
+for c in _gun:
+    d = dt.date.fromisoformat(c)
+    wk = d.isocalendar()[:2]
+    _hafta_kol.setdefault(wk, {"normal": [], "tatil": []})
+    (_hafta_kol[wk]["tatil"] if d in TATIL else _hafta_kol[wk]["normal"]).append(c)
+
+
+def _mesai_gun_say(a):
+    m = 0
+    for kols in _hafta_kol.values():
+        norm = sum(1 for c in kols["normal"] if roster.at[a, c] not in ("off", "izin"))
+        tat  = sum(1 for c in kols["tatil"]  if roster.at[a, c] not in ("off", "izin"))
+        m += tat + max(0, norm - 5)                # 5'ten fazla + tüm tatil = mesai
+    return m
+
+
+_cal_top = (~roster[_gun].isin(["off", "izin"])).sum(axis=1)       # toplam çalışma
+_off     = (roster[_gun] == "off").sum(axis=1)
+_mg = {a: _mesai_gun_say(a) for a in roster_2.index}
+roster_2["calisma_gun"] = [int(_cal_top[a]) - _mg[a] for a in roster_2.index]
+roster_2["mesai_gun"]   = [_mg[a] for a in roster_2.index]
 roster_2["off_gun"]     = [int(_off[a]) for a in roster_2.index]
 
 print(f"\nroster_2: {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon "
