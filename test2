@@ -28,11 +28,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
-    H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu serbest).
+    H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu + resmi tatil haftası serbest).
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
-    H19 takım bölünme : W_TAKIM(100) × takımın o hafta FAZLADAN kullandığı vardiya-tipi (haftalık, hafta içi).
+    H19 takım bölünme : W_TAKIM(100) × takımın o hafta FAZLADAN kullandığı vardiya-tipi (haftalık, hafta içi; resmi tatil haftası cezasız).
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
     H20C hafta sonu adaleti: W_ADALET_HS(6)×(hs günü−FAIR_HS)+ + W_ADALET_HS2(6)×(hs günü−FAIR_HS−1)+ [konveks → 4-5'i 3'e yay].
@@ -686,6 +686,7 @@ print(f"akşam/gece ayda ≤{MAX_AKSAM_HAFTA} hafta (sert): {ng} agent, "
 # Örn: 3 gün hafta içi izin + 1 resmi tatil → kota=18 → normal 18..21, özel 18.
 ozel_agents = hafta_sonu_yasak | mesai_yok       # hamile/süt + mesaiye_kalamaz
 tatil_gun = len(TATIL)                            # resmi tatil günü sayısı (H16'dan)
+kota_map, ust_map = {}, {}                        # H23 raporu GERÇEK değerleri okusun (sapma olmasın)
 
 for a in AGENTS:
     tum = []
@@ -702,6 +703,7 @@ for a in AGENTS:
     if kota == 0:
         continue
     ust = kota if a in ozel_agents else kota + 2 + tatil_gun   # +2 mesai + resmi tatil
+    kota_map[a], ust_map[a] = kota, ust                  # H23 raporu için gerçek değerler
     model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
     model.Add(calisma <= ust)                             # SERT tavan
 
@@ -751,6 +753,11 @@ for ds in PLAN_GUNLER:
     yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
     haftalar.setdefault((yil, hafta), []).append(ds)
 
+# hafta içi resmi tatil olan haftalar → o hafta takım tek-tip cezası GEVŞETİLİR
+# (tatil düzeni bozar; vardiya farklılaşabilir).
+tatil_haftalari = {dt.date.fromisoformat(t).isocalendar()[:2]
+                   for t in RESMI_TATILLER if dt.date.fromisoformat(t).weekday() < 5}
+
 # takım → üye agent kodları  +  tüm başlangıç-tipleri
 takimlar = {}
 for _, row in df_tam.iterrows():
@@ -760,6 +767,8 @@ TIP_SET = sorted({saat[(ds, v)][0] for (ds, v) in talep})
 n = 0
 for T, uyeler in takimlar.items():
     for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari:              # tatil haftası → tek-tip cezası yok
+            continue
         hafta_ici = [ds for ds in gunler if dt.date.fromisoformat(ds).weekday() < 5]
         # o hafta her başlangıç-tipi için: takım bu tipte çalışıyor mu (gösterge)
         tip_ind, tum = [], []
@@ -798,9 +807,15 @@ for ds in PLAN_GUNLER:
     yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
     haftalar.setdefault((yil, hafta), []).append(ds)
 
+# hafta içi resmi tatil olan haftalar → o hafta agent tek-tip kuralı GEVŞETİLİR
+tatil_haftalari = {dt.date.fromisoformat(t).isocalendar()[:2]
+                   for t in RESMI_TATILLER if dt.date.fromisoformat(t).weekday() < 5}
+
 n = 0
 for a in AGENTS:
-    for wi, hafta_gunleri in enumerate(haftalar.values()):
+    for wk, hafta_gunleri in haftalar.items():
+        if wk in tatil_haftalari:             # tatil haftası → tek-tip serbest (vardiya farklılaşabilir)
+            continue
         tip_varlar = {}                       # baslangic_saati -> [x değişkenleri]
         for ds in hafta_gunleri:
             if dt.date.fromisoformat(ds).weekday() >= 5:   # hafta sonu → tek-tip kuralı DIŞI
@@ -813,7 +828,7 @@ for a in AGENTS:
             continue                          # zaten tek tip → kısıt gerekmez
         tip_kullan = []
         for bas, varlar in tip_varlar.items():
-            tk = model.NewBoolVar(f"tip_{a}_w{wi}_{bas}".replace(":", ""))
+            tk = model.NewBoolVar(f"tip_{a}_w{wk[0]}{wk[1]}_{bas}".replace(":", ""))
             for xv in varlar:
                 model.Add(tk >= xv)           # bu tipte çalışırsa gösterge 1
             tip_kullan.append(tk)
@@ -1007,6 +1022,9 @@ for a in AGENTS:
                         m = dakika(bas) + 4 * 60
                         bit = f"{m // 60:02d}:{m % 60:02d}"
                     deger = f"{bas}-{bit}"
+                    # resmi tatilde çalışma = MESAİ (overtime) → başına etiket (arife değil)
+                    if dt.date.fromisoformat(ds) in TATIL:
+                        deger = f"mesai {deger}"
                     break
         hucreler.append({"takim": tk, "agent": a, "tarih": ds, "deger": deger})
 
@@ -1028,8 +1046,21 @@ roster_2 = roster.copy()
 roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.index])
 roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
+
+# roster_2 SONUNA özet kolonlar: çalışma / mesai / off gün sayısı
+#   calisma_gun = toplam çalışılan gün (arife + normal + mesai dahil; off/izin hariç)
+#   mesai_gun   = kota üstü çalışma = max(0, calisma − kota) → +2 mesai + resmi tatil
+#   off_gun     = off gün sayısı
+_gun = [c for c in roster.columns if c != "takim"]                 # sadece gün kolonları
+_cal = (~roster[_gun].isin(["off", "izin"])).sum(axis=1)          # çalışma (mesai dahil)
+_off = (roster[_gun] == "off").sum(axis=1)
+roster_2["calisma_gun"] = [int(_cal[a]) for a in roster_2.index]
+roster_2["mesai_gun"]   = [max(0, int(_cal[a]) - kota_map.get(a, int(_cal[a])))
+                           for a in roster_2.index]
+roster_2["off_gun"]     = [int(_off[a]) for a in roster_2.index]
+
 print(f"\nroster_2: {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon "
-      f"(takim + 3 flag + gün)")
+      f"(takim + 3 flag + gün + calisma/mesai/off özet)")
 print(roster_2.head(15))
 
 
@@ -1048,18 +1079,14 @@ print(df_ozet.head(15))
 
 # df_ozet_fark: df_ozet'e DOKUNMADAN ayrı df — çalışması H17'deki [kota, ust]
 # aralığı DIŞINDA kalan agentlar (kotanın altında EKSİK / tavanın üstünde AŞAN).
-# Tek tek bakmak yerine sadece uyumsuzlar. kota/ust H17 ile AYNI formül
-# (kota = AYLIK_IS_GUNU − hafta içi izin; özel = kota, normal kota+2+tatil_gun).
+# kota/ust YENİDEN HESAPLANMAZ → H17'nin kota_map/ust_map'inden okunur → rapor
+# her zaman modelle birebir (sapma/hayali aşım olmaz). H17 sert kısıt olduğundan
+# normalde hepsi aralıkta; bu sadece sağlama.
 _fark = []
 for a in df_ozet.index:
-    if not any((a, ds, v) in x for ds in PLAN_GUNLER for v in gun_vardiyalari[ds]):
-        continue                                     # değişkeni yok → kapsam dışı
-    hi_izin = sum(1 for d in izin_map.get(a, set())
-                  if d in GUN_SET and d.weekday() < 5)
-    kota = max(0, AYLIK_IS_GUNU - hi_izin)
-    if kota == 0:
-        continue                                     # tam izinli → kısıt yok
-    ust = kota if a in ozel_agents else kota + 2 + tatil_gun
+    if a not in kota_map:                            # H17'de kısıt konmadı (kota=0/değişkensiz)
+        continue
+    kota, ust = kota_map[a], ust_map[a]              # modelin GERÇEK değerleri
     c = int(df_ozet.loc[a, "calisma"])
     if c < kota:
         durum = f"EKSİK -{kota - c}"
