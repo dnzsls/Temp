@@ -1048,28 +1048,30 @@ roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.inde
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
 
 # roster_2 SONUNA özet kolonlar: çalışma / mesai / off gün sayısı (HAFTALIK)
-#   mesai_gun   = Σ hafta [ (o hafta çalışılan resmi tatil günü)
-#                           + max(0, (o hafta tatil-dışı çalışılan gün) − 5) ]
-#                 = haftada 5'ten fazla çalışılan her gün + her resmi tatil günü.
+#   mesai_gun   = Σ hafta max(0, (o hafta çalışılan gün) − (5 − hafta içi resmi tatil))
+#                 yani o haftaki NORMAL iş gününü (tatil haftasında 4) aşan her gün.
+#                 Resmi tatilde çalışma da eşiği aştırır → mesai sayılır.
 #   calisma_gun = toplam çalışma − mesai_gun (normal + arife; mesai hariç)
 #   off_gun     = off gün sayısı
-#   NOT: hafta içi izin alıp yerine hafta sonu çalışma (swap, o hafta ≤5) → mesai DEĞİL
-#        → mesaiye_kalamaz swap'ları mesai görünmez; gerçek fazla (6+ gün) görünür.
+#   NOT: hafta içi izin alıp yerine hafta sonu çalışma (swap, o hafta ≤ eşik) → mesai DEĞİL
+#        → mesaiye_kalamaz swap'ları mesai görünmez; gerçek fazla (eşik üstü) görünür.
 _gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
-_hafta_kol = {}                                    # (yıl,hafta) → {"normal":[kol], "tatil":[kol]}
+_hafta = {}                                        # (yıl,hafta) → {"kol":[günler], "wtatil":hafta içi tatil}
 for c in _gun:
     d = dt.date.fromisoformat(c)
     wk = d.isocalendar()[:2]
-    _hafta_kol.setdefault(wk, {"normal": [], "tatil": []})
-    (_hafta_kol[wk]["tatil"] if d in TATIL else _hafta_kol[wk]["normal"]).append(c)
+    _hafta.setdefault(wk, {"kol": [], "wtatil": 0})
+    _hafta[wk]["kol"].append(c)
+    if d in TATIL and d.weekday() < 5:             # hafta içi resmi tatil → normal iş günü azalır
+        _hafta[wk]["wtatil"] += 1
 
 
 def _mesai_gun_say(a):
     m = 0
-    for kols in _hafta_kol.values():
-        norm = sum(1 for c in kols["normal"] if roster.at[a, c] not in ("off", "izin"))
-        tat  = sum(1 for c in kols["tatil"]  if roster.at[a, c] not in ("off", "izin"))
-        m += tat + max(0, norm - 5)                # 5'ten fazla + tüm tatil = mesai
+    for h in _hafta.values():
+        calisti = sum(1 for c in h["kol"] if roster.at[a, c] not in ("off", "izin"))
+        esik = 5 - h["wtatil"]                      # normal iş günü = 5 − hafta içi tatil
+        m += max(0, calisti - esik)                # eşiği aşan her gün = mesai
     return m
 
 
