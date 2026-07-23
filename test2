@@ -1330,12 +1330,20 @@ for (ds, v), kisi in talep.items():
                    "planlanan": kisi, "gerceklesen": atanan, "fark": atanan - kisi})
 df_plan_gercek = pd.DataFrame(_satir).sort_values(["tarih", "saat"]).reset_index(drop=True)
 
+# Sheet3: GÜN SONU — her gün toplam ihtiyaç (planlanan) vs gerçekleşen + fark
+df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
+               [["planlanan", "gerceklesen"]].sum())
+df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
+df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
+
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     roster_2.to_excel(_xl, sheet_name="roster")                       # agent = index
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
+    df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
 
 print(f"Excel yazıldı: {XLSX_PATH}")
 print(f"  Sheet1 'roster': {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon")
 print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
+print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
