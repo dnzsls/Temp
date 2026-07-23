@@ -1336,10 +1336,32 @@ df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
+from openpyxl.styles import Font, PatternFill
+
+_BOLD    = Font(bold=True)
+_KIRMIZI = PatternFill("solid", fgColor="FFC7CE")          # off → açık kırmızı
+_SARI    = PatternFill("solid", fgColor="FFEB9C")          # mesai → sarı
+
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     roster_2.to_excel(_xl, sheet_name="roster")                       # agent = index
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
+
+    # başlık satırı (1. satır) tüm sheet'lerde BOLD
+    for _ws in _xl.book.worksheets:
+        for _cell in _ws[1]:
+            _cell.font = _BOLD
+
+    # roster sheet: gün hücrelerini renklendir (off = açık kırmızı, mesai = sarı)
+    _ws = _xl.sheets["roster"]
+    for _row in _ws.iter_rows(min_row=2):
+        for _cell in _row:
+            _v = _cell.value
+            if isinstance(_v, str):
+                if _v == "off":
+                    _cell.fill = _KIRMIZI
+                elif _v.startswith("mesai"):
+                    _cell.fill = _SARI
 
 print(f"Excel yazıldı: {XLSX_PATH}")
 print(f"  Sheet1 'roster': {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon")
