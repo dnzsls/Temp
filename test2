@@ -1310,3 +1310,32 @@ display(pivot3)
 ozet_saat = df_sonuc.groupby(["wmg", "saat"]).size().unstack("saat", fill_value=0)
 print("lokasyon × saat (ay boyu toplam):")
 display(ozet_saat)
+
+
+# %% [HÜCRE 29] — EXCEL ÇIKTISI (roster + plan_vs_gerçekleşen) ──────────
+# Sheet1 "roster"           : roster_2 (agent × gün çizelge + flag + calisma/mesai/off özet)
+# Sheet2 "plan_vs_gerceklesen": her kova için PLANLANAN (Stage-1 talebi) vs
+#                              GERÇEKLEŞEN (kişi atamasından sonra) + fark.
+XLSX_PATH = f"roster_{QUEUE}_{AY_YIL}_{AY_AY:02d}.xlsx"     # çıktı dosyası (dilediğin yolu ver)
+
+# Sheet2 verisi: (gün, vardiya) → planlanan talep vs gerçekleşen atama
+# (ARIFE_YARIM talep'te olmadığı için otomatik hariç → sadece gerçek kovalar)
+_satir = []
+for (ds, v), kisi in talep.items():
+    atanan = sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1)
+    bas, bit = saat[(ds, v)]
+    _satir.append({"tarih": ds,
+                   "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
+                   "vardiya": v, "saat": f"{bas}-{bit}",
+                   "planlanan": kisi, "gerceklesen": atanan, "fark": atanan - kisi})
+df_plan_gercek = pd.DataFrame(_satir).sort_values(["tarih", "saat"]).reset_index(drop=True)
+
+with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
+    roster_2.to_excel(_xl, sheet_name="roster")                       # agent = index
+    df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
+
+print(f"Excel yazıldı: {XLSX_PATH}")
+print(f"  Sheet1 'roster': {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon")
+print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
+      f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
+      f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
