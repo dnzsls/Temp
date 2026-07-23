@@ -1047,43 +1047,52 @@ roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.inde
 roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
 
-# roster_2 SONUNA özet kolonlar: çalışma / mesai / off gün sayısı (HAFTALIK)
-#   mesai_gun   = Σ hafta max(0, (o hafta çalışılan gün) − (5 − hafta içi resmi tatil))
-#                 yani o haftaki NORMAL iş gününü (tatil haftasında 4) aşan her gün.
-#                 Resmi tatilde çalışma da eşiği aştırır → mesai sayılır.
-#   calisma_gun = toplam çalışma − mesai_gun (normal + arife; mesai hariç)
-#   off_gun     = off gün sayısı
-#   NOT: hafta içi izin alıp yerine hafta sonu çalışma (swap, o hafta ≤ eşik) → mesai DEĞİL
-#        → mesaiye_kalamaz swap'ları mesai görünmez; gerçek fazla (eşik üstü) görünür.
+# roster_2 SONUNA özet kolonlar: çalışma / mesai / norm / off gün sayısı (HAFTALIK)
+#   Her hafta: W=hafta içi (tatil-dışı) çalışma, E=hafta sonu (tatil-dışı) çalışma,
+#              tat=resmi tatilde çalışma, T=normal iş günü (5 − hafta içi tatil).
+#   mesai_gun = Σ max(0, (W+E+tat) − T)  → eşiği aşan her gün (fazla mesai; tatil dahil)
+#   norm_gun  = Σ min(E, max(0, T − W))  → hafta içi off yerine hafta sonu çalışma (swap;
+#              resmi tatil HARİÇ). Mesai değil (hafta ≤ eşik), sadece dağılım kaymış.
+#   calisma_gun = toplam çalışma − mesai_gun (normal + arife + norm; mesai hariç)
+#   off_gun   = off gün sayısı
 _gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
-_hafta = {}                                        # (yıl,hafta) → {"kol":[günler], "wtatil":hafta içi tatil}
+_hafta = {}                                        # (yıl,hafta) → gün kolonları kategorili
 for c in _gun:
     d = dt.date.fromisoformat(c)
     wk = d.isocalendar()[:2]
-    _hafta.setdefault(wk, {"kol": [], "wtatil": 0})
-    _hafta[wk]["kol"].append(c)
-    if d in TATIL and d.weekday() < 5:             # hafta içi resmi tatil → normal iş günü azalır
-        _hafta[wk]["wtatil"] += 1
+    _hafta.setdefault(wk, {"wd": [], "we": [], "tat": [], "wtatil": 0})
+    if d in TATIL:                                  # resmi tatil (hafta içi/sonu farketmez)
+        _hafta[wk]["tat"].append(c)
+        if d.weekday() < 5:
+            _hafta[wk]["wtatil"] += 1
+    elif d.weekday() >= 5:                          # hafta sonu (tatil değil)
+        _hafta[wk]["we"].append(c)
+    else:                                           # hafta içi (tatil değil)
+        _hafta[wk]["wd"].append(c)
 
 
-def _mesai_gun_say(a):
-    m = 0
+def _mesai_norm_say(a):
+    mesai, norm = 0, 0
     for h in _hafta.values():
-        calisti = sum(1 for c in h["kol"] if roster.at[a, c] not in ("off", "izin"))
-        esik = 5 - h["wtatil"]                      # normal iş günü = 5 − hafta içi tatil
-        m += max(0, calisti - esik)                # eşiği aşan her gün = mesai
-    return m
+        W   = sum(1 for c in h["wd"]  if roster.at[a, c] not in ("off", "izin"))
+        E   = sum(1 for c in h["we"]  if roster.at[a, c] not in ("off", "izin"))
+        tat = sum(1 for c in h["tat"] if roster.at[a, c] not in ("off", "izin"))
+        T = 5 - h["wtatil"]                         # normal iş günü
+        mesai += max(0, (W + E + tat) - T)          # eşiği aşan → mesai
+        norm  += min(E, max(0, T - W))              # hafta içi off yerine hafta sonu → norm
+    return mesai, norm
 
 
 _cal_top = (~roster[_gun].isin(["off", "izin"])).sum(axis=1)       # toplam çalışma
 _off     = (roster[_gun] == "off").sum(axis=1)
-_mg = {a: _mesai_gun_say(a) for a in roster_2.index}
-roster_2["calisma_gun"] = [int(_cal_top[a]) - _mg[a] for a in roster_2.index]
-roster_2["mesai_gun"]   = [_mg[a] for a in roster_2.index]
+_mn = {a: _mesai_norm_say(a) for a in roster_2.index}
+roster_2["calisma_gun"] = [int(_cal_top[a]) - _mn[a][0] for a in roster_2.index]
+roster_2["mesai_gun"]   = [_mn[a][0] for a in roster_2.index]
+roster_2["norm_gun"]    = [_mn[a][1] for a in roster_2.index]
 roster_2["off_gun"]     = [int(_off[a]) for a in roster_2.index]
 
 print(f"\nroster_2: {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon "
-      f"(takim + 3 flag + gün + calisma/mesai/off özet)")
+      f"(takim + 3 flag + gün + calisma/mesai/norm/off özet)")
 print(roster_2.head(15))
 
 
