@@ -714,6 +714,32 @@ print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=iş günü−haftaiçi
       f"normal kota..kota+2+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
 
 
+# %% [HÜCRE 17B] — RESMİ TATİL HAFTASI: ÖZEL AGENT HAFTALIK KOTA (sert) ─
+# SADECE resmi tatil içeren haftalarda: özel flag (süt/hamile/mesai) agent
+# o hafta EN FAZLA o haftanın MÜSAİT HAFTA İÇİ günü kadar çalışır.
+#   wd_say = (hafta içi gün) − (resmi tatil) − (izin)   ← DİNAMİK, sabit değil
+#   1 tatil → 4, 2 tatil → 3 ...  arife resmi tatil değil → hafta içi sayılır.
+# 5. gün (hafta sonu) mesai olurdu → yapamaz. Aylık kotayı haftalara dengeli
+# yayar (Cmt yerine boş bıraktığı hafta içi günü çalışır). Diğer haftalar serbest.
+# Normal agent hariç (onlar 5→1 mesai, 6→2 mesai yapabilir; mesai_gun böyle sayar).
+ntk = 0
+for a in ozel_agents:
+    for gunler in haftalar.values():
+        if not any(dt.date.fromisoformat(ds) in TATIL for ds in gunler):
+            continue                                   # tatil haftası değil → serbest
+        wd_say = sum(1 for ds in gunler                # müsait hafta içi (tatil hariç, izinsiz)
+                     if dt.date.fromisoformat(ds).weekday() < 5
+                     and dt.date.fromisoformat(ds) not in TATIL
+                     and any((a, ds, v) in x for v in gun_vardiyalari[ds]))
+        haftalik = [x[(a, ds, v)] for ds in gunler
+                    for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        if haftalik and wd_say:
+            model.Add(sum(haftalik) <= wd_say)         # ≤ müsait hafta içi → 5. gün yasak
+            ntk += 1
+
+print(f"resmi tatil haftası özel kota: {ntk} (özel agent, tatil haftası) kısıtı")
+
+
 # %% [HÜCRE 18] — AYDA ≥1 ÇİFT HAFTA SONU OFF (sert) ──────────────────
 # Her agent ay boyunca en az bir Cmt+Pzr çiftini BİRLİKTE off geçirmeli.
 gset = set(PLAN_GUNLER)
