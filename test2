@@ -37,6 +37,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
     H20C hafta sonu adaleti: W_ADALET_HS(6)×(hs günü−FAIR_HS)+ + W_ADALET_HS2(6)×(hs günü−FAIR_HS−1)+ [konveks → 4-5'i 3'e yay].
     H20D vardiya-saati adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+ [17:00+ & gece rotasyonu].
+    H20E mesai adaleti: W_ADALET_MESAI × (overtime − FAIR_MESAI)+ [fazla mesaiyi eşit yay; hafta sonu=mesai+norm → norm da dengelenir].
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -96,9 +97,11 @@ W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapma
 W_TAKIM      = 100             # takım bölünme: takımın o hafta fazladan kullandığı her vardiya-tipi (HAFTALIK; günlükten ~5× yüksek olmalı)
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
-W_ADALET_HS  = 6               # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza
-W_ADALET_HS2 = 6               # hafta sonu KONVEKS ek: FAIR_HS+1 üstü ekstra ceza (4-5 günü 3'e yay)
+W_ADALET_HS  = 12              # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza
+W_ADALET_HS2 = 12              # hafta sonu KONVEKS ek: FAIR_HS+1 üstü ekstra ceza (4-5 günü 3'e yay)
 FAIR_HS     = 2                # agent başına "adil" hafta sonu günü; üstü cezalı (yük yayılsın)
+W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
+FAIR_MESAI  = 1                # agent başına "adil" fazla mesai günü; üstü cezalı (mesaiyi eşit yay)
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
 FAIR_AKSAM_HAFTA = 1           # agent başına "adil" akşam/gece HAFTA sayısı; üstü cezalı (H20 haftalık tiple uyumlu)
@@ -945,6 +948,32 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
       f"(ağ. {W_ADALET_AKSAM})")
 
 
+# %% [HÜCRE 20E] — MESAİ (OVERTIME) ADALETİ (agent bazında) ─────────────
+# Fazla mesai (kota üstü çalışılan gün) kişiler arası eşit dağılsın.
+#   overtime = çalışma − kota   (normal 0..2+tatil; özel flag = 0)
+# Adil pay (FAIR_MESAI) üstü cezalı → 2 mesai yapanı 1'e çekip yükü 0 yapanlara yay.
+# NOT: hafta sonu = mesai + norm (fazla mesai hep hafta sonuna düşer). H20C hafta
+#      sonunu, bu hücre mesaiyi dengeleyince → NORM da (=fark) dengelenir.
+# NOT: özel flag (süt/hamile/mesaiye_kalamaz) ust=kota → overtime=0 → otomatik hariç.
+nmes = 0
+for a in AGENTS:
+    if a not in kota_map:
+        continue
+    ust_of = ust_map[a] - kota_map[a]                 # bu agentın max overtime (özel=0)
+    if ust_of <= FAIR_MESAI:
+        continue                                      # adil payın altında → ceza gereksiz
+    tum = [x[(a, ds, v)] for ds in PLAN_GUNLER
+           for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+    calisma = sum(tum)
+    fazla = model.NewIntVar(0, ust_of, f"fazlamesai_{a}")
+    model.Add(fazla >= calisma - (kota_map[a] + FAIR_MESAI))   # adil payı aşan overtime
+    amac.append(W_ADALET_MESAI * fazla)
+    nmes += 1
+
+print(f"mesai adaleti: {nmes} agent, adil pay={FAIR_MESAI} fazla mesai "
+      f"(ağ. {W_ADALET_MESAI})")
+
+
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
 solver = cp_model.CpSolver()
@@ -1351,8 +1380,17 @@ _BOLD    = Font(bold=True)
 _KIRMIZI = PatternFill("solid", fgColor="FFC7CE")          # off → açık kırmızı
 _SARI    = PatternFill("solid", fgColor="FFEB9C")          # mesai → sarı
 
+# Excel roster başlıkları: gün kolonlarına gün adı ekle (haftaları ayırt et) → "06-01 Pzt"
+def _gun_etiket(c):
+    try:
+        d = dt.date.fromisoformat(str(c))
+        return f"{str(c)[5:]} {DAY_TR[d.weekday()]}"
+    except (ValueError, TypeError):
+        return c                                    # takim/flag/özet kolonları → değişmez
+roster_xl = roster_2.rename(columns=_gun_etiket)
+
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
-    roster_2.to_excel(_xl, sheet_name="roster")                       # agent = index
+    roster_xl.to_excel(_xl, sheet_name="roster")                      # agent = index, gün-adlı başlık
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
 
