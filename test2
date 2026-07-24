@@ -856,6 +856,8 @@ for a in AGENTS:
         gun_var = []                          # bu agentın o haftadaki çalışma değişkenleri
         izinsiz_gun = set()                   # o hafta değişkeni olan (izinsiz) günler
         for ds in hafta_gunleri:
+            if dt.date.fromisoformat(ds) in TATIL:   # resmi tatil → izin gibi, avail'e girmez
+                continue                             # (tatili dinlemek off sayılmasın)
             gunluk = [x[(a, ds, v)] for v in gun_vardiyalari[ds] if (a, ds, v) in x]
             if gunluk:
                 gun_var += gunluk
@@ -876,6 +878,8 @@ for a in AGENTS:
     for ds in PLAN_GUNLER:
         if dt.date.fromisoformat(ds).weekday() >= 5:
             continue                          # hafta sonu → bu cezanın dışında
+        if dt.date.fromisoformat(ds) in TATIL:
+            continue                          # resmi tatil → izin gibi, hafta içi off sayılmaz
         gunluk = [x[(a, ds, v)] for v in gun_vardiyalari[ds] if (a, ds, v) in x]
         if gunluk:
             hi_var += gunluk
