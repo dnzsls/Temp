@@ -96,12 +96,12 @@ W_COVERAGE  = 1                # coverage sapma (5–15 arası)
 W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
 W_TAKIM      = 100             # takım bölünme: takımın o hafta fazladan kullandığı her vardiya-tipi (HAFTALIK; günlükten ~5× yüksek olmalı)
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
-W_HI_OFF    = 1                # hafta içi off cezası (yumuşak → off'u önce hafta sonuna it)
+W_HI_OFF    = 4                # hafta içi off cezası (=norm) → "önce mesai" (2 dolmadan norm yapma)
 W_ADALET_HS  = 12              # hafta sonu adaleti: FAIR_HS üstü her hafta sonu gününe ceza
 W_ADALET_HS2 = 12              # hafta sonu KONVEKS ek: FAIR_HS+1 üstü ekstra ceza (4-5 günü 3'e yay)
 FAIR_HS     = 2                # agent başına "adil" hafta sonu günü; üstü cezalı (yük yayılsın)
 W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
-FAIR_MESAI  = 1                # agent başına "adil" fazla mesai günü; üstü cezalı (mesaiyi eşit yay)
+FAIR_MESAI  = 2                # "adil" fazla mesai = 2 (rotasyon hedefi); 2'ye kadar serbest, 3+ cezalı
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
 FAIR_AKSAM_HAFTA = 1           # agent başına "adil" akşam/gece HAFTA sayısı; üstü cezalı (H20 haftalık tiple uyumlu)
