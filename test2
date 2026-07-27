@@ -37,7 +37,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H20B hafta sonu önceliği: W_HI_OFF(1) × hafta içi off sayısı [off'u hafta sonuna iter].
     H20C hafta sonu adaleti: W_ADALET_HS(6)×(hs günü−FAIR_HS)+ + W_ADALET_HS2(6)×(hs günü−FAIR_HS−1)+ [konveks → 4-5'i 3'e yay].
     H20D vardiya-saati adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+ [17:00+ & gece rotasyonu].
-    H20E mesai adaleti: W_ADALET_MESAI × (overtime − FAIR_MESAI)+ [fazla mesaiyi eşit yay; hafta sonu=mesai+norm → norm da dengelenir].
+    H20E mesai adaleti: W_ADALET_MESAI × (HAFTALIK mesai − FAIR_MESAI)+ [3.+ 6-günlük haftayı cezala → "önce hafta içi doldur"; norm'a dokunmaz].
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -978,29 +978,39 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
       f"(ağ. {W_ADALET_AKSAM})")
 
 
-# %% [HÜCRE 20E] — MESAİ (OVERTIME) ADALETİ (agent bazında) ─────────────
-# Fazla mesai (kota üstü çalışılan gün) kişiler arası eşit dağılsın.
-#   overtime = çalışma − kota   (normal 0..2+tatil; özel flag = 0)
-# Adil pay (FAIR_MESAI) üstü cezalı → 2 mesai yapanı 1'e çekip yükü 0 yapanlara yay.
-# NOT: hafta sonu = mesai + norm (fazla mesai hep hafta sonuna düşer). H20C hafta
-#      sonunu, bu hücre mesaiyi dengeleyince → NORM da (=fark) dengelenir.
-# NOT: özel flag (süt/hamile/mesaiye_kalamaz) ust=kota → overtime=0 → otomatik hariç.
+# %% [HÜCRE 20E] — MESAİ (HAFTALIK) ADALETİ / "önce hafta içi doldur" ────
+# Fazla mesai = HAFTALIK 5-üstü çalışma (roster mesai_gun ile AYNI ölçü; resmi
+# tatil HARİÇ). Adil pay (FAIR_MESAI=2) üstü YUMUŞAK cezalı:
+#   haftalık mesai(hafta) = max(0, o hafta çalışılan(tatil hariç) − (5 − hafta içi tatil))
+#   ceza = W_ADALET_MESAI × max(0, Σ haftalık mesai − FAIR_MESAI)
+# → 2 mesai haftası bedava (rotasyon), 3.+ 6-günlük hafta cezalı → model 3. hafta
+#   sonu yerine boş bıraktığı HAFTA İÇİNİ doldurur ("önce hafta içi"). Soft (INFEASIBLE
+#   yapmaz). Norm haftası (5 gün) → max(0,5−5)=0 → cezasız, norm'a dokunmaz.
+# NOT: aylık overtime zaten H17'de sert (ust). Bu hücre haftalık DAĞILIMI düzeltir.
 nmes = 0
 for a in AGENTS:
     if a not in kota_map:
         continue
-    ust_of = ust_map[a] - kota_map[a]                 # bu agentın max overtime (özel=0)
-    if ust_of <= FAIR_MESAI:
-        continue                                      # adil payın altında → ceza gereksiz
-    tum = [x[(a, ds, v)] for ds in PLAN_GUNLER
-           for v in gun_vardiyalari[ds] if (a, ds, v) in x]
-    calisma = sum(tum)
-    fazla = model.NewIntVar(0, ust_of, f"fazlamesai_{a}")
-    model.Add(fazla >= calisma - (kota_map[a] + FAIR_MESAI))   # adil payı aşan overtime
+    hafta_mesai = []                                   # her hafta: 5-üstü (tatil hariç) çalışma
+    for gunler in haftalar.values():
+        wtatil = sum(1 for ds in gunler
+                     if dt.date.fromisoformat(ds).weekday() < 5
+                     and dt.date.fromisoformat(ds) in TATIL)
+        nontatil = [x[(a, ds, v)] for ds in gunler for v in gun_vardiyalari[ds]
+                    if (a, ds, v) in x and dt.date.fromisoformat(ds) not in TATIL]
+        if not nontatil:
+            continue
+        mw = model.NewIntVar(0, 7, f"haftamesai_{a}_{len(hafta_mesai)}")
+        model.Add(mw >= sum(nontatil) - (5 - wtatil))  # haftalık mesai (ReLU, ≥0)
+        hafta_mesai.append(mw)
+    if not hafta_mesai:
+        continue
+    fazla = model.NewIntVar(0, 7 * len(hafta_mesai), f"fazlamesai_{a}")
+    model.Add(fazla >= sum(hafta_mesai) - FAIR_MESAI)  # toplam haftalık mesai − adil pay
     amac.append(W_ADALET_MESAI * fazla)
     nmes += 1
 
-print(f"mesai adaleti: {nmes} agent, adil pay={FAIR_MESAI} fazla mesai "
+print(f"mesai (haftalık) adaleti: {nmes} agent, adil pay={FAIR_MESAI} mesai haftası "
       f"(ağ. {W_ADALET_MESAI})")
 
 
