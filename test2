@@ -198,13 +198,31 @@ if df_off is not None:
     gun_cols = [c for c in df_off.columns if c.startswith("gun_")]
     df_off[gun_cols] = (df_off[gun_cols].apply(pd.to_numeric, errors="coerce")
                         .fillna(0).astype(int))
+    if "izin_tipi" in df_off.columns:                    # YENİ: izin / off_t ayrımı
+        df_off["izin_tipi"] = df_off["izin_tipi"].astype(str).str.strip().str.lower()
     df_off = df_off.fillna("")
     print(f"\ndf_off: {df_off.shape[0]} satır × {df_off.shape[1]} kolon "
           f"({len(gun_cols)} gün kolonu int'e çevrildi)")
     print(f"kolonlar: {list(df_off.columns)}")
+    if "izin_tipi" in df_off.columns:
+        print(f"df_off izin_tipi: {df_off['izin_tipi'].value_counts().to_dict()}")
     print(df_off.head())
 else:
     print("df_off yok")
+
+# df_izin (tidy): agent_user_code + tarih + izin_tipi (izin / off_t2)
+df_izin = globals().get("df_izin")
+if df_izin is not None:
+    df_izin = df_izin.copy()
+    df_izin.columns = [str(c).strip().lower() for c in df_izin.columns]
+    df_izin["tarih"] = pd.to_datetime(df_izin["tarih"], errors="coerce").dt.date   # → date
+    df_izin["izin_tipi"] = df_izin["izin_tipi"].astype(str).str.strip().str.lower()
+    df_izin = df_izin.dropna(subset=["tarih"])
+    print(f"\ndf_izin: {df_izin.shape[0]} satır × {df_izin.shape[1]} kolon")
+    print(f"df_izin izin_tipi: {df_izin['izin_tipi'].value_counts().to_dict()}")
+    print(df_izin.head())
+else:
+    print("df_izin yok")
 
 
 # %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
@@ -243,19 +261,27 @@ print(df_tam["takim"].value_counts())
 # %% [HÜCRE 7] — İZİN GÜNLERİNİ BİRLEŞTİR ───────────────────────────────
 # Her agent için tek izin kümesi: özel-off + tekrarlı(Pzt/Cuma) + tam-ay(idari/doğum)
 
-# 1) özel-off tablosu → off_map[code] = {tarih}
-# NOT: bir agent df_off'ta birden fazla satırda olabilir → günleri BİRLEŞTİR (union).
-off_map = {}
+# 1) df_izin (ÖNCELİKLİ) + df_off → agent başına tarih→tip haritası (tip_map).
+#    tip: "izin" (kotadan düşer) | "off_t"/"off_t2" (blok ama kota DÜŞMEZ).
+#    Çakışan tarihte df_izin kazanır: df_izin'i ÖNCE yazıyoruz, df_off'u setdefault
+#    ile ekliyoruz → df_izin'de olan tarihi df_off EZEMEZ.
+tip_map = {}                                            # code -> {tarih: tip}
+if df_izin is not None:                                 # df_izin ÖNCE → öncelikli
+    for _, row in df_izin.iterrows():
+        code = str(row["agent_user_code"]).strip()
+        tip_map.setdefault(code, {})[row["tarih"]] = row["izin_tipi"]
 if df_off is not None:
+    _off_tipli = "izin_tipi" in df_off.columns
     for _, row in df_off.iterrows():
         code = str(row["agent_user_code"]).strip()
+        tipi = row["izin_tipi"] if _off_tipli else "izin"   # tip kolonu yoksa izin varsay
         for c in gun_cols:                              # gun_cols H3'te tanımlandı
             if int(row[c]) == 1:
                 try:
-                    off_map.setdefault(code, set()).add(
-                        dt.date(AY_YIL, AY_AY, int(c.split("_")[1])))
+                    d = dt.date(AY_YIL, AY_AY, int(c.split("_")[1]))
                 except ValueError:
-                    pass                                # ayda olmayan gün (gun_31 vs.)
+                    continue                            # ayda olmayan gün (gun_31 vs.)
+                tip_map.setdefault(code, {}).setdefault(d, tipi)   # df_izin varsa DOKUNMA
 
 # 2) tekrarlı hafta içi izin: flag → hafta günü (0=Pzt .. 4=Cuma)
 #    Yeni gün eklemek için tek yer burası (tek format).
@@ -282,11 +308,18 @@ def _b(row, col):
 _TATIL = set(dt.date.fromisoformat(t) for t in RESMI_TATILLER)   # H16 ile aynı liste
 tatil_haftalari = {d.isocalendar()[:2] for d in _TATIL if d.weekday() < 5}
 
-# 3) agent başına birleştir → izin_map
+# 3) agent başına birleştir → izin_map (kotadan düşer) + off_block_map (blok, kota DÜŞMEZ)
 izin_map = {}
+off_block_map = {}
 for _, row in df_tam.iterrows():
     code = str(row["agent_user_code"]).strip()
-    izin = set(off_map.get(code, set()))
+    izin = set()
+    off_block = set()
+    for d, tipi in tip_map.get(code, {}).items():      # df_izin+df_off tarihlerini tipe ayır
+        if tipi == "izin":
+            izin.add(d)
+        else:                                          # off_t / off_t2 → blok ama kota düşmez
+            off_block.add(d)
     if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
         izin |= GUN_SET                                # tüm ay
     sut = _b(row, "sut_izni_flg")                      # süt izni → tatil haftası emilimi
@@ -298,12 +331,14 @@ for _, row in df_tam.iterrows():
                           if d.isocalendar()[:2] not in tatil_haftalari}
             izin |= gunler
     izin_map[code] = izin
+    off_block_map[code] = off_block
 
 df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
     lambda c: len(izin_map.get(str(c).strip(), set())))
 
 tam_ay = sum(1 for v in izin_map.values() if v >= GUN_SET)
-print(f"özel-off tablosundan izinli agent: {len(off_map)}")
+print(f"izin girişi olan agent: {sum(1 for v in izin_map.values() if v)}  |  "
+      f"off_block (off_t/off_t2) olan agent: {sum(1 for v in off_block_map.values() if v)}")
 print(f"tüm-ay izinli (idari/doğum): {tam_ay}")
 print("en çok izinli 10 agent:")
 print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
@@ -351,21 +386,22 @@ print(f"(gün × vardiya) çift: {len(talep)}  | toplam kişi-slot: {sum(talep.v
 
 # %% [HÜCRE 9] — CP-SAT MODEL + KARAR DEĞİŞKENLERİ ─────────────────────
 # x[(agent, gün, vardiya)] = 1 → o agent o gün o vardiyada çalışıyor.
-# İzinli gün için değişken AÇILMAZ (o gün atanamaz). Henüz kısıt yok.
+# BLOK gün için değişken AÇILMAZ (o gün atanamaz): izin ∪ off_block (off_t/off_t2).
+# Fark kota'da: izin kotadan düşer (H17), off_block düşmez — ama ikisi de burada bloklu.
 model = cp_model.CpModel()
 
 x = {}
 for a in AGENTS:
-    izinli = izin_map.get(a, set())
+    bloklu = izin_map.get(a, set()) | off_block_map.get(a, set())   # izin + off_t/off_t2
     for ds in PLAN_GUNLER:
-        if dt.date.fromisoformat(ds) in izinli:
+        if dt.date.fromisoformat(ds) in bloklu:
             continue
         for v in gun_vardiyalari[ds]:
             x[(a, ds, v)] = model.NewBoolVar(f"x_{a}_{ds}_{v}")
 
 ust_sinir = len(AGENTS) * len(talep)
 print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
-      f"izin günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
+      f"blok (izin+off_t/off_t2) günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
 
 
 # %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST, SERT BAND YOK) ─────
