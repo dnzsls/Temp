@@ -701,7 +701,8 @@ for a in AGENTS:
         continue
     calisma = sum(tum)
     hi_izin = sum(1 for d in izin_map.get(a, set())
-                  if d in GUN_SET and d.weekday() < 5)   # hafta içi izin günü
+                  if d in GUN_SET and d.weekday() < 5
+                  and d not in TATIL)                   # hafta içi izin (tatil HARİÇ → çift sayma yok)
     kota = max(0, AYLIK_IS_GUNU - hi_izin)
     if kota == 0:
         continue
