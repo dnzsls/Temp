@@ -218,7 +218,10 @@ if df_izin is not None:
     df_izin["tarih"] = pd.to_datetime(df_izin["tarih"], errors="coerce").dt.date   # → date
     df_izin["izin_tipi"] = df_izin["izin_tipi"].astype(str).str.strip().str.lower()
     df_izin = df_izin.dropna(subset=["tarih"])
-    print(f"\ndf_izin: {df_izin.shape[0]} satır × {df_izin.shape[1]} kolon")
+    _yil_disi = (~df_izin["tarih"].isin(GUN_SET)).sum()                # tüm yıl → planlama ayı
+    df_izin = df_izin[df_izin["tarih"].isin(GUN_SET)]                  # SADECE planlanan ay
+    print(f"\ndf_izin: {df_izin.shape[0]} satır × {df_izin.shape[1]} kolon "
+          f"(ay dışı {_yil_disi} satır atıldı)")
     print(f"df_izin izin_tipi: {df_izin['izin_tipi'].value_counts().to_dict()}")
     print(df_izin.head())
 else:
