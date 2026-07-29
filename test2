@@ -1,31 +1,28 @@
-import pandas as pd, datetime as dt
+# 1) En üst katman
+print("tip:", type(results))
+print("gün sayısı:", len(results))
+gunler = sorted(results.keys())
+print("ilk/son gün:", gunler[0], "...", gunler[-1])
 
-satirlar = []
-for gun, r in results.items():
-    if not r:                            # None gün (INFEASIBLE) atla
-        continue
-    for kuyruk in ("kitle", "kurumsal", "gold"):
-        qr = r.get(kuyruk)
-        if not qr:
-            continue
-        mi = qr["mip_info"]
-        sc = mi.get("shift_coverage", {})
-        for vardiya, kisi in mi.get("assignments", {}).items():
-            if kisi <= 0:
-                continue
-            info = sc.get(vardiya, {})
-            satirlar.append({
-                "tarih":      gun,
-                "kuyruk":     kuyruk,
-                "vardiya":    vardiya,
-                "baslangic":  info.get("start"),
-                "bitis":      info.get("end"),
-                "sirket":     info.get("company"),
-                "kisi":       int(kisi),
-                "eksik":      mi.get("total_shortfall", 0),
-                "fazla":      mi.get("surplus_total_added", 0),
-            })
+# 2) Bir günün içi
+ds0 = gunler[0]
+print("\ngünün anahtarları (kuyruklar):", list(results[ds0].keys()))
 
-df = pd.DataFrame(satirlar)
-print(df.columns.tolist())               # ['tarih','kuyruk','vardiya','baslangic','bitis','sirket','kisi','eksik','fazla']
-print(df.head(20))
+# 3) Kuyruğun içi
+q = results[ds0][QUEUE]
+print(f"\n'{QUEUE}' anahtarları:", list(q.keys()))
+
+# 4) mip_info alanları
+mi = q["mip_info"]
+print("\nmip_info alanları:", list(mi.keys()))
+
+# 5) assignments örneği
+print("\nassignments (ilk 5):", dict(list(mi.get("assignments", {}).items())[:5]))
+
+# 6) shift_coverage — bir vardiyanın TÜM alanları
+sc = mi.get("shift_coverage", {})
+if sc:
+    k0 = next(iter(sc))
+    print(f"\nshift_coverage örnek vardiya: {k0}")
+    print("alanları:", list(sc[k0].keys()))
+    print("tam içerik:", sc[k0])
