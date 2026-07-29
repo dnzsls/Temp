@@ -1,28 +1,4 @@
-# 1) En üst katman
-print("tip:", type(results))
-print("gün sayısı:", len(results))
-gunler = sorted(results.keys())
-print("ilk/son gün:", gunler[0], "...", gunler[-1])
-
-# 2) Bir günün içi
-ds0 = gunler[0]
-print("\ngünün anahtarları (kuyruklar):", list(results[ds0].keys()))
-
-# 3) Kuyruğun içi
-q = results[ds0][QUEUE]
-print(f"\n'{QUEUE}' anahtarları:", list(q.keys()))
-
-# 4) mip_info alanları
-mi = q["mip_info"]
-print("\nmip_info alanları:", list(mi.keys()))
-
-# 5) assignments örneği
-print("\nassignments (ilk 5):", dict(list(mi.get("assignments", {}).items())[:5]))
-
-# 6) shift_coverage — bir vardiyanın TÜM alanları
-sc = mi.get("shift_coverage", {})
-if sc:
-    k0 = next(iter(sc))
-    print(f"\nshift_coverage örnek vardiya: {k0}")
-    print("alanları:", list(sc[k0].keys()))
-    print("tam içerik:", sc[k0])
+_model = set(df_tam["agent_user_code"].astype(str).str.strip())
+_dfi = df_izin[df_izin["agent_user_code"].astype(str).str.strip().isin(_model)]
+print("modeldeki agentlarda df_izin (izin_tipi → agent):")
+print(_dfi.groupby("izin_tipi")["agent_user_code"].nunique())
