@@ -1,286 +1,31 @@
-# -*- coding: utf-8 -*-
-"""
-WEEKDAY CONFIG — FORECAST  (haftaiçi weekly_weekday_pipeline için)
-==================================================================
-forecast_monthly_run_v9_final.py HÜCRE 3'ten AYNEN çıkarıldı — davranış
-değişmedi, sadece config koddan ayrıldı (canlıda operasyon buradan düzenler).
+import pandas as pd, datetime as dt
 
-KULLANIM (monthly run'da HÜCRE 3 yerine):
-    from weekday_config_final import CONFIG_WEEKDAY
+satirlar = []
+for gun, r in results.items():
+    if not r:                            # None gün (INFEASIBLE) atla
+        continue
+    for kuyruk in ("kitle", "kurumsal", "gold"):
+        qr = r.get(kuyruk)
+        if not qr:
+            continue
+        mi = qr["mip_info"]
+        sc = mi.get("shift_coverage", {})
+        for vardiya, kisi in mi.get("assignments", {}).items():
+            if kisi <= 0:
+                continue
+            info = sc.get(vardiya, {})
+            satirlar.append({
+                "tarih":      gun,
+                "kuyruk":     kuyruk,
+                "vardiya":    vardiya,
+                "baslangic":  info.get("start"),
+                "bitis":      info.get("end"),
+                "sirket":     info.get("company"),
+                "kisi":       int(kisi),
+                "eksik":      mi.get("total_shortfall", 0),
+                "fazla":      mi.get("surplus_total_added", 0),
+            })
 
-DEĞİŞTİRİLEBİLİR ANA PARAMETRELER (per-queue: kitle / kurumsal / gold):
-  queue_configs[queue]['mip']['min_per_shift']              → 13 (V9 sert kısıt)
-  queue_configs[queue]['mip']['weekly_shrinkage_fallback']  → Stage 2 (shrinkage)
-  queue_configs[queue]['mip']['coverage_shortfall']         → Stage 3 (eksiğe izin)
-  queue_configs[queue]['erlang']['shrinkage']               → saatlik shrinkage
-  queue_configs[queue]['rr_penalty']                        → RR ceza ayarları
-  surplus_distribution['total_kadro']                       → kuyruk kadro tavanı
-  forecast_cols                                             → df_forecast kolon adları
-"""
-
-CONFIG_WEEKDAY = {
-
-    # ---- KUYRUKLAR ----
-    'queues': {
-        'kitle':    {'label': 'kitle',    'actual_name': 'kitle_cagrilar',
-                     'companies': ['inhouse', 'outsource']},
-        'kurumsal': {'label': 'kurumsal', 'actual_name': 'kurumsal_cagrilar',
-                     'companies': ['inhouse']},
-        'gold':     {'label': 'gold',     'actual_name': 'gold_cagrilar',
-                     'companies': ['inhouse']},
-    },
-
-    # ---- FORECAST KOLON İSİMLERİ (forecast_cols) ----
-    # df_forecast'taki kolon adlarına göre düzenle (V9 rehberi 7.1 örneği).
-    'forecast_cols': {
-        'datetime':       'model_data_date',   # tam timestamp kolon adı
-        'date':           'truncddate',         # tarih kolon adı
-        'kitle_total':    'kitle_nof_call',
-        'kurumsal_total': 'kurumsal_nof_call',
-        'gold_total':     'gold_total_call',
-    },
-
-    # ---- AHT ----
-    'sub_queues': {},                 # load_aht_from_df() ile doldurulur
-    'aht_overrides': {'kitle': {}, 'kurumsal': {}, 'gold': {}},
-    'default_aht': 150,
-
-    # ---- SAAT BAZLI MALİYET ÇARPANLARI ----
-    'time_cost_multipliers': {
-        'kitle': {
-            'inhouse':   {'07:00': 25.0, '07:30': 10.0},
-            'outsource': {'07:00': 2.0,  '07:30': 2.0},
-        },
-        'kurumsal': {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
-        'gold':     {'inhouse': {'07:00': 2.0, '07:30': 1.7}, 'outsource': {}},
-        'default':  {'inhouse': {'07:00': 1.8, '07:30': 1.5}, 'outsource': {}},
-    },
-
-    # ---- COMPANY ----
-    'company': {
-        'inhouse':   {'shift_value': 'inhouse'},
-        'outsource': {'shift_value': 'outsource'},
-    },
-
-    # ---- VARDİYA KOLON İSİMLERİ ----
-    'shift_columns': {
-        'shift': 'shift', 'start': 'start', 'end': 'end', 'company': 'company',
-    },
-
-    # ---- ALT-KUYRUK MIN (K5) ----
-    # Belirli alt-kuyrukların inhouse/outsource minimum coverage zorlaması.
-    # min_ratio: o alt-kuyruğun slot çağrı payı kadar Erlang'ın bu katı min.
-    # outsource_only'de 'hours' opsiyonel (sadece o saat aralığında zorla).
-    'inhouse_only_subqueues': {
-        'kitle': [
-            'retention_line',
-            {'sub_queue': 'karttemelbankaclik', 'min_ratio': 0.20},
-        ],
-        'kurumsal': [],
-        'gold': [],
-    },
-    'outsource_only_subqueues': {
-        'kitle': [
-            {'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0,
-             'hours': {'start': '08:00', 'end': '00:00'}},
-        ],
-        'kurumsal': [],
-        'gold': [],
-    },
-
-    # =========================================================================
-    # QUEUE CONFIGS
-    # =========================================================================
-    'queue_configs': {
-
-        # ----------- KİTLE -----------
-        'kitle': {
-            'erlang': {
-                'target_asa': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
-                    7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17, 12: 0.16,
-                    13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29, 18: 0.18,
-                    19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0,
-                'cost_outsource': 1.0,
-                'min_per_shift': 13,                 # V9 sert kısıt — düşürülmez
-                'min_per_shift_overrides': {},       # başlangıç saati bazlı override
-                'weekly_shrinkage_fallback': {       # Stage 2
-                    'enabled': True, 'per_day': True, 'step': 0.10, 'floor': 0.0,
-                },
-                'coverage_shortfall': {              # Stage 4
-                    'enabled': True, 'penalty': 1000.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True,
-                'peak_exempt': False,
-                'penalty_per_person': 4.0,
-                'peak_penalty': 2.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'slot_cap': {
-                'enabled': True,
-                'bands': [
-                    {'start': '07:00', 'end': '08:00', 'max_ratio': 1.10, 'penalty': 50.0},
-                    {'start': '08:00', 'end': '09:00', 'max_ratio': 1.30, 'penalty': 50.0},
-                    {'start': '09:00', 'end': '10:30', 'max_ratio': 1.20, 'penalty': 50.0},
-                    {'start': '15:00', 'end': '17:00', 'max_ratio': 1.20, 'penalty': 50.0},
-                    {'start': '18:30', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 50.0},
-                    {'start': '22:00', 'end': '05:00', 'max_ratio': 1.30, 'penalty': 80.0},
-                ],
-            },
-            'balance_penalty': {
-                'enabled': True,
-                'penalty_per_diff': 2.0,
-                'windows': [
-                    {'name': 'sabah', 'start': '07:00', 'end': '11:59', 'penalty': 2.0},
-                    {'name': 'aksam', 'start': '12:00', 'end': '23:30', 'penalty': 2.0},
-                ],
-            },
-            'hourly_report': {                       # Kap_RR (monthly run) için
-                'rapor_etkisi': {'default': 0.00},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
-
-        # ----------- KURUMSAL (inhouse-only) -----------
-        'kurumsal': {
-            'erlang': {
-                'target_asa': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
-                    7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17, 12: 0.16,
-                    13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29, 18: 0.18,
-                    19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0,
-                'cost_outsource': 1.0,
-                'min_per_shift': 13,
-                'min_per_shift_overrides': {},
-                'weekly_shrinkage_fallback': {
-                    'enabled': True, 'per_day': True, 'step': 0.10, 'floor': 0.0,
-                },
-                'coverage_shortfall': {
-                    'enabled': True, 'penalty': 1000.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True,
-                'peak_exempt': True,
-                'penalty_per_person': 4.0,
-                'peak_penalty': 2.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'slot_cap': {'enabled': False, 'bands': []},
-            'hourly_report': {
-                'rapor_etkisi': {'default': 0.0},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
-
-        # ----------- GOLD (inhouse-only) -----------
-        'gold': {
-            'erlang': {
-                'target_asa': 30,
-                'shrinkage': {
-                    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
-                    7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17, 12: 0.16,
-                    13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29, 18: 0.18,
-                    19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19,
-                    'default': 0.0,
-                },
-                'interval_minutes': 30,
-            },
-            'mip': {
-                'cost_inhouse': 1.0,
-                'cost_outsource': 1.0,
-                'min_per_shift': 13,
-                'min_per_shift_overrides': {},
-                'weekly_shrinkage_fallback': {
-                    'enabled': True, 'per_day': True, 'step': 0.10, 'floor': 0.0,
-                },
-                'coverage_shortfall': {
-                    'enabled': True, 'penalty': 1000.0,
-                },
-            },
-            'rr_penalty': {
-                'enabled': True,
-                'peak_exempt': True,
-                'penalty_per_person': 2.0,
-                'peak_penalty': 4.0,
-                'peak_threshold': 0.70,
-                'night_multiplier': {
-                    'enabled': True,
-                    'hours': {'start': '00:00', 'end': '07:00'},
-                    'multiplier': 100.0,
-                },
-            },
-            'slot_cap': {'enabled': False, 'bands': []},
-            'hourly_report': {
-                'rapor_etkisi': {'default': 0.0},
-                'kapasite_kaybi': {
-                    0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
-                    7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
-                    13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
-                    19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
-                    'default': 0.08,
-                },
-                'cagri_adedi': {'default': 15},
-            },
-        },
-
-    },
-
-    # ---- SURPLUS DAĞITIM (kadro tavanı + dağıtım) ----
-    'surplus_distribution': {
-        'enabled': True,
-        'outsource_enabled': True,
-        'total_kadro': {
-            'kitle':    {'inhouse': 380, 'outsource': 450},
-            'kurumsal': {'inhouse': 47},
-            'gold':     {'inhouse': 130},
-        },
-        'windows': [
-            {'name': 'sabah', 'start': '09:00', 'end': '11:00', 'ratio': 2/3},
-            {'name': 'aksam', 'start': '11:00', 'end': '20:00', 'ratio': 1/3},
-        ],
-        'only_assigned_shifts': True,
-        'fallback_all_inhouse': True,
-        'method': 'rr_first',
-    },
-}
+df = pd.DataFrame(satirlar)
+print(df.columns.tolist())               # ['tarih','kuyruk','vardiya','baslangic','bitis','sirket','kisi','eksik','fazla']
+print(df.head(20))
