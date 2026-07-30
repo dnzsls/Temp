@@ -179,19 +179,12 @@ print(f"ay: {AY_YIL}-{AY_AY:02d}  ({len(GUNLER)} gün)")
 # SQL'den gelen iki DataFrame'i al, temel temizlik yap, içeriğine bak.
 # (Kuyruk süzme, PT eleme, izin birleştirme SONRAKİ adımlarda.)
 
-def _norm_kolon(c):
-    """kolon adını sadeleştir + GÖRÜNMEZ karakterleri (nbsp/zero-width/BOM) at.
-    .strip() bunları SİLMEZ → 'izin_tipi\\xa0' gibi bir ad 'izin_tipi' ile eşleşmez
-    → kolon 'yok' sanılır → df_off tipleri hep 'izin'e düşer (off_t/off_t2 kaybolur)."""
-    return "".join(ch for ch in str(c)
-                   if ch.isprintable() and not ch.isspace()).lower()
-
 df_agents = globals().get("df_agents", globals().get("df_agent"))
 if df_agents is None:
     raise SystemExit("[H3] df_agents tanımlı değil — SQL'den df_agents çek.")
 
 df_agents = df_agents.copy()
-df_agents.columns = [_norm_kolon(c) for c in df_agents.columns]           # kolon adı sadeleştir (+görünmez karakter)
+df_agents.columns = [str(c).strip().lower() for c in df_agents.columns]   # kolon adı sadeleştir
 df_agents = df_agents.fillna("")                                          # boşları '' yap
 
 print(f"df_agents: {df_agents.shape[0]} satır × {df_agents.shape[1]} kolon")
@@ -201,16 +194,13 @@ print(df_agents.head())
 df_off = globals().get("df_off")
 if df_off is not None:
     df_off = df_off.copy()
-    df_off.columns = [_norm_kolon(c) for c in df_off.columns]
+    df_off.columns = [str(c).strip().lower() for c in df_off.columns]
     # gün kolonları float (1.0/0.0) geliyor → int (0/1)
     gun_cols = [c for c in df_off.columns if c.startswith("gun_")]
     df_off[gun_cols] = (df_off[gun_cols].apply(pd.to_numeric, errors="coerce")
                         .fillna(0).astype(int))
     if "izin_tipi" in df_off.columns:                    # YENİ: izin / off_t ayrımı
-        df_off["izin_tipi"] = (df_off["izin_tipi"].astype(str)      # değerdeki görünmez karakteri de at
-                               .map(lambda s: "".join(ch for ch in s
-                                    if ch.isprintable() and not ch.isspace()))
-                               .str.lower())
+        df_off["izin_tipi"] = df_off["izin_tipi"].astype(str).str.strip().str.lower()
     df_off = df_off.fillna("")
     print(f"\ndf_off: {df_off.shape[0]} satır × {df_off.shape[1]} kolon "
           f"({len(gun_cols)} gün kolonu int'e çevrildi)")
@@ -225,12 +215,9 @@ else:
 df_izin = globals().get("df_izin")
 if df_izin is not None:
     df_izin = df_izin.copy()
-    df_izin.columns = [_norm_kolon(c) for c in df_izin.columns]
+    df_izin.columns = [str(c).strip().lower() for c in df_izin.columns]
     df_izin["tarih"] = pd.to_datetime(df_izin["tarih"], errors="coerce").dt.date   # → date
-    df_izin["izin_tipi"] = (df_izin["izin_tipi"].astype(str)        # değerdeki görünmez karakteri de at
-                            .map(lambda s: "".join(ch for ch in s
-                                 if ch.isprintable() and not ch.isspace()))
-                            .str.lower())
+    df_izin["izin_tipi"] = df_izin["izin_tipi"].astype(str).str.strip().str.lower()
     df_izin = df_izin.dropna(subset=["tarih"])
     _yil_disi = (~df_izin["tarih"].isin(GUN_SET)).sum()                # tüm yıl → planlama ayı
     df_izin = df_izin[df_izin["tarih"].isin(GUN_SET)]                  # SADECE planlanan ay
