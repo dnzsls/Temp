@@ -337,6 +337,13 @@ for _, row in df_tam.iterrows():
                 gunler = {d for d in gunler
                           if d.isocalendar()[:2] not in tatil_haftalari}
             izin |= gunler
+    # hamile/süt HAFTA SONU zaten çalışamaz (H14) → o günlere girilmiş izin/off_t
+    # ANLAMSIZ (zaten off) → hafta sonu izin/off'larını KALDIR: roster'da "off"
+    # görünür, izin sayısına girmez. Hafta içi izin/off aynen kalır (kota değişmez).
+    if sut or _b(row, "hamile_flg"):
+        izin      = {d for d in izin      if d.weekday() < 5}
+        off_block = {d for d in off_block if d.weekday() < 5}
+        off_tip   = {d: t for d, t in off_tip.items() if d.weekday() < 5}
     izin_map[code] = izin
     off_block_map[code] = off_block
     off_tip_map[code] = off_tip
