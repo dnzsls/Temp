@@ -1,14 +1,15 @@
-code = "UXXXXXX"   # <-- o agent'ın kodu
-d = df_tam["agent_user_code"].astype(str).str.strip() == code
-print("FLAG'ler:")
-print(df_tam.loc[d, [c for c in df_tam.columns if "izin" in c or "flg" in c]].T)
-print("\ndf_off izin_tipi:",
-      df_off[df_off["agent_user_code"].astype(str).str.strip()==code]["izin_tipi"].tolist()
-      if df_off is not None else "yok")
-print("df_izin satırları:",
-      df_izin[df_izin["agent_user_code"].astype(str).str.strip()==code][["tarih","izin_tipi"]]
-      .to_dict("records") if df_izin is not None else "yok")
-print("\ntip_map:", tip_map.get(code))
-print("izin_map:", sorted(izin_map.get(code, [])))
-print("off_block:", sorted(off_block_map.get(code, [])))
-print("off_tip:", off_tip_map.get(code))
+code = "U0102609"      # off_t'si izin görünen agent (bu ya da başka)
+dd = df_tam["agent_user_code"].astype(str).str.strip() == code
+print("df_tam'da (kitle) var mı?:", bool(dd.any()))
+if dd.any():
+    print("\nFLAG'ler (1 olanlar önemli):")
+    print(df_tam.loc[dd, [c for c in df_tam.columns if "flg" in c.lower()]].T)
+    print("\nizin_map :", sorted(izin_map.get(code, [])))
+    print("off_block:", sorted(off_block_map.get(code, [])))
+    print("off_tip  :", off_tip_map.get(code))
+    print("tip_map  :", tip_map.get(code))
+
+# df_izin durumu (KeyError buradan mı geldi?)
+print("\ndf_izin None mı?:", df_izin is None)
+if df_izin is not None:
+    print("df_izin kolonları:", df_izin.columns.tolist())
