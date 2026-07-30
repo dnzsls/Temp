@@ -1031,7 +1031,7 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
 # %% [HÜCRE 20E] — MESAİ (HAFTALIK) ADALETİ / "önce hafta içi doldur" ────
 # Fazla mesai = HAFTALIK 5-üstü çalışma (roster mesai_gun ile AYNI ölçü; resmi
 # tatil HARİÇ). Adil pay (FAIR_MESAI=2) üstü YUMUŞAK cezalı:
-#   haftalık mesai(hafta) = max(0, o hafta çalışılan(tatil hariç) − (5 − hafta içi tatil))
+#   haftalık mesai(hafta) = max(0, çalışılan(tatil hariç) − (5 − hafta içi tatil − hafta içi izin))
 #   ceza = W_ADALET_MESAI × max(0, Σ haftalık mesai − FAIR_MESAI)
 # → 2 mesai haftası bedava (rotasyon), 3.+ 6-günlük hafta cezalı → model 3. hafta
 #   sonu yerine boş bıraktığı HAFTA İÇİNİ doldurur ("önce hafta içi"). Soft (INFEASIBLE
@@ -1046,12 +1046,16 @@ for a in AGENTS:
         wtatil = sum(1 for ds in gunler
                      if dt.date.fromisoformat(ds).weekday() < 5
                      and dt.date.fromisoformat(ds) in TATIL)
+        w_izin = sum(1 for ds in gunler                # hafta içi izin (kotayı düşürür → eşiği düşür)
+                     if dt.date.fromisoformat(ds).weekday() < 5
+                     and dt.date.fromisoformat(ds) in izin_map.get(a, set())
+                     and dt.date.fromisoformat(ds) not in TATIL)
         nontatil = [x[(a, ds, v)] for ds in gunler for v in gun_vardiyalari[ds]
                     if (a, ds, v) in x and dt.date.fromisoformat(ds) not in TATIL]
         if not nontatil:
             continue
         mw = model.NewIntVar(0, 7, f"haftamesai_{a}_{len(hafta_mesai)}")
-        model.Add(mw >= sum(nontatil) - (5 - wtatil))  # haftalık mesai (ReLU, ≥0)
+        model.Add(mw >= sum(nontatil) - (5 - wtatil - w_izin))  # haftalık mesai (ReLU, ≥0; tatil+izin düşülmüş)
         hafta_mesai.append(mw)
     if not hafta_mesai:
         continue
@@ -1201,7 +1205,8 @@ def _mesai_norm_say(a):
         W   = sum(1 for c in h["wd"]  if roster.at[a, c] not in _OFF_LIKE)
         E   = sum(1 for c in h["we"]  if roster.at[a, c] not in _OFF_LIKE)
         tat = sum(1 for c in h["tat"] if roster.at[a, c] not in _OFF_LIKE)
-        T = 5 - h["wtatil"]                         # normal iş günü (hafta içi tatil düşülmüş)
+        w_izin = sum(1 for c in h["wd"] if roster.at[a, c] == "izin")   # hafta içi izin (kotayı düşürür)
+        T = 5 - h["wtatil"] - w_izin                # normal iş günü (hafta içi tatil + İZİN düşülmüş)
         mesai  += max(0, (W + E) - T)               # RESMİ TATİL HARİÇ eşiği aşan → mesai
         norm   += min(E, max(0, T - W))             # hafta içi off yerine hafta sonu → norm
         rtatil += tat                               # resmi tatilde çalışma → ayrı sayaç
@@ -1514,7 +1519,10 @@ for _a in roster_2.index:
     for _wk, _h in _wk_cols.items():
         _worked = sum(1 for c in _h["gun"]
                       if roster.at[_a, c] not in ("off", "off_t", "off_t2", "izin"))
-        _mesai_hafta[(_a, _wk)] = _worked > (5 - _h["wtatil"])
+        _w_izin = sum(1 for c in _h["gun"]                       # hafta içi izin (eşiği düşürür)
+                      if dt.date.fromisoformat(str(c)).weekday() < 5
+                      and roster.at[_a, c] == "izin")
+        _mesai_hafta[(_a, _wk)] = _worked > (5 - _h["wtatil"] - _w_izin)
 _agents_sirali = list(roster_2.index)
 
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
