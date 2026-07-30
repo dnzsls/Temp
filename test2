@@ -1,9 +1,4 @@
 code = "U0102609"
-guns = [c for c in df_off.columns if c.startswith("gun_")]
-o = df_off[df_off["agent_user_code"].astype(str).str.strip()==code]
-print(f"df_off satır sayısı: {len(o)}")
-for i, (_, r) in enumerate(o.iterrows()):
-    days = [int(c.split("_")[1]) for c in guns if int(r[c])==1]
-    print(f"  satır {i}: izin_tipi='{r['izin_tipi']}'  günler={days}  desc={r.get('off_talebi_desc','')}")
 z = df_izin[df_izin["agent_user_code"].astype(str).str.strip()==code]
-print("df_izin günleri:", [(t.day, tp) for t, tp in zip(z['tarih'], z['izin_tipi'])])
+print("notebook df_izin bu agent:")
+print(z[["tarih","izin_tipi"]].to_string())
