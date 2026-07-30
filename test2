@@ -315,15 +315,18 @@ tatil_haftalari = {d.isocalendar()[:2] for d in _TATIL if d.weekday() < 5}
 # 3) agent başına birleştir → izin_map (kotadan düşer) + off_block_map (blok, kota DÜŞMEZ)
 izin_map = {}
 off_block_map = {}
+off_tip_map = {}                                       # code -> {tarih: off_t/off_t2} (roster etiketi)
 for _, row in df_tam.iterrows():
     code = str(row["agent_user_code"]).strip()
     izin = set()
     off_block = set()
+    off_tip = {}
     for d, tipi in tip_map.get(code, {}).items():      # df_izin+df_off tarihlerini tipe ayır
         if tipi == "izin":
             izin.add(d)
         else:                                          # off_t / off_t2 → blok ama kota düşmez
             off_block.add(d)
+            off_tip[d] = tipi                          # tipini sakla (off_t / off_t2 ayrı göster)
     if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
         izin |= GUN_SET                                # tüm ay
     sut = _b(row, "sut_izni_flg")                      # süt izni → tatil haftası emilimi
@@ -336,6 +339,7 @@ for _, row in df_tam.iterrows():
             izin |= gunler
     izin_map[code] = izin
     off_block_map[code] = off_block
+    off_tip_map[code] = off_tip
 
 df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
     lambda c: len(izin_map.get(str(c).strip(), set())))
@@ -1123,10 +1127,13 @@ agent_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
 hucreler = []
 for a in AGENTS:
     izinli = izin_map.get(a, set())
+    off_tipli = off_tip_map.get(a, {})               # tarih → off_t / off_t2
     tk = agent_takim.get(a, "")
     for ds in PLAN_GUNLER:
         if dt.date.fromisoformat(ds) in izinli:
             deger = "izin"
+        elif dt.date.fromisoformat(ds) in off_tipli:
+            deger = off_tipli[dt.date.fromisoformat(ds)]   # off_t / off_t2 (blok, kota nötr)
         else:
             deger = "off"
             for v in gun_vardiyalari[ds]:
@@ -1171,6 +1178,8 @@ roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.inde
 #   calisma_gun     = toplam − mesai − resmi_tatil (normal + arife + norm)
 #   off_gun         = off gün sayısı
 _gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
+_OFF_ONLY = ["off", "off_t", "off_t2"]                             # off türleri (model off + blok off_t/off_t2)
+_OFF_LIKE = _OFF_ONLY + ["izin"]                                   # çalışma-dışı tüm hücreler (off + izin)
 _hafta = {}                                        # (yıl,hafta) → gün kolonları kategorili
 for c in _gun:
     d = dt.date.fromisoformat(c)
@@ -1189,9 +1198,9 @@ for c in _gun:
 def _mesai_norm_say(a):
     mesai, norm, rtatil = 0, 0, 0
     for h in _hafta.values():
-        W   = sum(1 for c in h["wd"]  if roster.at[a, c] not in ("off", "izin"))
-        E   = sum(1 for c in h["we"]  if roster.at[a, c] not in ("off", "izin"))
-        tat = sum(1 for c in h["tat"] if roster.at[a, c] not in ("off", "izin"))
+        W   = sum(1 for c in h["wd"]  if roster.at[a, c] not in _OFF_LIKE)
+        E   = sum(1 for c in h["we"]  if roster.at[a, c] not in _OFF_LIKE)
+        tat = sum(1 for c in h["tat"] if roster.at[a, c] not in _OFF_LIKE)
         T = 5 - h["wtatil"]                         # normal iş günü (hafta içi tatil düşülmüş)
         mesai  += max(0, (W + E) - T)               # RESMİ TATİL HARİÇ eşiği aşan → mesai
         norm   += min(E, max(0, T - W))             # hafta içi off yerine hafta sonu → norm
@@ -1199,8 +1208,8 @@ def _mesai_norm_say(a):
     return mesai, norm, rtatil
 
 
-_cal_top = (~roster[_gun].isin(["off", "izin"])).sum(axis=1)       # toplam çalışma
-_off     = (roster[_gun] == "off").sum(axis=1)
+_cal_top = (~roster[_gun].isin(_OFF_LIKE)).sum(axis=1)             # toplam çalışma
+_off     = (roster[_gun].isin(_OFF_ONLY)).sum(axis=1)             # off_gun = off + off_t + off_t2 (A)
 _mn = {a: _mesai_norm_say(a) for a in roster_2.index}
 # calisma_gun = toplam − mesai − resmi_tatil (normal + arife + norm; overtime ve tatil hariç)
 roster_2["calisma_gun"]     = [int(_cal_top[a]) - _mn[a][0] - _mn[a][2] for a in roster_2.index]
@@ -1217,10 +1226,11 @@ print(roster_2.head(15))
 # %% [HÜCRE 23] — AGENT ÖZET (çalışma / off / izin gün sayısı) ──────────
 # roster hücreleri "izin" / "off" / saat → her agent için say.
 gun_kolon = [c for c in roster.columns if c != "takim"]
+_off_only = ["off", "off_t", "off_t2"]                                  # off + blok (kota nötr) → off sütunu
 df_ozet = pd.DataFrame({
     "takim":   roster["takim"],
-    "calisma": (~roster[gun_kolon].isin(["off", "izin"])).sum(axis=1),  # saat = çalışma
-    "off":     (roster[gun_kolon] == "off").sum(axis=1),
+    "calisma": (~roster[gun_kolon].isin(_off_only + ["izin"])).sum(axis=1),  # saat = çalışma
+    "off":     (roster[gun_kolon].isin(_off_only)).sum(axis=1),
     "izin":    (roster[gun_kolon] == "izin").sum(axis=1),
 })
 df_ozet["toplam"] = df_ozet[["calisma", "off", "izin"]].sum(axis=1)     # = gün sayısı (sağlama)
@@ -1470,6 +1480,7 @@ _KIRMIZI = PatternFill("solid", fgColor="FFC7CE")          # off → açık kır
 _TURUNCU = PatternFill("solid", fgColor="FFC000")          # resmi tatil çalışması → turuncu
 _SARI    = PatternFill("solid", fgColor="FFEB9C")          # hafta sonu MESAİ haftası → sarı
 _YESIL   = PatternFill("solid", fgColor="C6EFCE")          # hafta sonu NORM haftası → yeşil
+_GRI     = PatternFill("solid", fgColor="D9D9D9")          # off_t / off_t2 (blok, kota nötr) → gri
 
 # Excel roster başlıkları: gün kolonlarına gün adı ekle (haftaları ayırt et) → "06-01 Pzt"
 def _gun_etiket(c):
@@ -1501,7 +1512,8 @@ for _c in [c for c in roster.columns if c != "takim"]:
 _mesai_hafta = {}
 for _a in roster_2.index:
     for _wk, _h in _wk_cols.items():
-        _worked = sum(1 for c in _h["gun"] if roster.at[_a, c] not in ("off", "izin"))
+        _worked = sum(1 for c in _h["gun"]
+                      if roster.at[_a, c] not in ("off", "off_t", "off_t2", "izin"))
         _mesai_hafta[(_a, _wk)] = _worked > (5 - _h["wtatil"])
 _agents_sirali = list(roster_2.index)
 
@@ -1526,6 +1538,8 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
                 continue
             if _v == "off":
                 _cell.fill = _KIRMIZI
+            elif _v in ("off_t", "off_t2"):                  # blok off (kota nötr) → gri
+                _cell.fill = _GRI
             elif _v == "izin":
                 continue                                     # izin → renksiz
             elif _v.startswith("mesai"):                     # resmi tatil çalışması
