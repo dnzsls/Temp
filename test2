@@ -1,15 +1,9 @@
-code = "U0102609"      # off_t'si izin görünen agent (bu ya da başka)
-dd = df_tam["agent_user_code"].astype(str).str.strip() == code
-print("df_tam'da (kitle) var mı?:", bool(dd.any()))
-if dd.any():
-    print("\nFLAG'ler (1 olanlar önemli):")
-    print(df_tam.loc[dd, [c for c in df_tam.columns if "flg" in c.lower()]].T)
-    print("\nizin_map :", sorted(izin_map.get(code, [])))
-    print("off_block:", sorted(off_block_map.get(code, [])))
-    print("off_tip  :", off_tip_map.get(code))
-    print("tip_map  :", tip_map.get(code))
-
-# df_izin durumu (KeyError buradan mı geldi?)
-print("\ndf_izin None mı?:", df_izin is None)
-if df_izin is not None:
-    print("df_izin kolonları:", df_izin.columns.tolist())
+code = "U0102609"
+guns = [c for c in df_off.columns if c.startswith("gun_")]
+o = df_off[df_off["agent_user_code"].astype(str).str.strip()==code]
+print(f"df_off satır sayısı: {len(o)}")
+for i, (_, r) in enumerate(o.iterrows()):
+    days = [int(c.split("_")[1]) for c in guns if int(r[c])==1]
+    print(f"  satır {i}: izin_tipi='{r['izin_tipi']}'  günler={days}  desc={r.get('off_talebi_desc','')}")
+z = df_izin[df_izin["agent_user_code"].astype(str).str.strip()==code]
+print("df_izin günleri:", [(t.day, tp) for t, tp in zip(z['tarih'], z['izin_tipi'])])
