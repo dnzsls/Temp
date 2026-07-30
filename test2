@@ -25,7 +25,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün. Mesai HAFTA SONU arifede off.
     H16C mesaiye_kalamaz: haftada ≤5 gün (6. gün mesai olur; günler serbest, hafta sonu dahil).
     H16D akşam/gece  : agent ayda ≤MAX_AKSAM_HAFTA(2) hafta akşam/gece (başlangıç ≥17:00); hafta bazında sayım.
-    H17 kota         : kota ≤ çalışma ≤ kota+2 (özel flag = kota).
+    H17 kota         : kota ≤ çalışma ≤ kota+MAX_MESAI(2)+tatil (özel flag = kota).
                        kota = ayın iş günü − hafta içi izin.
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
     H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu + resmi tatil haftası serbest).
@@ -101,7 +101,8 @@ W_ADALET_HS  = 12              # hafta sonu adaleti: FAIR_HS üstü her hafta so
 W_ADALET_HS2 = 12              # hafta sonu KONVEKS ek: FAIR_HS+1 üstü ekstra ceza (4-5 günü 3'e yay)
 FAIR_HS     = 2                # agent başına "adil" hafta sonu günü; üstü cezalı (yük yayılsın)
 W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
-FAIR_MESAI  = 2                # "adil" fazla mesai = 2 (rotasyon hedefi); 2'ye kadar serbest, 3+ cezalı
+FAIR_MESAI  = 2                # "adil" fazla mesai (rotasyon hedefi, YUMUŞAK); üstü cezalı ama yasak değil
+MAX_MESAI   = 2                # SERT tavan: agent ay içinde EN FAZLA bu kadar mesai (ust=kota+MAX_MESAI). Ekip 3-4 yapabilir
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
 FAIR_AKSAM_HAFTA = 1           # agent başına "adil" akşam/gece HAFTA sayısı; üstü cezalı (H20 haftalık tiple uyumlu)
@@ -750,13 +751,13 @@ for a in AGENTS:
     kota = max(0, AYLIK_IS_GUNU - hi_izin)
     if kota == 0:
         continue
-    ust = kota if a in ozel_agents else kota + 2 + tatil_gun   # +2 mesai + resmi tatil
+    ust = kota if a in ozel_agents else kota + MAX_MESAI + tatil_gun   # +MAX_MESAI + resmi tatil
     kota_map[a], ust_map[a] = kota, ust                  # H23 raporu için gerçek değerler
     model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
     model.Add(calisma <= ust)                             # SERT tavan
 
 print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=iş günü−haftaiçi_izin; "
-      f"normal kota..kota+2+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
+      f"normal kota..kota+{MAX_MESAI}(mesai)+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
 
 
 # %% [HÜCRE 17B] — RESMİ TATİL HAFTASI: ÖZEL AGENT HAFTALIK KOTA (sert) ─
