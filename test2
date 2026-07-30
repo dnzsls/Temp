@@ -1,4 +1,18 @@
-code = "U0102609"
-z = df_izin[df_izin["agent_user_code"].astype(str).str.strip()==code]
-print("notebook df_izin bu agent:")
-print(z[["tarih","izin_tipi"]].to_string())
+import datetime as dt
+code = "U079147"                                    # problemli agent
+guns = [c for c in df_off.columns if c.startswith("gun_")]
+
+print("=== df_off satırları (bu agent) ===")
+o = df_off[df_off["agent_user_code"].astype(str).str.strip()==code]
+for _, r in o.iterrows():
+    days = [int(c.split("_")[1]) for c in guns if int(r[c])==1]
+    print(f"  izin_tipi='{r['izin_tipi']}'  günler={days}")
+
+print("=== 21 ve 28 — her iki tablo ===")
+for g in [21, 28]:
+    d = dt.date(2026, 8, g)
+    zi = df_izin[(df_izin['agent_user_code'].astype(str).str.strip()==code) &
+                 (df_izin['tarih']==d)]['izin_tipi'].tolist()
+    zo = df_off[(df_off['agent_user_code'].astype(str).str.strip()==code) &
+                (df_off[f'gun_{g}']==1)]['izin_tipi'].tolist()
+    print(f"  Ağu {g}:  df_izin={zi}   df_off={zo}")
