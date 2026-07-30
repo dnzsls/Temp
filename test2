@@ -1078,8 +1078,53 @@ status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
 
 if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    raise SystemExit("çözüm yok (INFEASIBLE) — bir günde talep, müsait agent sayısını "
-                     "aşıyor olabilir.")
+    # ── INFEASIBLE TEŞHİS: en olası iki sebebi tara ────────────────────
+    print("\n⚠ INFEASIBLE — olası sebepler taranıyor:")
+    # 1) agent kotayı dolduramıyor mu? (off_t artık kotayı DÜŞÜRMÜYOR → kota
+    #    yükseldi; ama off_t günleri bloklu → kapasite yetmeyebilir.)
+    #    kapasite = Σ min(o hafta müsait gün, haftalık tavan)  [tavan: 6, mesai_yok→5]
+    kota_sorun = []
+    for a in AGENTS:
+        if a not in kota_map:
+            continue
+        bloklu = izin_map.get(a, set()) | off_block_map.get(a, set())
+        hs_yasak = a in hafta_sonu_yasak                       # hamile/süt → hafta sonu çalışamaz
+        cap = 5 if a in mesai_yok else 6                       # H16C haftalık tavan
+        kapasite = sum(min(sum(1 for ds in gunler
+                               if dt.date.fromisoformat(ds) not in bloklu
+                               and not (hs_yasak and dt.date.fromisoformat(ds).weekday() >= 5)),
+                           cap)
+                       for gunler in haftalar.values())
+        if kapasite < kota_map[a]:
+            kota_sorun.append((a, kota_map[a], kapasite))
+    if kota_sorun:
+        print(f"  1) {len(kota_sorun)} agent kotayı DOLDURAMIYOR (kapasite < kota):")
+        for a, kota, kap in sorted(kota_sorun, key=lambda t: t[2] - t[1])[:20]:
+            print(f"       {a}: kota={kota}  kapasite={kap}  (açık {kap - kota})"
+                  f"  → çok off_t/izin ya da hafta sonu telafisi yetmiyor")
+    else:
+        print("  1) kota-kapasite: sorun yok (her agent kotayı doldurabilir).")
+    # 2) sert coverage bandı (hafta sonu ±HS_TOL, gece ±GECE_BUFFER) alt sınırı
+    #    o kovaya atanabilecek agent sayısıyla dolabilir mi?
+    cov_sorun = []
+    for (ds, v), kisi in talep.items():
+        d = dt.date.fromisoformat(ds)
+        hs = d.weekday() >= 5
+        gece = saat[(ds, v)][0] in GECE_BASLANGIC
+        if not (hs or gece):
+            continue                                          # sadece sert-band kovalar
+        tol = HS_TOL if hs else GECE_BUFFER
+        mus = sum(1 for a in AGENTS if (a, ds, v) in x)       # atanabilecek agent
+        if mus < kisi - tol:                                  # alt bandı dolduramaz
+            cov_sorun.append((ds, v, kisi, tol, mus))
+    if cov_sorun:
+        print(f"  2) {len(cov_sorun)} sert-band kova alt sınırı DOLAMIYOR:")
+        for ds, v, kisi, tol, mus in cov_sorun[:20]:
+            print(f"       {ds} {v}: talep={kisi} (min {kisi - tol}) ama müsait agent={mus}")
+    else:
+        print("  2) coverage sert-band: sorun yok.")
+    raise SystemExit("çözüm yok (INFEASIBLE) — yukarıdaki teşhise bak "
+                     "(kota-kapasite ve/veya coverage sert-band).")
 print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
 
 # coverage: band içinde plana ne kadar yakın? (toplam sapma)
