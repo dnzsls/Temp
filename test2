@@ -1,6 +1,3 @@
-ds = plani_olan[0]
-mi = results[ds][QUEUE]["mip_info"]
-print("keys:", list(mi.keys()))
-print("assignments:", mi.get("assignments"))
-print("surplus_total_added:", mi.get("surplus_total_added"))
-print("total_shortfall:", mi.get("total_shortfall"))
+mi = results["2026-08-03"]["kitle"]["mip_info"]
+print("eksik:", mi.get("total_shortfall", 0))
+print("fazla:", mi.get("surplus_total_added", 0))
