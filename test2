@@ -1,3 +1,13 @@
-fazla = mi.get("surplus_total_added") or 0       # inhouse-filtre YOK, toplam
-eksik = mi.get("total_shortfall") or 0
-gun_net[ds] = int(fazla - eksik)
+# net=0 çıkan bir Salı'yı plani_olan'dan bul, surplus inhouse mı outsource mu bak
+_tue = next((ds for ds in plani_olan
+             if dt.date.fromisoformat(ds).weekday() == 1), None)   # Salı = weekday 1
+print("bakılan gün:", _tue)
+mi = results[_tue][QUEUE]["mip_info"]
+sa = mi.get("surplus_added") or {}
+sc = mi.get("shift_coverage", {}) or {}
+print("surplus_total_added:", mi.get("surplus_total_added"))
+print("total_shortfall     :", mi.get("total_shortfall"))
+print("surplus_added anahtar sayısı:", len(sa))
+print("  inhouse fazla  :", sum(n for v, n in sa.items() if sc.get(v, {}).get("company") == "inhouse"))
+print("  outsource fazla:", sum(n for v, n in sa.items() if sc.get(v, {}).get("company") == "outsource"))
+print("  surplus_added ilk 5:", dict(list(sa.items())[:5]))
