@@ -1,3 +1,11 @@
-mi = results["2026-08-03"]["kitle"]["mip_info"]
-print("eksik:", mi.get("total_shortfall", 0))
-print("fazla:", mi.get("surplus_total_added", 0))
+for ds in plani_olan[:10]:
+    mi = results[ds][QUEUE]["mip_info"]
+    erl, mip, mip_in = (mi.get("erlang_by_slot",{}) or {},
+                        mi.get("mip_by_slot",{}) or {},
+                        mi.get("mip_in_by_slot",{}) or {})
+    fazla  = sum(max(0, mip.get(s,0)-erl.get(s,0)) for s in erl)
+    eksik  = sum(max(0, erl.get(s,0)-mip.get(s,0)) for s in erl)
+    off_in = sum(min(mip_in.get(s,0), max(0, mip.get(s,0)-erl.get(s,0))) for s in erl)
+    print(f"{ds} {str(mi.get('day_label','')):>4} | net={fazla-eksik:+.0f} "
+          f"fazla={fazla:.0f} eksik={eksik:.0f} inhouse_off_kap={off_in:.0f} "
+          f"| tot_shortfall={mi.get('total_shortfall')}")
