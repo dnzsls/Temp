@@ -1602,32 +1602,29 @@ def _gun_etiket(c):
 roster_xl = roster_2.rename(columns=_gun_etiket)
 
 # Renklendirme hazırlığı:
-#  (1) kolon → (hafta sonu mu, ISO hafta); takim/flag/özet kolonları None
+#  (1) kolon → (hafta sonu mu, kolon adı); takim/flag/özet kolonları None
 _col_info = []
 for _c in roster_2.columns:
     try:
         _d = dt.date.fromisoformat(str(_c))
-        _col_info.append((_d.weekday() >= 5, _d.isocalendar()[:2]))
+        _col_info.append((_d.weekday() >= 5, str(_c)))
     except (ValueError, TypeError):
         _col_info.append(None)
-#  (2) her agent × hafta: MESAİ haftası mı (o hafta çalışılan > 5 − hafta içi tatil)
-_wk_cols = {}
-for _c in [c for c in roster.columns if c != "takim"]:
-    _d = dt.date.fromisoformat(str(_c))
-    _wk = _d.isocalendar()[:2]
-    _wk_cols.setdefault(_wk, {"gun": [], "wtatil": 0})
-    _wk_cols[_wk]["gun"].append(_c)
-    if _d in TATIL and _d.weekday() < 5:
-        _wk_cols[_wk]["wtatil"] += 1
-_mesai_hafta = {}
+#  (2) her agent × hafta: hafta sonu çalışmasının KAÇI norm, kaçı mesai — GÜN bazında.
+#      norm = min(E, max(0, T − W))  → _mesai_norm_say ile AYNI formül → renkler özet
+#      kolonlarıyla (norm_gun / mesai_gun) BİREBİR tutar. Kalan (E − norm) = mesai.
+#      Sıra: çalışılan hafta sonu günlerinin İLK `norm` tanesi NORM (yeşil), kalanı MESAİ (sarı).
+#      (Eski hali hafta bazında tek bool'du → haftada 1 mesai varsa Cmt+Pzr İKİSİ de sarı olurdu.)
+_norm_hucre = set()                                  # (agent, gün kolonu) → NORM sayılan hafta sonu günü
 for _a in roster_2.index:
-    for _wk, _h in _wk_cols.items():
-        _worked = sum(1 for c in _h["gun"]
-                      if roster.at[_a, c] not in ("off", "off_t", "off_t2", "izin"))
-        _w_izin = sum(1 for c in _h["gun"]                       # hafta içi izin (eşiği düşürür)
-                      if dt.date.fromisoformat(str(c)).weekday() < 5
-                      and roster.at[_a, c] == "izin")
-        _mesai_hafta[(_a, _wk)] = _worked > (5 - _h["wtatil"] - _w_izin)
+    for _h in _hafta.values():                       # _hafta: H22'de kurulan (wd/we/tat/wtatil) kırılımı
+        W = sum(1 for c in _h["wd"] if roster.at[_a, c] not in _OFF_LIKE)
+        _w_izin = sum(1 for c in _h["wd"] if roster.at[_a, c] == "izin")  # hafta içi izin → eşiği düşürür
+        T = 5 - _h["wtatil"] - _w_izin               # o haftanın normal iş günü
+        _we_calisan = [c for c in sorted(_h["we"]) if roster.at[_a, c] not in _OFF_LIKE]
+        _norm = min(len(_we_calisan), max(0, T - W))  # hafta içi off'un hafta sonu karşılığı
+        for c in _we_calisan[:_norm]:
+            _norm_hucre.add((_a, c))
 _agents_sirali = list(roster_2.index)
 
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
@@ -1660,8 +1657,8 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
             else:                                            # vardiya → hafta sonuysa mesai/norm rengi
                 _j = _cell.column - 2                        # index kolonu (1) hariç
                 if 0 <= _j < len(_col_info) and _col_info[_j] and _col_info[_j][0]:
-                    _cell.fill = (_SARI if _mesai_hafta.get((_a, _col_info[_j][1]), False)
-                                  else _YESIL)
+                    _cell.fill = (_YESIL if (_a, _col_info[_j][1]) in _norm_hucre
+                                  else _SARI)                # GÜN bazında: norm=yeşil, diğeri mesai=sarı
 
 print(f"Excel yazıldı: {XLSX_PATH}")
 print(f"  Sheet1 'roster': {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon")
