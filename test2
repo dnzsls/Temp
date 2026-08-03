@@ -229,6 +229,27 @@ if df_izin is not None:
 else:
     print("df_izin yok")
 
+# df_onceki (tidy): ÖNCEKİ ayın çizelgesi — agent_user_code + tarih + vardiya
+# ('09:00-18:00' | 'off' | 'izin' | 'off_t' | 'off_t2'). H8C sınır ISO haftasına
+# süzüp taşıma sözlüklerini kurar (11 saat, haftada ≥1 off, mesai eşiği/rapor).
+# Burada sadece temizlik + önizleme; hafta süzmesi ve iş mantığı H8C'de.
+df_onceki = globals().get("df_onceki")
+if df_onceki is not None:
+    df_onceki = df_onceki.copy()
+    df_onceki.columns = [str(c).strip().lower() for c in df_onceki.columns]
+    df_onceki["agent_user_code"] = df_onceki["agent_user_code"].astype(str).str.strip()
+    df_onceki["vardiya"] = df_onceki["vardiya"].astype(str).str.strip().str.lower()
+    df_onceki["tarih"] = pd.to_datetime(df_onceki["tarih"], errors="coerce").dt.date
+    _gecersiz = int(df_onceki["tarih"].isna().sum())          # okunamayan tarih → taşımada kullanılamaz
+    print(f"\ndf_onceki: {df_onceki.shape[0]} satır × {df_onceki.shape[1]} kolon  |  "
+          f"{df_onceki['agent_user_code'].nunique()} agent  |  "
+          f"{df_onceki['tarih'].min()} .. {df_onceki['tarih'].max()}"
+          f"{f'  ⚠ {_gecersiz} okunamayan tarih' if _gecersiz else ''}")
+    print(f"df_onceki vardiya değerleri: {df_onceki['vardiya'].value_counts().to_dict()}")
+    print(df_onceki.head())
+else:
+    print("df_onceki yok (önceki ay taşıması devre dışı kalacak — H8C)")
+
 
 # %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
 # line_based_main_group == "kitle_cagrilar" olanları tut.
@@ -447,32 +468,39 @@ for ds in sorted(gun_net):
           f"off_ağırlık(w)={gun_off_w[ds]:.2f}  (1=off ucuz, 0=off pahalı)")
 
 
-# %% [HÜCRE 8C] — ÖNCEKİ AY TAŞIMA (sınır ISO haftası) ─────────────────
-# Ay Pazartesi'den başlamıyorsa ilk ISO hafta ÖNCEKİ aya taşar (ör. 2026-08:
-# 01 Cmt → hafta 07-27 Pzt'de başlar). O haftanın 07-27..07-31 kısmı bu modelde
-# YOK → haftalık kurallar eksik veriyle çalışır: 11 saat dinlenme (07-31 bitişi ↔
-# 08-01 başlangıcı), haftada ≥1 off, haftalık off dengesi, mesai eşiği/raporu.
-# Bu hücre df_onceki'yi (SQL) okuyup taşıma sözlüklerini kurar — KISIT YOK,
-# sadece veri + doğrulama. Kısıtlar sonraki adımlarda bu sözlükleri kullanır.
-#   df_onceki kolonları: agent_user_code | tarih ('YYYY-AA-GG' metin) | vardiya
+# %% [HÜCRE 8C] — ÖNCEKİ AY TAŞIMA (sınır günleri) ─────────────────────
+# Ay sınırında modelin GÖRMEDİĞİ önceki ay günleri var. İki ayrı pencere:
+#   PENCERE_GUNLER : ayın 1. gününden önceki 6 gün → KAYAN 7 GÜNLÜK PENCERE (H12)
+#                    + son günün vardiyası → 11 SAAT dinlenme (H15).
+#                    Ay Pazartesi başlasa bile GEREKLİ (ikisi de günlük kural).
+#   TASIMA_GUNLER  : ayın ilk ISO haftasının önceki aya düşen günleri → HAFTALIK
+#                    kurallar (ISO-hafta tavanı, H20B off dengesi, H20E mesai
+#                    eşiği, H22 mesai/norm raporu). Ay Pazartesi başlıyorsa BOŞ.
+# Bu hücre df_onceki'yi okuyup sözlükleri kurar — KISIT YOK, sadece veri + doğrulama.
+#   df_onceki kolonları: agent_user_code | tarih | vardiya
 #   vardiya: '09:00-18:00' (çalışma) | 'off' | 'izin' | 'off_t' | 'off_t2'
 #     • izin        → kotayı DÜŞÜRÜR   → haftalık mesai eşiğini indirir
 #     • off_t/off_t2→ blok, kota düşmez → model içinde haftalık off sayımına da
 #                     girmez (H20B: değişkeni olmayan gün off sayılmaz) → ayrı sayaç
 #     • off         → normal off (haftalık off dengesine girer)
-#   Tablo birden çok hafta getirebilir → SADECE sınır haftası süzülür.
-# df_onceki yoksa (ya da ay Pazartesi başlıyorsa) sözlükler BOŞ kalır →
-# model eskisi gibi çalışır (geriye uyumlu).
+#   Tablo daha geniş aralık getirebilir → sadece yukarıdaki günler süzülür.
+# df_onceki yoksa sözlükler BOŞ kalır → model eskisi gibi çalışır (geriye uyumlu).
 
 AY_ILK        = dt.date.fromisoformat(GUNLER[0])            # planlanan ayın ilk günü
 SINIR_HAFTA   = AY_ILK.isocalendar()[:2]                    # sınır ISO haftası (yıl, hafta)
+ONCEKI_SON    = AY_ILK - dt.timedelta(days=1)               # önceki ayın son günü (11 saat için)
+PENCERE_GUNLER = sorted(d for i in range(1, 7)              # kayan 7 günlük pencere → 6 gün geriye
+                        for d in [AY_ILK - dt.timedelta(days=i)]
+                        if d not in GUN_SET)
 TASIMA_GUNLER = sorted(d for i in range(1, AY_ILK.weekday() + 1)   # Pzt başlarsa → boş liste
                        for d in [AY_ILK - dt.timedelta(days=i)]
                        if d not in GUN_SET)                 # planlanan ayın kendi günü ise taşıma değil
+ONCEKI_GUNLER = sorted(set(PENCERE_GUNLER) | set(TASIMA_GUNLER))   # okunacak tüm önceki ay günleri
 
-onceki_gun, onceki_izin, onceki_off = {}, {}, {}   # agent → sınır haftasında çalışma/izin/off gün sayısı
+onceki_gun, onceki_izin, onceki_off = {}, {}, {}   # agent → sınır İSO HAFTASINDA çalışma/izin/off gün sayısı
 onceki_offt          = {}                          # agent → off_t + off_t2 gün sayısı (blok ama kota nötr)
 OFF_T_DEGERLERI      = {"off_t", "off_t2"}         # tanınan blok-off etiketleri
+onceki_calisti       = {}                          # agent → {tarih} ÇALIŞILAN önceki ay günleri (kayan pencere)
 onceki_tip           = {}                          # agent → hafta içi vardiya tipi (başlangıç); çok tipliyse None
 onceki_son_vardiya   = {}                          # agent → önceki ayın SON gününün vardiyası ('15:00-24:00') / None
 _tasima_uyari        = []                          # (agent, gün, sorun)
@@ -494,9 +522,9 @@ def _vardiya_parse(v):
 
 df_onceki = globals().get("df_onceki")
 if df_onceki is None:
-    print("df_onceki yok → önceki ay taşıması DEVRE DIŞI (haftalık kurallar ay içiyle sınırlı)")
-elif not TASIMA_GUNLER:
-    print(f"ay Pazartesi başlıyor ({AY_ILK}) → sınır haftası yok, taşıma gerekmiyor")
+    print("df_onceki yok → önceki ay taşıması DEVRE DIŞI (kurallar ay içiyle sınırlı)")
+elif not ONCEKI_GUNLER:
+    print(f"önceki ay günü yok ({AY_ILK}) → taşıma gerekmiyor")
 else:
     _onc = df_onceki.copy()
     _onc.columns = [str(c).strip().lower() for c in _onc.columns]
@@ -504,39 +532,34 @@ else:
     _onc["vardiya"] = _onc["vardiya"].astype(str).str.strip().str.lower()
     _onc["tarih_d"] = pd.to_datetime(_onc["tarih"], errors="coerce").dt.date
     _tum_satir = len(_onc)
-    _tasima_set = set(TASIMA_GUNLER)
-    _onc = _onc[_onc["tarih_d"].isin(_tasima_set)]           # SADECE sınır haftası günleri
-    _son_gun = TASIMA_GUNLER[-1]                             # önceki ayın son günü (11 saat için)
+    _onc = _onc[_onc["tarih_d"].isin(set(ONCEKI_GUNLER))]    # sadece gereken önceki ay günleri
 
     for a, g in _onc.groupby("agent_user_code"):
         _gv = dict(zip(g["tarih_d"], g["vardiya"]))          # tarih → vardiya
-        cal = iz = of = oft = 0
-        tipler = set()
-        for d in TASIMA_GUNLER:
+        calisti = set()
+        for d in ONCEKI_GUNLER:                              # pencere + ISO hafta günleri
             v = _gv.get(d)
             if v is None:
                 _tasima_uyari.append((a, d.isoformat(), "satır yok"))
                 continue
-            pv = _vardiya_parse(v)
-            if pv:
-                cal += 1
-                if d.weekday() < 5:
-                    tipler.add(pv[0])                        # hafta içi tip (H20 sürekliliği)
-            elif v == "izin":
-                iz += 1
-            elif v in OFF_T_DEGERLERI:                       # off_t / off_t2 → blok, kota nötr
-                oft += 1
-            elif v == "off":
-                of += 1
-            else:
+            if _vardiya_parse(v):
+                calisti.add(d)                               # çalışılan gün (kayan pencere + tip için)
+            elif v not in ({"izin", "off"} | OFF_T_DEGERLERI):
                 _tasima_uyari.append((a, d.isoformat(), f"tanınmayan değer: {v}"))
-        onceki_gun[a], onceki_izin[a], onceki_off[a], onceki_offt[a] = cal, iz, of, oft
+        onceki_calisti[a] = calisti
+        # sınır ISO haftası sayaçları (haftalık kurallar) — pencere günleri BURAYA girmez
+        onceki_gun[a]  = len(calisti & set(TASIMA_GUNLER))
+        onceki_izin[a] = sum(1 for d in TASIMA_GUNLER if _gv.get(d) == "izin")
+        onceki_off[a]  = sum(1 for d in TASIMA_GUNLER if _gv.get(d) == "off")
+        onceki_offt[a] = sum(1 for d in TASIMA_GUNLER if _gv.get(d) in OFF_T_DEGERLERI)
+        tipler = {_vardiya_parse(_gv[d])[0] for d in TASIMA_GUNLER      # hafta içi tip (H20 sürekliliği)
+                  if d in calisti and d.weekday() < 5}
         if len(tipler) == 1:
             onceki_tip[a] = next(iter(tipler))
         elif len(tipler) > 1:                                # o hafta tip değiştirmiş → kilit uygulanamaz
             onceki_tip[a] = None
             _tasima_uyari.append((a, "-", f"birden çok hafta içi tip: {sorted(tipler)}"))
-        _son = _gv.get(_son_gun)
+        _son = _gv.get(ONCEKI_SON)                           # önceki ayın son günü → 11 saat
         onceki_son_vardiya[a] = _son if (_son and _vardiya_parse(_son)) else None
 
     # ── doğrulama / özet ───────────────────────────────────────────────
@@ -544,28 +567,36 @@ else:
     _tablo_set = set(onceki_gun)
     _eksik = sorted(_agent_set - _tablo_set)                 # modelde var, tabloda yok → taşıma yok
     _fazla = len(_tablo_set - _agent_set)                    # tabloda var, modelde yok (başka kuyruk/PT)
-    print(f"önceki ay taşıma: sınır haftası {SINIR_HAFTA[0]}-W{SINIR_HAFTA[1]}  |  "
-          f"taşınan gün: {len(TASIMA_GUNLER)} ({TASIMA_GUNLER[0]} .. {TASIMA_GUNLER[-1]})")
-    print(f"  df_onceki {_tum_satir} satır → sınır haftası {len(_onc)} satır  |  "
+    print(f"önceki ay taşıma: pencere {len(PENCERE_GUNLER)} gün "
+          f"({PENCERE_GUNLER[0]} .. {PENCERE_GUNLER[-1]}) → kayan 7 gün + 11 saat  |  "
+          f"ISO hafta {SINIR_HAFTA[0]}-W{SINIR_HAFTA[1]}: {len(TASIMA_GUNLER)} gün"
+          + (f" ({TASIMA_GUNLER[0]} .. {TASIMA_GUNLER[-1]}) → haftalık kurallar"
+             if TASIMA_GUNLER else " (ay Pazartesi başlıyor → haftalık taşıma yok)"))
+    print(f"  df_onceki {_tum_satir} satır → kullanılan {len(_onc)} satır  |  "
           f"eşleşen agent: {len(_agent_set & _tablo_set)}/{len(AGENTS)}  "
           f"(tabloda olup modelde olmayan: {_fazla})")
     if _eksik:
         print(f"  ⚠ {len(_eksik)} agent tabloda YOK → o agentlarda taşıma uygulanmayacak: "
               f"{_eksik[:10]}{' ...' if len(_eksik) > 10 else ''}")
-    _cal_dag = pd.Series({a: onceki_gun[a] for a in _agent_set & _tablo_set}).value_counts().sort_index()
-    print(f"  sınır haftasında çalışılan gün → agent sayısı: {_cal_dag.to_dict()}")
     _es = _agent_set & _tablo_set
-    print(f"  gün-tipi toplamı (eşleşen {len(_es)} agent): "
-          f"çalışma {sum(onceki_gun[a] for a in _es)} | off {sum(onceki_off[a] for a in _es)} | "
-          f"izin {sum(onceki_izin[a] for a in _es)} | off_t/off_t2 {sum(onceki_offt[a] for a in _es)}")
-    # sağlama: 4 sayacın toplamı taşınan gün sayısına eşit olmalı
-    # (değilse o agentta eksik gün ya da tanınmayan değer var → yukarıdaki uyarılarda görünür)
-    _uyusmaz = [a for a in _es if onceki_gun[a] + onceki_izin[a] + onceki_off[a]
-                + onceki_offt[a] != len(TASIMA_GUNLER)]
-    if _uyusmaz:
-        print(f"  ⚠ {len(_uyusmaz)} agentta sayaç toplamı {len(TASIMA_GUNLER)} değil: {_uyusmaz[:10]}")
-    _son_cal = sum(1 for a in _agent_set & _tablo_set if onceki_son_vardiya.get(a))
-    print(f"  {_son_gun} günü çalışan: {_son_cal} agent → 11 saat kuralı bunlarda {AY_ILK}'e taşacak")
+    _pen_dag = pd.Series({a: len(onceki_calisti[a] & set(PENCERE_GUNLER))
+                          for a in _es}).value_counts().sort_index()
+    print(f"  PENCERE'de ({len(PENCERE_GUNLER)} gün) çalışılan gün → agent sayısı: {_pen_dag.to_dict()}"
+          f"   (6 = kayan pencere tavanı 0'a iner)")
+    if TASIMA_GUNLER:
+        _cal_dag = pd.Series({a: onceki_gun[a] for a in _es}).value_counts().sort_index()
+        print(f"  ISO haftada çalışılan gün → agent sayısı: {_cal_dag.to_dict()}")
+        print(f"  ISO hafta gün-tipi toplamı (eşleşen {len(_es)} agent): "
+              f"çalışma {sum(onceki_gun[a] for a in _es)} | off {sum(onceki_off[a] for a in _es)} | "
+              f"izin {sum(onceki_izin[a] for a in _es)} | off_t/off_t2 {sum(onceki_offt[a] for a in _es)}")
+        # sağlama: 4 sayacın toplamı ISO hafta gün sayısına eşit olmalı
+        # (değilse o agentta eksik gün ya da tanınmayan değer var → aşağıdaki uyarılarda görünür)
+        _uyusmaz = [a for a in _es if onceki_gun[a] + onceki_izin[a] + onceki_off[a]
+                    + onceki_offt[a] != len(TASIMA_GUNLER)]
+        if _uyusmaz:
+            print(f"  ⚠ {len(_uyusmaz)} agentta sayaç toplamı {len(TASIMA_GUNLER)} değil: {_uyusmaz[:10]}")
+    _son_cal = sum(1 for a in _es if onceki_son_vardiya.get(a))
+    print(f"  {ONCEKI_SON} günü çalışan: {_son_cal} agent → 11 saat kuralı bunlarda {AY_ILK}'e taşacak")
     _tip_dag = pd.Series([onceki_tip.get(a) for a in _agent_set & _tablo_set
                           if onceki_tip.get(a)]).value_counts()
     print(f"  hafta içi vardiya tipi dağılımı: {_tip_dag.to_dict()}")
@@ -647,66 +678,84 @@ for a in AGENTS:
 print(f"günde ≤1 vardiya kısıtı: {n} (agent × gün)")
 
 
-# %% [HÜCRE 12] — HAFTADA ≥1 OFF (7 gün üst üste çalışamaz) ─────────────
-# Her agent, her ISO-hafta içinde en fazla 6 gün çalışır (≥1 off).
-# Günde ≤1 olduğundan, o haftadaki değişkenlerin toplamı = çalışılan gün sayısı.
+# %% [HÜCRE 12] — 7 GÜN ÜST ÜSTE ÇALIŞAMAZ (≥1 off) ────────────────────
+# İKİ VARİANT var, biri AKTİF olmalı:
+#   (A) KAYAN 7 GÜNLÜK PENCERE  ← AKTİF: her 7 ardışık takvim gününde ≤6 çalışma.
+#       ISO-hafta sınırını aşan ardışıklığı da yakalar (spec 5.1-4).
+#   (B) ISO-HAFTA (≤6 gün/hafta) ← aşağıda yorumda.
+# ÖNCEKİ AY TAŞIMASI (H8C) ikisinde de var; verisi farklı:
+#   (A) gün gün → onceki_calisti (hangi günü çalıştı)   [PENCERE_GUNLER = son 6 gün]
+#   (B) hafta toplamı → onceki_gun                      [TASIMA_GUNLER = ISO haftanın önceki ay kısmı]
 
-# PLAN_GUNLER'i ISO-haftalara grupla
+# PLAN_GUNLER'i ISO-haftalara grupla — VARİANTTAN BAĞIMSIZ, her zaman gerekli
+# (H16C / H17B / H20B / H20D / H20E bu sözlüğü kullanıyor).
 haftalar = {}
 for ds in PLAN_GUNLER:
     yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
     haftalar.setdefault((yil, hafta), []).append(ds)
 
-# SINIR HAFTASI (H8C): ayın ilk ISO haftası önceki aya taşıyorsa, o haftanın
-# tavanından önceki ayda ÇALIŞILAN gün düşülür → tavan = 6 − onceki_gun.
-# Örn. Temmuz'un son haftasında 5 gün çalışmışsa 08-01/02'den en fazla 1'i verilir
-# (5+1=6); 6 gün çalışmışsa hiçbiri (tavan 0) → 7 gün üst üste çalışma engellenir.
-n, n_sinir = 0, 0
-_sinir_tavan = {}                              # agent → sınır haftası tavanı (özet için)
+# ─── (A) AKTİF: KAYAN 7 GÜNLÜK PENCERE ────────────────────────────────
+# Pencere ayın 1. gününden ÖNCE de başlar (önceki aya sarkan 6 pencere):
+#   Σ(ay içi değişken) ≤ 6 − (o pencereye düşen ÖNCEKİ AY çalışma günü)
+# Ör. 07-27..08-02 penceresi: Temmuz'da 5 gün çalışmışsa 08-01/02'den en fazla 1'i.
+gunler_d = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
+_pen_bas = [AY_ILK - dt.timedelta(days=k) for k in range(6, 0, -1)] + gunler_d   # taşan + ay içi
+n, n_tas = 0, 0
+_tas_tavan = {}                                     # agent → taşan pencerelerdeki EN DÜŞÜK tavan
 for a in AGENTS:
-    for wk, hafta_gunleri in haftalar.items():
-        haftalik = []                          # bu agentın o haftadaki tüm vardiya değişkenleri
-        for ds in hafta_gunleri:
-            for v in gun_vardiyalari[ds]:
+    _calisti = onceki_calisti.get(a, set())         # önceki ayda çalıştığı günler (H8C)
+    for s in _pen_bas:
+        if s + dt.timedelta(days=6) > gunler_d[-1]:
+            continue                                # pencere ayın sonunu taşıyor → dur
+        pencere = [s + dt.timedelta(days=k) for k in range(7)]
+        pencere_varlar = []
+        for d in pencere:
+            ds = d.isoformat()
+            for v in gun_vardiyalari.get(ds, []):
                 if (a, ds, v) in x:
-                    haftalik.append(x[(a, ds, v)])
-        if haftalik:
-            tavan = 6
-            if wk == SINIR_HAFTA and onceki_gun.get(a) is not None:
-                tavan = max(0, 6 - onceki_gun[a])     # önceki aydan gelen çalışma düşülür
-                _sinir_tavan[a] = tavan
-                n_sinir += 1
-            model.Add(sum(haftalik) <= tavan)
-            n += 1
+                    pencere_varlar.append(x[(a, ds, v)])
+        if not pencere_varlar:
+            continue
+        onceki_cal = sum(1 for d in pencere if d < AY_ILK and d in _calisti)
+        tavan = max(0, 6 - onceki_cal)              # önceki aydan gelen çalışma tavandan düşer
+        model.Add(sum(pencere_varlar) <= tavan)
+        n += 1
+        if onceki_cal:                              # taşıma gerçekten ısırdı mı
+            n_tas += 1
+            _tas_tavan[a] = min(_tas_tavan.get(a, 6), tavan)
 
-print(f"haftada ≥1 off kısıtı: {n} (agent × hafta)")
-if n_sinir:
-    _td = pd.Series(_sinir_tavan).value_counts().sort_index().to_dict()
-    print(f"  sınır haftası ({SINIR_HAFTA[0]}-W{SINIR_HAFTA[1]}) taşıması: {n_sinir} agent, "
-          f"tavan → agent sayısı: {_td}  (tavan 0 = o haftanın kalanında hiç çalışamaz)")
+print(f"peş peşe ≤6 gün kısıtı (kayan 7 gün): {n} (agent × pencere)")
+if n_tas:
+    _td = pd.Series(_tas_tavan).value_counts().sort_index().to_dict()
+    print(f"  önceki ay taşıması: {n_tas} pencerede ısırdı, {len(_tas_tavan)} agent  |  "
+          f"en düşük tavan → agent sayısı: {_td}  (0 = ay başında hiç çalışamaz)")
 
-# ─── ALTERNATİF (AKTİF DEĞİL): peş peşe 7 gün çalışamaz ────────────────
-# ISO-hafta yerine KAYAN 7 GÜNLÜK PENCERE → hafta sınırını aşan ardışıklığı
-# da yakalar (spec 5.1-4). Kullanmak istersen yukarıdaki H12 bloğunu kapatıp
-# bu bloğu aç:
+# ─── (B) ALTERNATİF (AKTİF DEĞİL): ISO-HAFTA ≤6 gün ───────────────────
+# Kullanmak istersen yukarıdaki (A) bloğunu kapatıp bunu aç. Taşıma: sınır
+# haftasının tavanından önceki ayda çalışılan gün düşülür (tavan = 6 − onceki_gun).
 #
-# gunler_d = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
-# n = 0
+# n, n_sinir = 0, 0
+# _sinir_tavan = {}                              # agent → sınır haftası tavanı (özet için)
 # for a in AGENTS:
-#     for i in range(len(gunler_d) - 6):
-#         pencere = gunler_d[i:i + 7]                 # 7 günlük dilim
-#         if (pencere[-1] - pencere[0]).days != 6:    # gerçekten 7 ardışık gün mü?
-#             continue                                # araya boş gün giriyorsa atla
-#         pencere_varlar = []
-#         for d in pencere:
-#             ds = d.isoformat()
+#     for wk, hafta_gunleri in haftalar.items():
+#         haftalik = []                          # bu agentın o haftadaki tüm vardiya değişkenleri
+#         for ds in hafta_gunleri:
 #             for v in gun_vardiyalari[ds]:
 #                 if (a, ds, v) in x:
-#                     pencere_varlar.append(x[(a, ds, v)])
-#         if pencere_varlar:
-#             model.Add(sum(pencere_varlar) <= 6)
+#                     haftalik.append(x[(a, ds, v)])
+#         if haftalik:
+#             tavan = 6
+#             if wk == SINIR_HAFTA and onceki_gun.get(a) is not None:
+#                 tavan = max(0, 6 - onceki_gun[a])     # önceki aydan gelen çalışma düşülür
+#                 _sinir_tavan[a] = tavan
+#                 n_sinir += 1
+#             model.Add(sum(haftalik) <= tavan)
 #             n += 1
-# print(f"peş peşe ≤6 gün kısıtı: {n}")
+# print(f"haftada ≥1 off kısıtı: {n} (agent × hafta)")
+# if n_sinir:
+#     _td = pd.Series(_sinir_tavan).value_counts().sort_index().to_dict()
+#     print(f"  sınır haftası ({SINIR_HAFTA[0]}-W{SINIR_HAFTA[1]}) taşıması: {n_sinir} agent, "
+#           f"tavan → agent sayısı: {_td}  (tavan 0 = o haftanın kalanında hiç çalışamaz)")
 
 
 # %% [HÜCRE 13] — SABAH ÇALIŞANLAR (bitiş ≤ 20:00) ─────────────────────
