@@ -1496,28 +1496,6 @@ roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.inde
 roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
 
-# ÖNCEKİ AY (H8C): agent önceki ayın sınır günlerinde kaç gün çalışmış.
-#   onceki_hafta_gun   : sınır ISO haftasının önceki ay kısmı (haftalık kurallar +
-#                        H22 mesai/norm hesabı bunu kullanır)
-#   onceki_pencere_gun : ayın 1'inden önceki 6 gün (kayan 7 günlük pencere tavanı:
-#                        6 → ay başında hiç çalışamaz, 5 → en fazla 1 gün ...)
-# Tabloda olmayan agent (yeni başlayan vb.) → BOŞ bırakılır; 0 ile karışmasın.
-if onceki_calisti:
-    _pen_set, _hft_set = set(PENCERE_GUNLER), set(TASIMA_GUNLER)
-
-    def _onc_say(a, gun_set):
-        return len(onceki_calisti[a] & gun_set) if a in onceki_calisti else None
-
-    roster_2.insert(4, "onceki_hafta_gun",
-                    [_onc_say(a, _hft_set) for a in roster_2.index])
-    roster_2.insert(5, "onceki_pencere_gun",
-                    [_onc_say(a, _pen_set) for a in roster_2.index])
-    _bilinmeyen = sum(1 for a in roster_2.index if a not in onceki_calisti)
-    print(f"önceki ay kolonları eklendi: ISO hafta "
-          f"{TASIMA_GUNLER[0] if TASIMA_GUNLER else '-'}..{TASIMA_GUNLER[-1] if TASIMA_GUNLER else '-'} "
-          f"({len(TASIMA_GUNLER)} gün) + pencere {PENCERE_GUNLER[0]}..{PENCERE_GUNLER[-1]} "
-          f"({len(PENCERE_GUNLER)} gün)  |  veri olmayan agent: {_bilinmeyen} (boş)")
-
 # roster_2 SONUNA özet kolonlar: çalışma / mesai / norm / resmi_tatil / off (HAFTALIK)
 #   Her hafta: W=hafta içi (tatil-dışı) çalışma, E=hafta sonu (tatil-dışı) çalışma,
 #              tat=resmi tatilde çalışma, T=normal iş günü (5 − hafta içi tatil).
@@ -1568,8 +1546,25 @@ roster_2["norm_gun"]        = [_mn[a][1] for a in roster_2.index]
 roster_2["resmi_tatil_gun"] = [_mn[a][2] for a in roster_2.index]     # resmi tatilde çalışma
 roster_2["off_gun"]         = [int(_off[a]) for a in roster_2.index]
 
+# ÖNCEKİ AY (H8C) — sınır ISO haftasının ÖNCEKİ AYA düşen günleri (ör. 07-27..07-31):
+# o günlerde kaç gün çalışmış / off / izin / off_t. Haftalık kuralların (H20B off
+# dengesi, H20E mesai eşiği, H22 mesai/norm) gördüğü sayılar birebir bunlar →
+# "08-01 neden mesai / neden off" sorusunun cevabı bu 4 kolonda.
+# NOT: kayan 7 günlük pencere (H12) 6 gün geriye bakar (07-26 dahil) → o kısıt
+#      bu kolonlarda GÖRÜNMEZ; burası ISO haftası, kolonlar 5 günü toplar.
+# Tabloda olmayan agent (yeni başlayan vb.) → BOŞ; 0 ile karışmasın.
+if TASIMA_GUNLER and onceki_calisti:
+    roster_2["onceki_calisma_gun"] = [onceki_gun.get(a)  for a in roster_2.index]
+    roster_2["onceki_off_gun"]     = [onceki_off.get(a)  for a in roster_2.index]
+    roster_2["onceki_izin_gun"]    = [onceki_izin.get(a) for a in roster_2.index]
+    roster_2["onceki_offt_gun"]    = [onceki_offt.get(a) for a in roster_2.index]
+    _bilinmeyen = sum(1 for a in roster_2.index if a not in onceki_calisti)
+    print(f"önceki ay kolonları: {TASIMA_GUNLER[0]}..{TASIMA_GUNLER[-1]} "
+          f"({len(TASIMA_GUNLER)} gün) → calisma/off/izin/offt  |  "
+          f"veri olmayan agent: {_bilinmeyen} (boş bırakıldı)")
+
 print(f"\nroster_2: {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon "
-      f"(takim + 3 flag + gün + calisma/mesai/norm/resmi_tatil/off özet)")
+      f"(takim + 3 flag + gün + calisma/mesai/norm/resmi_tatil/off + önceki ay özet)")
 print(roster_2.head(15))
 
 
