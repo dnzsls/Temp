@@ -17,7 +17,12 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H10 hafta sonu cov.: hafta sonu kovaları talep ± HS_TOL(2) sıkı band (tam otursun).
     H10 gece coverage: hafta içi gece kovaları (00:00/24:00) talep ± GECE_BUFFER(3) bandı.
     H11 günde ≤1     : bir agent bir günde en çok 1 vardiya.
-    H12 haftada ≤6   : her ISO-hafta ≤6 gün (≥1 off).
+    H12 peş peşe ≤6  : her 7 ARDIŞIK takvim gününde ≤6 çalışma (kayan pencere; ISO-hafta
+                       varyantı hücrede yorumda). Önceki aya sarkan pencereler dahil.
+    H8C önceki ay    : ay sınırında önceki ayın çizelgesi (df_onceki) modele taşınır —
+                       H12 kayan pencere, H15 11 saat, H16C haftalık tavan, H20B off
+                       dengesi, H20E mesai eşiği, H22 mesai/norm raporu. Veri yoksa
+                       her şey ay içiyle sınırlı çalışır (geriye uyumlu).
     H13 sabah_calisir: bitişi ≤20:00, gece/ertesi-güne-sarkan vardiya yok.
     H14 hamile/süt   : Cmt/Pzr çalışamaz.
     H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
@@ -501,7 +506,8 @@ onceki_gun, onceki_izin, onceki_off = {}, {}, {}   # agent → sınır İSO HAFT
 onceki_offt          = {}                          # agent → off_t + off_t2 gün sayısı (blok ama kota nötr)
 OFF_T_DEGERLERI      = {"off_t", "off_t2"}         # tanınan blok-off etiketleri
 onceki_calisti       = {}                          # agent → {tarih} ÇALIŞILAN önceki ay günleri (kayan pencere)
-onceki_izin_hi       = {}                          # agent → HAFTA İÇİ izin günü (H22 mesai eşiğini düşürür)
+onceki_izin_hi       = {}                          # agent → HAFTA İÇİ izin günü (H20E/H22 mesai eşiğini düşürür)
+onceki_musait_hi     = {}                          # agent → HAFTA İÇİ müsait gün (çalışma+off; izin/off_t hariç) → H16C
 onceki_tip           = {}                          # agent → hafta içi vardiya tipi (başlangıç); çok tipliyse None
 onceki_son_vardiya   = {}                          # agent → önceki ayın SON gününün vardiyası ('15:00-24:00') / None
 _tasima_uyari        = []                          # (agent, gün, sorun)
@@ -555,6 +561,9 @@ else:
         onceki_offt[a] = sum(1 for d in TASIMA_GUNLER if _gv.get(d) in OFF_T_DEGERLERI)
         onceki_izin_hi[a] = sum(1 for d in TASIMA_GUNLER            # sadece HAFTA İÇİ izin
                                 if d.weekday() < 5 and _gv.get(d) == "izin")
+        onceki_musait_hi[a] = sum(1 for d in TASIMA_GUNLER          # hafta içi MÜSAİT gün:
+                                  if d.weekday() < 5                #   çalışma + off  (izin/off_t hariç)
+                                  and (d in calisti or _gv.get(d) == "off"))
         tipler = {_vardiya_parse(_gv[d])[0] for d in TASIMA_GUNLER      # hafta içi tip (H20 sürekliliği)
                   if d in calisti and d.weekday() < 5}
         if len(tipler) == 1:
@@ -967,9 +976,14 @@ print(f"arife atama: {len(ARIFE)} gün, {len(arife_kisitli)} kısıtlı agent (s
 # NOT: eski "≤5" sabiti, hafta içi izinli agentta (ör. Cuma izin → 4 gün) Pzt-Per + Cmt = 5
 #      ≤ 5 geçiyordu ama o Cmt MESAİ oluyordu (T=4). wd_say ile bu kapatıldı.
 #      H17B tatil haftalarında zaten wd_say uyguluyor; bu her haftaya genelliyor.
-nm = 0
+# SINIR HAFTASI TAŞIMASI (H8C): o hafta ÖNCEKİ AYA taşıyorsa iki taraf da tamamlanır —
+#   sol:  ay içi çalışma + önceki ayda çalışılan gün (onceki_gun)
+#   sağ:  ay içi müsait hafta içi + önceki ay müsait hafta içi (onceki_musait_hi)
+# Taşımasız hali Ağustos'ta wd_say=0 verip bu agentları 01-02'de tamamen kapatıyordu;
+# doğrusu: Temmuz'da 5 gün çalıştıysa kapalı, 4 gün + 1 off ise 1 gün (NORM) serbest.
+nm, nm_tas = 0, 0
 for a in mesai_yok:
-    for hafta_gunleri in haftalar.values():
+    for wk, hafta_gunleri in haftalar.items():
         wd_say = sum(1 for ds in hafta_gunleri            # müsait hafta içi (tatil/izin/off_t hariç)
                      if dt.date.fromisoformat(ds).weekday() < 5
                      and dt.date.fromisoformat(ds) not in TATIL
@@ -977,10 +991,15 @@ for a in mesai_yok:
         haftalik = [x[(a, ds, v)] for ds in hafta_gunleri
                     for v in gun_vardiyalari[ds] if (a, ds, v) in x]
         if haftalik:
-            model.Add(sum(haftalik) <= wd_say)            # ≤ müsait hafta içi → hafta sonu MESAİ olamaz
+            tavan = wd_say
+            if wk == SINIR_HAFTA and a in onceki_gun:
+                tavan = max(0, wd_say + onceki_musait_hi.get(a, 0) - onceki_gun[a])
+                nm_tas += 1
+            model.Add(sum(haftalik) <= tavan)             # ≤ müsait hafta içi → hafta sonu MESAİ olamaz
             nm += 1
 
-print(f"mesaiye kalamaz haftada ≤müsait hafta içi gün: {len(mesai_yok)} agent, {nm} (agent,hafta) kısıtı")
+print(f"mesaiye kalamaz haftada ≤müsait hafta içi gün: {len(mesai_yok)} agent, {nm} (agent,hafta) kısıtı"
+      + (f"  |  sınır haftası taşıması: {nm_tas} agent" if nm_tas else ""))
 
 
 # %% [HÜCRE 16D] — AKŞAM/GECE: AYDA ≤ MAX_AKSAM_HAFTA (sert rotasyon) ────
@@ -1209,7 +1228,12 @@ print(f"haftada aynı vardiya kısıtı: {n} (agent × hafta)")
 #      hafta sonunu off seçer; hafta sonu coverage için hafta içi off gerekirse esner.
 
 # (1) haftalık fazla off (>2)
-n1 = 0
+# SINIR HAFTASI TAŞIMASI (H8C): önceki ayın off'ları da o haftanın off'u.
+#   off = avail − çalışma → önceki ayın ÇALIŞMA günleri iki tarafa da eklenir ve
+#   sadeleşir; geriye sadece `onceki_off` kalır → eşik onun kadar aşağı iner.
+#   Ör. Temmuz'da 4 gün çalışma + 1 off → Ağustos 01-02'nin ikisi de off olursa
+#   o ISO haftada 3 off (4 günlük hafta) → ceza. Biri çalışılırsa ceza yok.
+n1, n1_tas = 0, 0
 for a in AGENTS:
     for (yil, hafta), hafta_gunleri in haftalar.items():
         gun_var = []                          # bu agentın o haftadaki çalışma değişkenleri
@@ -1222,10 +1246,14 @@ for a in AGENTS:
                 gun_var += gunluk
                 izinsiz_gun.add(ds)
         avail = len(izinsiz_gun)
-        if avail <= 2:
+        onc_cal = onc_off = 0                 # önceki aydan taşınan çalışma / off
+        if (yil, hafta) == SINIR_HAFTA and a in onceki_gun:
+            onc_cal, onc_off = onceki_gun[a], onceki_off[a]
+            n1_tas += 1
+        if avail + onc_cal + onc_off <= 2:
             continue                          # kısa/çok-izinli hafta → taban yok
-        fazla_off = model.NewIntVar(0, avail, f"fazlaoff_{a}_{yil}_{hafta}")
-        model.Add(fazla_off >= (avail - 2) - sum(gun_var))   # off>2 olursa ceza
+        fazla_off = model.NewIntVar(0, avail + onc_off, f"fazlaoff_{a}_{yil}_{hafta}")
+        model.Add(fazla_off >= (avail + onc_off - 2) - sum(gun_var))   # off>2 olursa ceza
         amac.append(W_HAFTA_OFF * fazla_off)
         n1 += 1
 
@@ -1247,7 +1275,8 @@ for a in AGENTS:
         amac.append(agirlik * (1 - sum(gunluk)))   # off (1−çalıştı) → gün ağırlığı kadar ceza
         n2 += 1
 
-print(f"haftalık off dengesi: {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})")
+print(f"haftalık off dengesi: {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})"
+      + (f"  |  sınır haftası taşıması: {n1_tas} agent" if n1_tas else ""))
 print(f"hafta içi off (surplus ağırlıklı): {n2} (agent,gün) ceza terimi "
       f"(taban {W_HI_OFF} + surplus {W_SURPLUS_OFF}×(1−w) → sıkı gün pahalı)")
 
@@ -1318,12 +1347,12 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
 #   sonu yerine boş bıraktığı HAFTA İÇİNİ doldurur ("önce hafta içi"). Soft (INFEASIBLE
 #   yapmaz). Norm haftası (5 gün) → max(0,5−5)=0 → cezasız, norm'a dokunmaz.
 # NOT: aylık overtime zaten H17'de sert (ust). Bu hücre haftalık DAĞILIMI düzeltir.
-nmes = 0
+nmes, nmes_tas = 0, 0
 for a in AGENTS:
     if a not in kota_map:
         continue
     hafta_mesai = []                                   # her hafta: 5-üstü (tatil hariç) çalışma
-    for gunler in haftalar.values():
+    for wk, gunler in haftalar.items():
         wtatil = sum(1 for ds in gunler
                      if dt.date.fromisoformat(ds).weekday() < 5
                      and dt.date.fromisoformat(ds) in TATIL)
@@ -1335,8 +1364,16 @@ for a in AGENTS:
                     if (a, ds, v) in x and dt.date.fromisoformat(ds) not in TATIL]
         if not nontatil:
             continue
+        esik = 5 - wtatil - w_izin                     # o haftanın normal iş günü
+        # SINIR HAFTASI TAŞIMASI (H8C): önceki ayın izni eşiği düşürür, önceki ayın
+        # ÇALIŞMASI eşiği TÜKETİR → kalan eşik kadarı bedava, üstü mesai.
+        # Taşımasız hali: Temmuz'da 5 gün çalışmış agentın 01-02 Ağustos'u
+        # "max(0, 2−5)=0" ile BEDAVA görünüyordu → adalet bütçesinden düşmüyordu.
+        if wk == SINIR_HAFTA and a in onceki_gun:
+            esik = max(0, esik - onceki_izin_hi.get(a, 0) - onceki_gun[a])
+            nmes_tas += 1
         mw = model.NewIntVar(0, 7, f"haftamesai_{a}_{len(hafta_mesai)}")
-        model.Add(mw >= sum(nontatil) - (5 - wtatil - w_izin))  # haftalık mesai (ReLU, ≥0; tatil+izin düşülmüş)
+        model.Add(mw >= sum(nontatil) - esik)          # haftalık mesai (ReLU, ≥0)
         hafta_mesai.append(mw)
     if not hafta_mesai:
         continue
@@ -1346,7 +1383,8 @@ for a in AGENTS:
     nmes += 1
 
 print(f"mesai (haftalık) adaleti: {nmes} agent, adil pay={FAIR_MESAI} mesai haftası "
-      f"(ağ. {W_ADALET_MESAI})")
+      f"(ağ. {W_ADALET_MESAI})"
+      + (f"  |  sınır haftası taşıması: {nmes_tas} agent" if nmes_tas else ""))
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
