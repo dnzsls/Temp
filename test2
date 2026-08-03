@@ -17,8 +17,8 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H10 hafta sonu cov.: hafta sonu kovaları talep ± HS_TOL(2) sıkı band (tam otursun).
     H10 gece coverage: hafta içi gece kovaları (00:00/24:00) talep ± GECE_BUFFER(3) bandı.
     H11 günde ≤1     : bir agent bir günde en çok 1 vardiya.
-    H12 peş peşe ≤6  : her 7 ARDIŞIK takvim gününde ≤6 çalışma (kayan pencere; ISO-hafta
-                       varyantı hücrede yorumda). Önceki aya sarkan pencereler dahil.
+    H12 peş peşe ≤6  : her 7 ARDIŞIK takvim gününde ≤6 çalışma (kayan pencere).
+                       Önceki aya sarkan pencereler dahil.
     H8C önceki ay    : ay sınırında önceki ayın çizelgesi (df_onceki) modele taşınır —
                        H12 kayan pencere, H15 11 saat, H16C haftalık tavan, H20B off
                        dengesi, H20E mesai eşiği, H22 mesai/norm raporu. Veri yoksa
@@ -97,8 +97,18 @@ GECE_BASLANGIC   = ("00:00", "24:00")   # gece vardiyası başlangıçları
 GECE_BUFFER      = 3           # hafta içi gece kovaları SERT band: talep ± 3 (fazlalık gündüzde kalır)
 HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (coverage'a tam otursun; takım bütünlüğü yok → boşaltılmasın)
 # amaç fonksiyonu ağırlıkları (yüksek = o hedef daha öncelikli)
-W_COVERAGE  = 1                # coverage sapma (5–15 arası)
+W_COVERAGE  = 1                # coverage sapma (5–15 arası) — eksik/fazla AYRIMSIZ
 W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapmayı engeller)
+# EKSİK (talep−atanan) için AYRI ceza: serbest bölge YOK, İLK kişiden itibaren.
+# Gerekçe: sapma cezası simetrik ve ±SERBEST(5) bedava → kovayı eksik bırakmak
+# amaç fonksiyonunda 0'a mal oluyordu; hafta sonu sert bandı da talep−HS_TOL(2)'ye
+# izin verdiği için model her hafta sonu kovasında bandın ALT ucunda oturuyordu.
+# Kalibrasyon: bir kovaya kişi eklemek eksiği 1 azaltır (kazanç = W_EKSIK).
+#   W_EKSIK < W_ADALET_HS(12) → boşluk SADECE adil pay altındaki agentlarla dolar.
+#   W_EKSIK > W_ADALET_HS     → adil payı aşan hafta sonu günleri de verilir (coverage öncelikli).
+W_EKSIK_HS  = 4                # HAFTA SONU eksik kişi başına ceza
+W_EKSIK_HI  = 0                # HAFTA İÇİ eksik cezası (0 = mevcut davranış; takım bütünlüğü
+                               # üzerindeki etkisi ölçülmeden açılmasın)
 W_TAKIM      = 100             # takım bölünme: takımın o hafta fazladan kullandığı her vardiya-tipi (HAFTALIK; günlükten ~5× yüksek olmalı)
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 4                # hafta içi off TABAN cezası (=norm) → "önce mesai" (2 dolmadan norm yapma)
@@ -645,14 +655,16 @@ print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
 UB = len(AGENTS)                              # sapma üst sınırı (en fazla tüm agentlar)
 amac = []                                     # amaç fonksiyonu terimleri (minimize edilecek)
 cov = {}
+n_eksik = 0                                   # eksik cezası konan kova sayısı (özet için)
 for (ds, v), kisi in talep.items():
     katilan = []                              # bu çiftte değişkeni olan agentlar
     for a in AGENTS:
         if (a, ds, v) in x:
             katilan.append(x[(a, ds, v)])
     atanan = sum(katilan)
+    _hs = dt.date.fromisoformat(ds).weekday() >= 5
     # SERT band'lar: hafta sonu coverage'a TAM otursun; hafta içi gece yığılmasın.
-    if dt.date.fromisoformat(ds).weekday() >= 5:          # HAFTA SONU → talep ± HS_TOL (sıkı)
+    if _hs:                                              # HAFTA SONU → talep ± HS_TOL (sıkı)
         model.Add(atanan >= kisi - HS_TOL)               #   takım bütünlüğü yok → boşaltılmasın
         model.Add(atanan <= kisi + HS_TOL)
     elif saat[(ds, v)][0] in GECE_BASLANGIC:             # HAFTA İÇİ GECE → talep ± GECE_BUFFER
@@ -668,10 +680,21 @@ for (ds, v), kisi in talep.items():
     ceza2 = model.NewIntVar(0, UB, f"covceza2_{ds}_{v}")
     model.Add(ceza2 >= sapma - AGIR_ESIK)         # AGIR_ESIK'i (15) aşan kısım (ekstra)
     amac.append(W_COVERAGE * ceza1 + W_COVERAGE2 * ceza2)
+    # ASİMETRİK EKSİK CEZASI: yukarıdaki sapma simetrik ve ±SERBEST bedava →
+    # kovayı eksik bırakmak bedavaydı. Burada sadece EKSİK yön, ilk kişiden
+    # itibaren cezalandırılıyor (fazla yön dokunulmadan kalıyor).
+    _w_eksik = W_EKSIK_HS if _hs else W_EKSIK_HI
+    if _w_eksik:
+        eksik = model.NewIntVar(0, UB, f"eksik_{ds}_{v}")
+        model.Add(eksik >= kisi - atanan)     # ReLU: max(0, talep − atanan)
+        amac.append(_w_eksik * eksik)
+        n_eksik += 1
     cov[(ds, v)] = sapma
 
 print(f"coverage: {len(cov)} çift (serbest ±{SERBEST_COVERAGE}, ağır eşik ±{AGIR_ESIK}; "
       f"sert sınır YOK, konveks ceza)")
+print(f"  eksik cezası (asimetrik, ilk kişiden): {n_eksik} kova  "
+      f"(hafta sonu ağ. {W_EKSIK_HS}, hafta içi ağ. {W_EKSIK_HI})")
 
 
 # %% [HÜCRE 11] — GÜNDE ≤1 VARDİYA ──────────────────────────────────────
@@ -691,22 +714,17 @@ print(f"günde ≤1 vardiya kısıtı: {n} (agent × gün)")
 
 
 # %% [HÜCRE 12] — 7 GÜN ÜST ÜSTE ÇALIŞAMAZ (≥1 off) ────────────────────
-# İKİ VARİANT var, biri AKTİF olmalı:
-#   (A) KAYAN 7 GÜNLÜK PENCERE  ← AKTİF: her 7 ardışık takvim gününde ≤6 çalışma.
-#       ISO-hafta sınırını aşan ardışıklığı da yakalar (spec 5.1-4).
-#   (B) ISO-HAFTA (≤6 gün/hafta) ← aşağıda yorumda.
-# ÖNCEKİ AY TAŞIMASI (H8C) ikisinde de var; verisi farklı:
-#   (A) gün gün → onceki_calisti (hangi günü çalıştı)   [PENCERE_GUNLER = son 6 gün]
-#   (B) hafta toplamı → onceki_gun                      [TASIMA_GUNLER = ISO haftanın önceki ay kısmı]
+# KAYAN 7 GÜNLÜK PENCERE: her 7 ardışık takvim gününde ≤6 çalışma.
+# ISO-hafta sınırını aşan ardışıklığı da yakalar (spec 5.1-4).
+# ÖNCEKİ AY TAŞIMASI (H8C): gün gün → onceki_calisti (PENCERE_GUNLER = son 6 gün).
 
-# PLAN_GUNLER'i ISO-haftalara grupla — VARİANTTAN BAĞIMSIZ, her zaman gerekli
-# (H16C / H17B / H20B / H20D / H20E bu sözlüğü kullanıyor).
+# PLAN_GUNLER'i ISO-haftalara grupla — bu kısıt kullanmıyor ama H16C / H17B /
+# H20B / H20D / H20E bu sözlüğü kullanıyor, ilk kuran hücre burası.
 haftalar = {}
 for ds in PLAN_GUNLER:
     yil, hafta, _ = dt.date.fromisoformat(ds).isocalendar()
     haftalar.setdefault((yil, hafta), []).append(ds)
 
-# ─── (A) AKTİF: KAYAN 7 GÜNLÜK PENCERE ────────────────────────────────
 # Pencere ayın 1. gününden ÖNCE de başlar (önceki aya sarkan 6 pencere):
 #   Σ(ay içi değişken) ≤ 6 − (o pencereye düşen ÖNCEKİ AY çalışma günü)
 # Ör. 07-27..08-02 penceresi: Temmuz'da 5 gün çalışmışsa 08-01/02'den en fazla 1'i.
@@ -741,34 +759,6 @@ if n_tas:
     _td = pd.Series(_tas_tavan).value_counts().sort_index().to_dict()
     print(f"  önceki ay taşıması: {n_tas} pencerede ısırdı, {len(_tas_tavan)} agent  |  "
           f"en düşük tavan → agent sayısı: {_td}  (0 = ay başında hiç çalışamaz)")
-
-# ─── (B) ALTERNATİF (AKTİF DEĞİL): ISO-HAFTA ≤6 gün ───────────────────
-# Kullanmak istersen yukarıdaki (A) bloğunu kapatıp bunu aç. Taşıma: sınır
-# haftasının tavanından önceki ayda çalışılan gün düşülür (tavan = 6 − onceki_gun).
-#
-# n, n_sinir = 0, 0
-# _sinir_tavan = {}                              # agent → sınır haftası tavanı (özet için)
-# for a in AGENTS:
-#     for wk, hafta_gunleri in haftalar.items():
-#         haftalik = []                          # bu agentın o haftadaki tüm vardiya değişkenleri
-#         for ds in hafta_gunleri:
-#             for v in gun_vardiyalari[ds]:
-#                 if (a, ds, v) in x:
-#                     haftalik.append(x[(a, ds, v)])
-#         if haftalik:
-#             tavan = 6
-#             if wk == SINIR_HAFTA and onceki_gun.get(a) is not None:
-#                 tavan = max(0, 6 - onceki_gun[a])     # önceki aydan gelen çalışma düşülür
-#                 _sinir_tavan[a] = tavan
-#                 n_sinir += 1
-#             model.Add(sum(haftalik) <= tavan)
-#             n += 1
-# print(f"haftada ≥1 off kısıtı: {n} (agent × hafta)")
-# if n_sinir:
-#     _td = pd.Series(_sinir_tavan).value_counts().sort_index().to_dict()
-#     print(f"  sınır haftası ({SINIR_HAFTA[0]}-W{SINIR_HAFTA[1]}) taşıması: {n_sinir} agent, "
-#           f"tavan → agent sayısı: {_td}  (tavan 0 = o haftanın kalanında hiç çalışamaz)")
-
 
 # %% [HÜCRE 13] — SABAH ÇALIŞANLAR (bitiş ≤ 20:00) ─────────────────────
 # sabah_calisir_flg=1 → yalnız aynı gün biten ve bitişi ≤20:00 vardiyalar.
