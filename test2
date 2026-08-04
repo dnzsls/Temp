@@ -1467,8 +1467,49 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             print(f"       {ds} {v}: talep={kisi} (min {kisi - tol}) ama müsait agent={mus}")
     else:
         print("  2) coverage sert-band: sorun yok.")
+    # 3) DEĞİŞKEN-BAZLI kapasite: takvim değil, gerçek x sayar → H13(sabah)/
+    #    H16B(arife)/H15(dinlenme)/H20(tek-tip) yüzünden fiilen doldurulamayan
+    #    günleri de yakalar. Teşhis (1) bunları "müsait" sayıp kaçırabiliyor.
+    #    Varsa assumption core'daki agentlara odaklan, yoksa tüm kota'lı agentlar.
+    try:
+        _hedef = _ag if _ag else list(kota_map)
+    except NameError:
+        _hedef = list(kota_map)
+    print(f"\n  3) DEĞİŞKEN-BAZLI kapasite ({len(_hedef)} agent taranıyor):")
+    _bulundu = False
+    for a in _hedef:
+        if a not in kota_map:
+            continue
+        cap = 5 if a in mesai_yok else 6                      # H16C/H12 haftalık tavan
+        gercek_kap, hafta_dokum = 0, []
+        for wk, gunler in haftalar.items():
+            uygun = [ds for ds in gunler
+                     if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, []))]
+            haftalik = min(len(uygun), cap)
+            gercek_kap += haftalik
+            hafta_dokum.append((wk, len(uygun), haftalik))
+        if gercek_kap < kota_map[a]:
+            _bulundu = True
+            print(f"     ✗ {a}: kota={kota_map[a]}  gerçek_kapasite={gercek_kap} "
+                  f"(açık {gercek_kap - kota_map[a]})")
+            # hangi günler neden düştü? (ilk boş günlerin sebebi)
+            neden = {"izin": 0, "off_t": 0, "vardiya_yasak": 0}
+            for ds in PLAN_GUNLER:
+                d = dt.date.fromisoformat(ds)
+                if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])):
+                    continue                                  # bu gün doldurulabilir
+                if d in izin_map.get(a, set()):
+                    neden["izin"] += 1
+                elif d in off_block_map.get(a, set()):
+                    neden["off_t"] += 1
+                elif gun_vardiyalari.get(ds):
+                    neden["vardiya_yasak"] += 1               # sabah/hamile/11saat/arife
+            print(f"        boş gün sebebi: {neden}")
+    if not _bulundu:
+        print("     gerçek-kapasite: sorun yok → çakışma agent-içi değil, "
+              "kısıtlar-arası (yukarıdaki assumption core'a bak).")
     raise SystemExit("çözüm yok (INFEASIBLE) — yukarıdaki teşhise bak "
-                     "(kota-kapasite ve/veya coverage sert-band).")
+                     "(assumption core + kota/coverage/değişken-bazlı kapasite).")
 print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
 
 # coverage: band içinde plana ne kadar yakın? (toplam sapma)
@@ -1988,4 +2029,3 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
-
