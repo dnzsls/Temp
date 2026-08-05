@@ -1,13 +1,6 @@
-_ONCE, _SONRA = Counter(), Counter()
-for a, g in _d.groupby("agent_user_code"):
-    gv = dict(zip(g["tarih"], g["vardiya"]))
-    for d, v in gv.items():
-        if v != "24:00-08:00":
-            continue
-        if gv.get(d - dt.timedelta(days=1)) != "24:00-08:00":      # serinin İLK gecesi
-            _ONCE[gv.get(d - dt.timedelta(days=1))] += 1
-        if gv.get(d + dt.timedelta(days=1)) != "24:00-08:00":      # serinin SON gecesi
-            _SONRA[gv.get(d + dt.timedelta(days=1))] += 1
+# 1) sınır günü gece kovası hedefi tutturmuş mu
+print(df_cov[df_cov["tarih"] == PLAN_GUNLER[0]].to_string(index=False))
 
-print("gece serisinden ÖNCEKİ gün :", dict(_ONCE))
-print("gece serisinden SONRAKİ gün:", dict(_SONRA))
+# 2) hafta sonu bandı nerede oturuyor (alt uçta yığılma var mı)
+_hs = df_cov[df_cov["tarih"].map(lambda d: dt.date.fromisoformat(d).weekday() >= 5)]
+print(_hs["fark"].value_counts().sort_index().to_dict())
