@@ -1,48 +1,16 @@
-import math
-import pandas as pd
-from weekly_weekday_pipeline_forecast import prepare_forecast_calls_30, is_slot_in_shift
-# ↑ senin import ettiğin modül adı (forecast_weekly_weekday_pipeline_final'ı böyle çağırıyorsun)
+TARIH = "2026-08-03"
+qr = results[TARIH]["kitle"]
+mi = qr["mip_info"]
+erl = qr["erlang_by_slot"]
+inb = mi["mip_in_by_slot"]
+outb = mi["mip_out_by_slot"]
 
-QUEUE = "kitle"
-TARIH = "2026-08-03"          # bakmak istediğin gün
-CFG   = CONFIG_WEEKDAY
-
-# 1) erlang → pickle'dan
-qr = results[TARIH][QUEUE]
-erlang_by_slot = qr["erlang_by_slot"]
-
-# 2) df_calls_30 → df_forecast'ten (pipeline'ın kullandığı format)
-df_calls_30 = prepare_forecast_calls_30(df_forecast, config=CFG)
-df_day = df_calls_30[df_calls_30["data_date"] == pd.to_datetime(TARIH)]
-total_col = f"{QUEUE}_total"
-
-def subqueue_min(item):
-    sq    = item if isinstance(item, str) else item["sub_queue"]
-    ratio = 1.0 if isinstance(item, str) else item.get("min_ratio", 1.0)
-    hours = None if isinstance(item, str) else item.get("hours")
-    col = f"{sq}_calls"
-    per_slot = {}
-    for _, row in df_day.iterrows():
-        slot = row["slot_30"]
-        erl = erlang_by_slot.get(slot, 0)
-        if erl <= 0:
-            continue
-        if hours and not is_slot_in_shift(slot, hours["start"], hours["end"]):
-            continue                                    # hours dışı → sayılmaz
-        sqc = row.get(col, 0) if col in row.index else 0
-        tot = row.get(total_col, 0) if total_col in row.index else 0
-        if tot > 0 and sqc > 0:
-            per_slot[slot] = math.ceil(erl * (sqc / tot) * ratio)
-    return sq, per_slot
-
-toplam_00 = 0
-for item in CFG["inhouse_only_subqueues"][QUEUE]:
-    sq, per_slot = subqueue_min(item)
-    print(f"\n{sq}  (min_ratio={item if isinstance(item,str) else item.get('min_ratio')}):")
-    print(f"   00:00 slotu inhouse min : {per_slot.get('00:00', 0)}")
-    print(f"   gün toplam (kişi-slot)  : {sum(per_slot.values())}")
-    print(f"   slot dökümü             : {per_slot}")
-    toplam_00 += per_slot.get('00:00', 0)
-
-print(f"\n→ 00:00'da TOPLAM inhouse min (retention+karttemel): {toplam_00}")
-print(f"   (00:00 slot inhouse atanan: {qr['mip_info']['mip_in_by_slot'].get('00:00', 0)})")
+gece = [f"{h:02d}:{m:02d}" for h in range(0, 8) for m in (0, 30)]  # 00:00..07:30
+print(f"{'slot':7} {'erlang':>7} {'inhouse':>8} {'outsrc':>7} {'toplam':>7}")
+for s in gece:
+    e  = erl.get(s, 0)
+    i  = inb.get(s, 0)
+    o  = outb.get(s, 0)
+    if e == 0 and i == 0 and o == 0:
+        continue
+    print(f"{s:7} {e:>7} {i:>8} {o:>7} {i+o:>7}")
