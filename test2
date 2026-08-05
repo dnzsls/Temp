@@ -1,11 +1,15 @@
-mip = CONFIG_WEEKDAY['queue_configs']['kitle']['mip']
-print("cost_inhouse  :", mip['cost_inhouse'])
-print("cost_outsource:", mip['cost_outsource'])      # ← 0.2 mi, yoksa 1.0 mı?
-print("min_overrides :", mip['min_per_shift_overrides'])
-print("balance win   :", [w['name'] for w in
-      CONFIG_WEEKDAY['queue_configs']['kitle']['balance_penalty']['windows']])
+from weekly_weekday_pipeline_forecast import get_time_cost_multiplier
 
-d = "2026-08-05"
-mi = results[d]["kitle"]["mip_info"]
-print("outsource günlük:", mi["total_outsource_kisi"], "/ kadro 325")
-print("inhouse   günlük:", mi["total_inhouse_kisi"], "/ kadro 420")
+# 1) Model bu çarpanı ne hesaplıyor?
+print("outsource 00:00 çarpan:", get_time_cost_multiplier('kitle', 'outsource', '00:00', CONFIG_WEEKDAY))
+print("inhouse   00:00 çarpan:", get_time_cost_multiplier('kitle', 'inhouse',   '00:00', CONFIG_WEEKDAY))
+
+# 2) Vardiyanın GERÇEK start string'i neye benziyor? (format eşleşiyor mu)
+mi = results["2026-08-05"]["kitle"]["mip_info"]
+for s, info in mi["shift_coverage"].items():
+    if info.get("company") == "outsource" and str(info.get("start","")).startswith("00"):
+        print("outsource gece vardiya:", s, "start=", repr(info["start"]))
+        break
+
+# 3) Config'e yazdığın anahtarı da göster
+print("config outsource çarpan dict:", CONFIG_WEEKDAY['time_cost_multipliers']['kitle']['outsource'])
