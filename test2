@@ -1,33 +1,4 @@
-import pandas as pd
-from weekly_weekday_pipeline_forecast import (
-    prepare_forecast_calls_30, _build_subqueue_min_slots)
-
-QUEUE  = "kitle"
-CFG    = CONFIG_WEEKDAY
-GUNLER = ["2026-08-03","2026-08-04","2026-08-05","2026-08-06","2026-08-07"]
-
-df_calls_30 = prepare_forecast_calls_30(df_forecast, config=CFG)
-kadro = CFG["surplus_distribution"]["total_kadro"]["kitle"]
-
-for TARIH in GUNLER:
-    r = results.get(TARIH, {}).get(QUEUE)
-    if not r:
-        print(f"\n{TARIH}: sonuç yok"); continue
-    mi  = r["mip_info"]
-    erl = r["erlang_by_slot"]
-    inb, outb = mi["mip_in_by_slot"], mi["mip_out_by_slot"]
-    # K5 min'leri (inhouse/outsource) yeniden hesapla
-    in_min, out_min = _build_subqueue_min_slots(df_calls_30, QUEUE, TARIH, erl, CFG)
-
-    print(f"\n{'='*74}")
-    print(f"{TARIH}   inhouse_gün={mi['total_inhouse_kisi']}   "
-          f"outsource_gün={mi['total_outsource_kisi']}  (kadro out~325)")
-    print('='*74)
-    print(f"{'slot':7}{'erlang':>7}{'min_in':>8}{'min_out':>9}{'ata_in':>8}{'ata_out':>9}{'top':>7}")
-    for slot in sorted(erl):
-        e = erl.get(slot, 0)
-        if e == 0:
-            continue
-        i, o = inb.get(slot, 0), outb.get(slot, 0)
-        print(f"{slot:7}{e:>7}{in_min.get(slot,0):>8}{out_min.get(slot,0):>9}"
-              f"{i:>8}{o:>9}{i+o:>7}")
+import inspect
+from weekly_weekday_pipeline_forecast import _build_subqueue_min_slots
+src = inspect.getsource(_build_subqueue_min_slots)
+print("HOURS DESTEĞİ VAR MI:", "is_slot_in_shift(slot, hours['start']" in src)
