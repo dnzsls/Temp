@@ -1,40 +1,13 @@
-from collections import Counter
-
-_d = df_onceki.copy()
-_d["tarih"]   = pd.to_datetime(_d["tarih"], errors="coerce").dt.date
-_d["vardiya"] = _d["vardiya"].astype(str).str.strip().str.lower()
-
-print("1) tüm df_onceki vardiya dağılımı:")
-print("  ", _d["vardiya"].value_counts().to_dict())
-print(f"\n   {ONCEKI_SON} (önceki ayın son günü):")
-print("  ", _d[_d["tarih"] == ONCEKI_SON]["vardiya"].value_counts().to_dict())
-
-_plan_gece = sorted({saat[(ds, v)] for (ds, v) in talep
-                     if saat[(ds, v)][0] in GECE_BASLANGIC})
-print(f"\n2) Ağustos planındaki gece kovası saatleri: {_plan_gece}")
-
-def _gece(v):
-    p = _vardiya_parse(v);  return bool(p) and p[0] in ("00:00", "24:00")
-def _gunduz(v):
-    p = _vardiya_parse(v);  return bool(p) and p[0] not in ("00:00", "24:00")
-
-A = B = 0
-ornA, ornB = [], []
+_ONCE, _SONRA = Counter(), Counter()
 for a, g in _d.groupby("agent_user_code"):
     gv = dict(zip(g["tarih"], g["vardiya"]))
     for d, v in gv.items():
-        n = gv.get(d + dt.timedelta(days=1))
-        if n is None:
+        if v != "24:00-08:00":
             continue
-        if _gece(v) and _gunduz(n):
-            A += 1
-            if len(ornA) < 3: ornA.append((a, d.isoformat(), v, "→", n))
-        if _gunduz(v) and _gece(n):
-            B += 1
-            if len(ornB) < 3: ornB.append((a, d.isoformat(), v, "→", n))
+        if gv.get(d - dt.timedelta(days=1)) != "24:00-08:00":      # serinin İLK gecesi
+            _ONCE[gv.get(d - dt.timedelta(days=1))] += 1
+        if gv.get(d + dt.timedelta(days=1)) != "24:00-08:00":      # serinin SON gecesi
+            _SONRA[gv.get(d + dt.timedelta(days=1))] += 1
 
-print("\n3) konvansiyon testi:")
-print(f"   A = gece(D) → gündüz(D+1) : {A}")
-for o in ornA: print("       ", o)
-print(f"   B = gündüz(D) → gece(D+1) : {B}")
-for o in ornB: print("       ", o)
+print("gece serisinden ÖNCEKİ gün :", dict(_ONCE))
+print("gece serisinden SONRAKİ gün:", dict(_SONRA))
