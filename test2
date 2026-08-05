@@ -1,6 +1,29 @@
-# 1) sınır günü gece kovası hedefi tutturmuş mu
-print(df_cov[df_cov["tarih"] == PLAN_GUNLER[0]].to_string(index=False))
+# 1) H19'un GERÇEKLEŞEN cezası: takım-hafta başına kaç fazla tip
+_bol = {}
+for T, uyeler in takimlar.items():
+    for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari:
+            continue
+        hi = [ds for ds in gunler if dt.date.fromisoformat(ds).weekday() < 5]
+        tipler = {saat[(ds, v)][0] for a in uyeler for ds in hi
+                  for v in gun_vardiyalari[ds]
+                  if (a, ds, v) in x and solver.Value(x[(a, ds, v)])}
+        if tipler:
+            _bol[(T, wk)] = len(tipler) - 1
+print(f"takım-hafta: {len(_bol)}  |  tek tip: {sum(1 for v in _bol.values() if v == 0)}"
+      f"  |  fazla tip toplamı: {sum(_bol.values())}"
+      f"  → H19 cezası = {W_TAKIM * sum(_bol.values())}")
+print("en bölünmüş 10:", sorted(_bol.items(), key=lambda kv: -kv[1])[:10])
 
-# 2) hafta sonu bandı nerede oturuyor (alt uçta yığılma var mı)
-_hs = df_cov[df_cov["tarih"].map(lambda d: dt.date.fromisoformat(d).weekday() >= 5)]
-print(_hs["fark"].value_counts().sort_index().to_dict())
+# 2) rakip kalemler ne kadar yer kaplıyor
+_sapma = sum(max(0, abs(sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)])) - k) - SERBEST_COVERAGE)
+             for (ds, v), k in talep.items())
+_agir  = sum(max(0, abs(sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)])) - k) - AGIR_ESIK)
+             for (ds, v), k in talep.items())
+print(f"coverage ceza1={W_COVERAGE*_sapma}  ceza2(AĞIR)={W_COVERAGE2*_agir}  "
+      f"amaç toplam={solver.ObjectiveValue():.0f}")
+
+# 3) yapı: kaç tip var, takımlar ne kadar büyük
+print(f"vardiya tipi sayısı: {len(TIP_SET)} → {TIP_SET}")
+print(f"takım sayısı: {len(takimlar)}  |  boyutlar: "
+      f"{pd.Series([len(u) for u in takimlar.values()]).describe()[['min','50%','max']].to_dict()}")
