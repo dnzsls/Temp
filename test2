@@ -1,4 +1,14 @@
-import inspect
-from weekly_weekday_pipeline_forecast import _build_subqueue_min_slots
-src = inspect.getsource(_build_subqueue_min_slots)
-print("HOURS DESTEĞİ VAR MI:", "is_slot_in_shift(slot, hours['start']" in src)
+    for item in config.get('inhouse_only_subqueues', {}).get(queue, []):
+        sq_name = item if isinstance(item, str) else item['sub_queue']
+        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
+        hours = None if isinstance(item, str) else item.get('hours')          # ← EKLE
+        sq_col = f"{sq_name}_calls"
+        for _, row in df_day.iterrows():
+            slot = row['slot_30']
+            erlang = erlang_by_slot.get(slot, 0)
+            if erlang <= 0:
+                continue
+            if hours and not is_slot_in_shift(slot, hours['start'], hours['end']):  # ← EKLE
+                continue                                                            # ← EKLE
+            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
+            ...
