@@ -1,12 +1,5 @@
-# 1) gece kovası talebi ay boyunca
-_g = sorted((ds, talep[(ds, v)]) for (ds, v) in talep
-            if saat[(ds, v)][0] in GECE_BASLANGIC)
-print("gece kovası talebi:", dict(_g))
-
-# 2) Temmuz'da fiili gece kadrosu (gün başına kaç kişi)
-_gece_kayit = df_onceki[df_onceki["vardiya"].str.startswith("00:00-")]
-print(f"\nTemmuz gece kaydı: {len(_gece_kayit)} satır, "
-      f"{_gece_kayit['agent_user_code'].nunique()} farklı agent")
-print("gün başına:", _gece_kayit.groupby("tarih").size().describe().to_dict())
-print("\nson 7 gün:", _gece_kayit[_gece_kayit["tarih"] >= ONCEKI_SON - dt.timedelta(days=6)]
-      .groupby("tarih").size().to_dict())
+qr = results["2026-08-03"]["kitle"]
+mi = qr["mip_info"]
+print("erlang 00:00 :", qr["erlang_by_slot"].get("00:00"))
+print("atanan inhouse 00:00 :", mi["mip_in_by_slot"].get("00:00"))
+print("atanan outsource 00:00:", mi["mip_out_by_slot"].get("00:00"))
