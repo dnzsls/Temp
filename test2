@@ -1,9 +1,12 @@
-# 1) şu anki açık ne kadar (H21 zaten basıyor, tek satırı yeter)
-#    "2026-08-01 V01_inhouse ... GERÇEK müsait=?"
-
-# 2) gece talebi ay boyunca ne kadar — 17 istisna mı, her gün mü?
+# 1) gece kovası talebi ay boyunca
 _g = sorted((ds, talep[(ds, v)]) for (ds, v) in talep
             if saat[(ds, v)][0] in GECE_BASLANGIC)
 print("gece kovası talebi:", dict(_g))
-print("Temmuz'da fiili gece kadrosu (gün başına):")
-print(_d[_d["vardiya"].str.startswith("00:00-")].groupby("tarih").size().describe().to_dict())
+
+# 2) Temmuz'da fiili gece kadrosu (gün başına kaç kişi)
+_gece_kayit = df_onceki[df_onceki["vardiya"].str.startswith("00:00-")]
+print(f"\nTemmuz gece kaydı: {len(_gece_kayit)} satır, "
+      f"{_gece_kayit['agent_user_code'].nunique()} farklı agent")
+print("gün başına:", _gece_kayit.groupby("tarih").size().describe().to_dict())
+print("\nson 7 gün:", _gece_kayit[_gece_kayit["tarih"] >= ONCEKI_SON - dt.timedelta(days=6)]
+      .groupby("tarih").size().to_dict())
