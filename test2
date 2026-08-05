@@ -648,27 +648,6 @@ print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
       f"blok (izin+off_t/off_t2) günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
 
 
-# %% [HÜCRE 9T] — TEŞHİS: assumption altyapısı ─────────────────────────
-# INFEASIBLE olduğunda çelişen sert kısıtları isimle görmek için altyapı.
-# Gevşetilebilir her sert kısıt bir literal'e bağlanır (OnlyEnforceIf).
-# Model çözülemezse solver.SufficientAssumptionsForInfeasibility() çakışan
-# minimal(yeterli) kümeyi verir → H21'de raporlanır.
-# ÜRETİMDE TESHIS=False yap (assumption presolve'u kısıtlar → yavaşlatır).
-TESHIS  = True
-_assume = {}                                   # literal.Index() -> okunur ad
-
-
-def _sert(kisit, ad):
-    """model.Add(kisit); TESHIS açıksa kısıtı assumption literaline bağlar."""
-    c = model.Add(kisit)
-    if TESHIS:
-        b = model.NewBoolVar(f"as_{ad}")
-        model.AddAssumption(b)
-        c.OnlyEnforceIf(b)
-        _assume[b.Index()] = ad
-    return c
-
-
 # %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST, SERT BAND YOK) ─────
 # Sert üst/alt sınır YOK → kova talebi aşılabilir veya eksik bırakılabilir.
 # (Sert min-çalışma feasible olsun diye coverage serbest esner.)
@@ -686,11 +665,11 @@ for (ds, v), kisi in talep.items():
     _hs = dt.date.fromisoformat(ds).weekday() >= 5
     # SERT band'lar: hafta sonu coverage'a TAM otursun; hafta içi gece yığılmasın.
     if _hs:                                              # HAFTA SONU → talep ± HS_TOL (sıkı)
-        _sert(atanan >= kisi - HS_TOL, f"H10hsALT_{ds}_{v}")   #   boşaltılmasın
-        _sert(atanan <= kisi + HS_TOL, f"H10hsUST_{ds}_{v}")
+        model.Add(atanan >= kisi - HS_TOL)               #   takım bütünlüğü yok → boşaltılmasın
+        model.Add(atanan <= kisi + HS_TOL)
     elif saat[(ds, v)][0] in GECE_BASLANGIC:             # HAFTA İÇİ GECE → talep ± GECE_BUFFER
-        _sert(atanan >= kisi - GECE_BUFFER, f"H10geceALT_{ds}_{v}")  # gündüzde kalsın
-        _sert(atanan <= kisi + GECE_BUFFER, f"H10geceUST_{ds}_{v}")
+        model.Add(atanan >= kisi - GECE_BUFFER)          #   fazlalık geceye yığılamaz, gündüzde kalır
+        model.Add(atanan <= kisi + GECE_BUFFER)
     # HAFTA İÇİ GÜNDÜZ → sert band YOK, esnek (aşağıdaki konveks ceza)
     sapma = model.NewIntVar(0, UB, f"sapma_{ds}_{v}")
     model.Add(sapma >= atanan - kisi)         # sapma ≥ |atanan - talep|
@@ -769,7 +748,7 @@ for a in AGENTS:
             continue
         onceki_cal = sum(1 for d in pencere if d < AY_ILK and d in _calisti)
         tavan = max(0, 6 - onceki_cal)              # önceki aydan gelen çalışma tavandan düşer
-        _sert(sum(pencere_varlar) <= tavan, f"H12_{a}_{s.isoformat()}")
+        model.Add(sum(pencere_varlar) <= tavan)
         n += 1
         if onceki_cal:                              # taşıma gerçekten ısırdı mı
             n_tas += 1
@@ -1006,7 +985,7 @@ for a in mesai_yok:
             if wk == SINIR_HAFTA and a in onceki_gun:
                 tavan = max(0, wd_say + onceki_musait_hi.get(a, 0) - onceki_gun[a])
                 nm_tas += 1
-            _sert(sum(haftalik) <= tavan, f"H16C_{a}_{wk[0]}{wk[1]}")  # ≤ müsait hafta içi
+            model.Add(sum(haftalik) <= tavan)             # ≤ müsait hafta içi → hafta sonu MESAİ olamaz
             nm += 1
 
 print(f"mesaiye kalamaz haftada ≤müsait hafta içi gün: {len(mesai_yok)} agent, {nm} (agent,hafta) kısıtı"
@@ -1034,7 +1013,7 @@ for a in AGENTS:
                 model.Add(ind >= xv)                 # o hafta akşam/gece varsa gösterge 1
             hafta_ind.append(ind)
     if hafta_ind:
-        _sert(sum(hafta_ind) <= MAX_AKSAM_HAFTA, f"H16D_{a}")  # ayda ≤ MAX akşam/gece haftası
+        model.Add(sum(hafta_ind) <= MAX_AKSAM_HAFTA)  # ayda ≤ MAX akşam/gece haftası
         ng += 1
 
 print(f"akşam/gece ayda ≤{MAX_AKSAM_HAFTA} hafta (sert): {ng} agent, "
@@ -1070,8 +1049,8 @@ for a in AGENTS:
         continue
     ust = kota if a in ozel_agents else kota + MAX_MESAI + tatil_gun   # +MAX_MESAI + resmi tatil
     kota_map[a], ust_map[a] = kota, ust                  # H23 raporu için gerçek değerler
-    _sert(calisma >= kota, f"H17taban_{a}")               # SERT taban: kotayı doldur
-    _sert(calisma <= ust,  f"H17tavan_{a}")               # SERT tavan
+    model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
+    model.Add(calisma <= ust)                             # SERT tavan
 
 print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=iş günü−haftaiçi_izin; "
       f"normal kota..kota+{MAX_MESAI}(mesai)+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
@@ -1097,7 +1076,7 @@ for a in ozel_agents:
         haftalik = [x[(a, ds, v)] for ds in gunler
                     for v in gun_vardiyalari[ds] if (a, ds, v) in x]
         if haftalik and wd_say:
-            _sert(sum(haftalik) <= wd_say, f"H17B_{a}_{gunler[0]}")  # ≤ müsait hafta içi
+            model.Add(sum(haftalik) <= wd_say)         # ≤ müsait hafta içi → 5. gün yasak
             ntk += 1
 
 print(f"resmi tatil haftası özel kota: {ntk} (özel agent, tatil haftası) kısıtı")
@@ -1125,7 +1104,7 @@ for a in AGENTS:
             model.Add(co + xv <= 1)              # o hafta sonu çalışıyorsa co=0
         cift_off.append(co)
     if cift_off:
-        _sert(sum(cift_off) >= 1, f"H18_{a}")    # en az bir tam hafta sonu off
+        model.Add(sum(cift_off) >= 1)            # en az bir tam hafta sonu off
         n += 1
 
 print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), {len(hs_ciftleri)} hafta sonu")
@@ -1408,20 +1387,6 @@ status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
 
 if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    # ── ASSUMPTION TEŞHİSİ: çelişen sert kısıtları isimle bas (H9T/_sert) ──
-    if TESHIS and _assume and status == cp_model.INFEASIBLE:
-        from collections import Counter
-        core  = solver.SufficientAssumptionsForInfeasibility()
-        adlar = [_assume.get(i, str(i)) for i in core]
-        print(f"\n=== ÇELİŞEN SERT KISITLAR (yeterli küme: {len(adlar)}) ===")
-        for ad in adlar:
-            print("   -", ad)
-        print("   hücre bazında:", dict(Counter(a.split("_")[0] for a in adlar)))
-        _ag = sorted({p for ad in adlar for p in ad.split("_") if p.startswith("U")})
-        if _ag:
-            print("   ilgili agent(lar):", _ag)
-        print("   → çözüm: yukarıdaki kısıtlardan birini gevşet ya da ilgili "
-              "agent'ın izin/off_t/kota verisini düzelt.\n")
     # ── INFEASIBLE TEŞHİS: en olası iki sebebi tara ────────────────────
     print("\n⚠ INFEASIBLE — olası sebepler taranıyor:")
     # 1) agent kotayı dolduramıyor mu? (off_t artık kotayı DÜŞÜRMÜYOR → kota
@@ -1467,49 +1432,60 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             print(f"       {ds} {v}: talep={kisi} (min {kisi - tol}) ama müsait agent={mus}")
     else:
         print("  2) coverage sert-band: sorun yok.")
-    # 3) DEĞİŞKEN-BAZLI kapasite: takvim değil, gerçek x sayar → H13(sabah)/
-    #    H16B(arife)/H15(dinlenme)/H20(tek-tip) yüzünden fiilen doldurulamayan
-    #    günleri de yakalar. Teşhis (1) bunları "müsait" sayıp kaçırabiliyor.
-    #    Varsa assumption core'daki agentlara odaklan, yoksa tüm kota'lı agentlar.
-    try:
-        _hedef = _ag if _ag else list(kota_map)
-    except NameError:
-        _hedef = list(kota_map)
-    print(f"\n  3) DEĞİŞKEN-BAZLI kapasite ({len(_hedef)} agent taranıyor):")
-    _bulundu = False
-    for a in _hedef:
-        if a not in kota_map:
-            continue
-        cap = 5 if a in mesai_yok else 6                      # H16C/H12 haftalık tavan
-        gercek_kap, hafta_dokum = 0, []
-        for wk, gunler in haftalar.items():
-            uygun = [ds for ds in gunler
-                     if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, []))]
-            haftalik = min(len(uygun), cap)
-            gercek_kap += haftalik
-            hafta_dokum.append((wk, len(uygun), haftalik))
-        if gercek_kap < kota_map[a]:
-            _bulundu = True
-            print(f"     ✗ {a}: kota={kota_map[a]}  gerçek_kapasite={gercek_kap} "
-                  f"(açık {gercek_kap - kota_map[a]})")
-            # hangi günler neden düştü? (ilk boş günlerin sebebi)
-            neden = {"izin": 0, "off_t": 0, "vardiya_yasak": 0}
-            for ds in PLAN_GUNLER:
-                d = dt.date.fromisoformat(ds)
-                if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])):
-                    continue                                  # bu gün doldurulabilir
-                if d in izin_map.get(a, set()):
-                    neden["izin"] += 1
-                elif d in off_block_map.get(a, set()):
-                    neden["off_t"] += 1
-                elif gun_vardiyalari.get(ds):
-                    neden["vardiya_yasak"] += 1               # sabah/hamile/11saat/arife
-            print(f"        boş gün sebebi: {neden}")
-    if not _bulundu:
-        print("     gerçek-kapasite: sorun yok → çakışma agent-içi değil, "
-              "kısıtlar-arası (yukarıdaki assumption core'a bak).")
+    # 3) ÖNCEKİ AY TAŞIMASI: (2) sadece "değişken var mı" diye bakar — oysa taşıma
+    #    o değişkenleri x==0 yapmış olabilir (H15 dinlenme yasağı, H12 tavan 0).
+    #    Burada ayın ilk 7 gününde GERÇEKTEN atanabilir agent sayısı hesaplanır.
+    if onceki_calisti:
+        def _tasima_engelli(a, ds, v):
+            """taşıma bu (agent,gün,vardiya)'yı kapatıyor mu?"""
+            d = dt.date.fromisoformat(ds)
+            sv = onceki_son_vardiya.get(a)
+            if sv and d == AY_ILK:                                  # H15: 11 saat
+                b1, e1 = sv.split("-")
+                if bas_dakika(saat[(ds, v)][0]) + 1440 - bitis_abs(b1, e1) < DINLENME:
+                    return "11saat"
+            _cal = onceki_calisti.get(a)
+            if _cal:                                                # H12: kayan pencere tavanı 0 mı
+                for j in range(7):
+                    s = d - dt.timedelta(days=j)
+                    if sum(1 for k in range(7)
+                           if s + dt.timedelta(days=k) < AY_ILK
+                           and s + dt.timedelta(days=k) in _cal) >= 6:
+                        return "7gun"
+            return None
+        _tas_sorun, _sebep = [], {"11saat": 0, "7gun": 0}
+        for ds in PLAN_GUNLER[:7]:
+            d = dt.date.fromisoformat(ds)
+            for v in gun_vardiyalari[ds]:
+                if (ds, v) not in talep:
+                    continue
+                hs = d.weekday() >= 5
+                if not (hs or saat[(ds, v)][0] in GECE_BASLANGIC):
+                    continue                                        # sadece sert-band kovalar
+                kisi, tol = talep[(ds, v)], (HS_TOL if hs else GECE_BUFFER)
+                mus = 0
+                for a in AGENTS:
+                    if (a, ds, v) not in x:
+                        continue
+                    e = _tasima_engelli(a, ds, v)
+                    if e:
+                        _sebep[e] += 1
+                    else:
+                        mus += 1
+                if mus < kisi - tol:
+                    _tas_sorun.append((ds, v, kisi, tol, mus))
+        print(f"  3) taşıma sonrası ilk 7 gün: kapatılan (agent,gün,vardiya) → "
+              f"11 saat {_sebep['11saat']}, 7 gün tavanı {_sebep['7gun']}")
+        if _tas_sorun:
+            print(f"     ⚠ {len(_tas_sorun)} sert-band kova taşıma YÜZÜNDEN dolamıyor:")
+            for ds, v, kisi, tol, mus in _tas_sorun[:20]:
+                print(f"       {ds} {v}: talep={kisi} (min {kisi - tol}) ama "
+                      f"taşıma sonrası müsait agent={mus}")
+        else:
+            print("     ✓ taşıma tek başına sert-bandı kırmıyor "
+                  "(sebep başka kısıtların birleşimi olabilir)")
     raise SystemExit("çözüm yok (INFEASIBLE) — yukarıdaki teşhise bak "
-                     "(assumption core + kota/coverage/değişken-bazlı kapasite).")
+                     "(kota-kapasite, coverage sert-band, önceki ay taşıması).")
 print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
 
 # coverage: band içinde plana ne kadar yakın? (toplam sapma)
