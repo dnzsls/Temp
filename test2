@@ -1414,8 +1414,41 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
     else:
         print("  1) kota-kapasite: sorun yok (her agent kotayı doldurabilir).")
     # 2) sert coverage bandı (hafta sonu ±HS_TOL, gece ±GECE_BUFFER) alt sınırı
-    #    o kovaya atanabilecek agent sayısıyla dolabilir mi?
-    cov_sorun = []
+    #    GERÇEK müsaitlik: "değişken var" yetmez — H13/H14/H16/H16B ve önceki ay
+    #    taşıması (H15/H12) o değişkeni x==0'a çiviliyor olabilir. Hepsi düşülür.
+    def _kapali(a, ds, v):
+        """bu (agent,gün,vardiya) hangi SERT kural yüzünden 0'a çivili? (yoksa None)"""
+        d = dt.date.fromisoformat(ds)
+        bas, bit = saat[(ds, v)]
+        if a in sabah_agents and not (dakika(bas) < dakika(bit) and dakika(bit) <= LIMIT):
+            return "H13_sabah"
+        if a in hafta_sonu_yasak and d.weekday() >= 5:
+            return "H14_hamile_sut"
+        if a in mesai_yok and d in TATIL:
+            return "H16_tatil"
+        if d in ARIFE:                                            # H16B arife atama kuralı
+            if a in arife_kisitli and v != ARIFE_YARIM:
+                return "H16B_arife"
+            if a in mesai_yok and d.weekday() >= 5 and v == ARIFE_YARIM:
+                return "H16B_arife"
+            if a not in arife_kisitli and v == ARIFE_YARIM:
+                return "H16B_arife"
+        sv = onceki_son_vardiya.get(a)
+        if sv and d == AY_ILK:                                    # H15 taşıma: 11 saat
+            b1, e1 = sv.split("-")
+            if bas_dakika(bas) + 1440 - bitis_abs(b1, e1) < DINLENME:
+                return "H15_tasima"
+        _cal = onceki_calisti.get(a)
+        if _cal:                                                  # H12 taşıma: pencere tavanı 0
+            for j in range(7):
+                s = d - dt.timedelta(days=j)
+                if sum(1 for k in range(7)
+                       if s + dt.timedelta(days=k) < AY_ILK
+                       and s + dt.timedelta(days=k) in _cal) >= 6:
+                    return "H12_tasima"
+        return None
+
+    cov_sorun, _kural_say = [], {}
     for (ds, v), kisi in talep.items():
         d = dt.date.fromisoformat(ds)
         hs = d.weekday() >= 5
@@ -1423,15 +1456,27 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         if not (hs or gece):
             continue                                          # sadece sert-band kovalar
         tol = HS_TOL if hs else GECE_BUFFER
-        mus = sum(1 for a in AGENTS if (a, ds, v) in x)       # atanabilecek agent
+        mus, kapali = 0, {}
+        for a in AGENTS:
+            if (a, ds, v) not in x:
+                continue
+            k = _kapali(a, ds, v)
+            if k:
+                kapali[k] = kapali.get(k, 0) + 1
+                _kural_say[k] = _kural_say.get(k, 0) + 1
+            else:
+                mus += 1
         if mus < kisi - tol:                                  # alt bandı dolduramaz
-            cov_sorun.append((ds, v, kisi, tol, mus))
+            cov_sorun.append((ds, v, kisi, tol, mus, kapali))
+    print(f"  2) sert-band kovalarda kapatan kurallar (toplam): {_kural_say}")
     if cov_sorun:
-        print(f"  2) {len(cov_sorun)} sert-band kova alt sınırı DOLAMIYOR:")
-        for ds, v, kisi, tol, mus in cov_sorun[:20]:
-            print(f"       {ds} {v}: talep={kisi} (min {kisi - tol}) ama müsait agent={mus}")
+        print(f"     ⚠ {len(cov_sorun)} sert-band kova alt sınırı DOLAMIYOR:")
+        for ds, v, kisi, tol, mus, kapali in cov_sorun[:20]:
+            print(f"       {ds} {v} ({saat[(ds, v)][0]}-{saat[(ds, v)][1]}): "
+                  f"talep={kisi} (min {kisi - tol}) ama GERÇEK müsait={mus}  "
+                  f"| kapatanlar: {kapali}")
     else:
-        print("  2) coverage sert-band: sorun yok.")
+        print("     ✓ coverage sert-band: sorun yok (gerçek müsaitlik yeterli).")
     # 3) ÖNCEKİ AY TAŞIMASI: (2) sadece "değişken var mı" diye bakar — oysa taşıma
     #    o değişkenleri x==0 yapmış olabilir (H15 dinlenme yasağı, H12 tavan 0).
     #    Burada ayın ilk 7 gününde GERÇEKTEN atanabilir agent sayısı hesaplanır.
