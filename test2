@@ -1,3 +1,11 @@
-import json
-bp = CONFIG_WEEKDAY['queue_configs']['kitle'].get('balance_penalty')
-print(json.dumps(bp, indent=2, ensure_ascii=False))
+mip = CONFIG_WEEKDAY['queue_configs']['kitle']['mip']
+print("cost_inhouse  :", mip['cost_inhouse'])
+print("cost_outsource:", mip['cost_outsource'])      # ← 0.2 mi, yoksa 1.0 mı?
+print("min_overrides :", mip['min_per_shift_overrides'])
+print("balance win   :", [w['name'] for w in
+      CONFIG_WEEKDAY['queue_configs']['kitle']['balance_penalty']['windows']])
+
+d = "2026-08-05"
+mi = results[d]["kitle"]["mip_info"]
+print("outsource günlük:", mi["total_outsource_kisi"], "/ kadro 325")
+print("inhouse   günlük:", mi["total_inhouse_kisi"], "/ kadro 420")
