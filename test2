@@ -1,10 +1,4 @@
-mi = results["2026-08-03"]["kitle"]["mip_info"]
-sc = mi["shift_coverage"]
-
-for shift, n in mi["assignments"].items():
-    if n <= 0:
-        continue
-    info = sc.get(shift, {})
-    if info.get("start") == "00:00":          # SADECE 00:00'da başlayan vardiyalar
-        print(f"{shift:35} {info.get('start')}-{info.get('end')}  "
-              f"{info.get('company'):10} → {n} kişi")
+var = [s for s, i in sc.items()
+       if i.get("start") == "00:00" and i.get("company") == "outsource"]
+print("00:00 outsource vardiyası shift_coverage'ta:", var)
+print("atanan:", {s: mi['assignments'].get(s, 0) for s in var})
