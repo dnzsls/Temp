@@ -1686,68 +1686,59 @@ roster_2.insert(1, "sut_izni",      [int(a in sut_set)    for a in roster_2.inde
 roster_2.insert(2, "hamile",        [int(a in hamile_set) for a in roster_2.index])
 roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.index])
 
-# roster_2 SONUNA özet kolonlar: çalışma / mesai / norm / resmi_tatil / off (HAFTALIK)
-#   Her hafta: W=hafta içi (tatil-dışı) çalışma, E=hafta sonu (tatil-dışı) çalışma,
-#              tat=resmi tatilde çalışma, T=normal iş günü (5 − hafta içi tatil).
-#   mesai_gun       = Σ max(0, (W+E) − T)  → RESMİ TATİL HARİÇ eşiği aşan (fazla mesai)
-#   norm_gun        = Σ min(E, max(0, T − W))  → hafta içi off yerine hafta sonu (swap)
-#   resmi_tatil_gun = Σ tat  → resmi tatilde çalışılan gün (mesaiden AYRI)
+# roster_2 SONUNA özet kolonlar: çalışma / mesai / norm / resmi_tatil / off (AY BAZLI)
+#   W = hafta içi (tatil-dışı) çalışma, E = hafta sonu (tatil-dışı) çalışma,
+#   kota = H17'nin kota_map değeri (ayın iş günü − hafta içi izin).
+#   mesai_gun       = max(0, (W+E) − kota)          → kotayı aşan gün (RESMİ TATİL HARİÇ)
+#   norm_gun        = min(E, max(0, kota − W))      → hafta içi off yerine hafta sonu (takas)
+#   resmi_tatil_gun = resmi tatilde çalışılan gün (mesaiden AYRI)
 #   calisma_gun     = toplam − mesai − resmi_tatil (normal + arife + norm)
 #   off_gun         = off gün sayısı
+#   mesai_gun artık H17'nin MAX_MESAI'siyle AYNI ölçü → rapor ile kısıt çelişmez.
 _gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
 _OFF_ONLY = ["off", "off_t", "off_t2"]                             # off türleri (model off + blok off_t/off_t2)
 _OFF_LIKE = _OFF_ONLY + ["izin"]                                   # çalışma-dışı tüm hücreler (off + izin)
-_hafta = {}                                        # (yıl,hafta) → gün kolonları kategorili
-for c in _gun:
-    d = dt.date.fromisoformat(c)
-    wk = d.isocalendar()[:2]
-    _hafta.setdefault(wk, {"wd": [], "we": [], "tat": [], "wtatil": 0})
-    if d in TATIL:                                  # resmi tatil (hafta içi/sonu farketmez)
-        _hafta[wk]["tat"].append(c)
-        if d.weekday() < 5:
-            _hafta[wk]["wtatil"] += 1
-    elif d.weekday() >= 5:                          # hafta sonu (tatil değil)
-        _hafta[wk]["we"].append(c)
-    else:                                           # hafta içi (tatil değil)
-        _hafta[wk]["wd"].append(c)
+# NOT: eski hafta-bazlı kırılım (_hafta: wd/we/tat/wtatil) kaldırıldı — mesai/norm
+# artık AY bazlı hesaplanıyor, ISO hafta ayrımına ihtiyaç kalmadı.
 
-
-# SINIR HAFTASI TAŞIMASI (H8C): o haftanın önceki aya düşen günleri W/E/T'ye
-# KATILIR. Katılmazsa Temmuz'da 5 gün çalışan agentın 01 Ağustos Cmt'si "norm"
-# görünür (W=0 sanılır) — oysa eşik zaten dolu, o gün MESAİ.
-# Çift sayma yok: önceki ayın KENDİ payı (sadece önceki ay günleriyle hesaplanan
-# mesai/norm) düşülür → bu aya yalnız BU AYIN günlerinden doğan mesai/norm yazılır.
-#   Ör. Temmuz 5 gün + 01 Ağustos: tam hafta mesai=1, Temmuz payı=0 → Ağustos'a 1 mesai.
-#   Ör. ay Pazar başlıyorsa ve önceki ay kısmı zaten 6 gün ise → o fazla gün
-#       önceki ayın mesaisi, buraya YAZILMAZ.
-_TAS_HI = [d for d in TASIMA_GUNLER if d.weekday() < 5]     # önceki ay hafta içi günleri
-_TAS_HS = [d for d in TASIMA_GUNLER if d.weekday() >= 5]    # önceki ay hafta sonu günleri
-_hafta_norm = {}                                   # (agent, hafta) → BU AYA ait norm günü (H29 rengi okur)
+# AY BAZLI mesai/norm — ölçü H17'nin kotasıyla BİREBİR aynı:
+#   mesai = max(0, (hafta içi + hafta sonu çalışma) − kota)     ← H17: çalışma ≤ kota+MAX_MESAI
+#   norm  = min(hafta sonu çalışma, max(0, kota − hafta içi))   ← hafta içi off ↔ hafta sonu takası
+#
+# NEDEN DEĞİŞTİ — eskiden HAFTA bazlıydı: her ISO haftası kendi içinde kapanıyor,
+# eşiğin ALTINDA kalan hafta fazla haftayı telafi etmiyordu (max(0,…) negatifi kesiyor).
+# Sonuç: aynı agentta rapor mesai_gun=3 derken H17 net 1 mesai görüyordu → "MAX_MESAI=2
+# iken 3 mesai yazmış, kural ihlal edilmiş" yanılgısı. Artık tek ölçü.
+#   Ör. 3 hafta 6 gün (Cmt 8 / Pzr 16 / Cmt 22) + 1 hafta 4 gün + 31 Ağu off = 22 gün,
+#       kota 21 → mesai 1 (3 değil), norm 2. Ayın sonundaki iki off, önceki haftaların
+#       hafta sonu çalışmasının borcunu kapatıyor ("borç kapatma" ay içinde geçerli).
+#
+# ÖNCEKİ AY TAŞIMASI BURAYA GİRMEZ: her ayın kendi kotası var, Temmuz'un fazlası
+# Temmuz'un mesaisidir. (Taşıma sert/yumuşak KURALLARDA — H12 7 gün, H15 11 saat,
+# H16C haftalık tavan, H20B off dengesi, H20E mesai eşiği — aynen duruyor.)
+# Resmi tatilde çalışma ikisinin de dışında, ayrı sayaçta.
+_norm_say = {}                                     # agent → kaç hafta sonu günü NORM (H29 rengi okur)
 
 
 def _mesai_norm_say(a):
-    mesai, norm, rtatil = 0, 0, 0
-    _cal = onceki_calisti.get(a, set())             # önceki ayda çalıştığı günler (yoksa boş → taşıma yok)
-    for wk, h in _hafta.items():
-        W   = sum(1 for c in h["wd"]  if roster.at[a, c] not in _OFF_LIKE)
-        E   = sum(1 for c in h["we"]  if roster.at[a, c] not in _OFF_LIKE)
-        tat = sum(1 for c in h["tat"] if roster.at[a, c] not in _OFF_LIKE)
-        w_izin = sum(1 for c in h["wd"] if roster.at[a, c] == "izin")   # hafta içi izin (kotayı düşürür)
-        T = 5 - h["wtatil"] - w_izin                # normal iş günü (hafta içi tatil + İZİN düşülmüş)
-        W_o = E_o = 0                               # önceki aydan taşınan hafta içi / hafta sonu çalışma
-        if wk == SINIR_HAFTA and TASIMA_GUNLER:
-            W_o = sum(1 for d in _TAS_HI if d in _cal)
-            E_o = sum(1 for d in _TAS_HS if d in _cal)
-            T -= onceki_izin_hi.get(a, 0)           # önceki ay hafta içi izni de eşiği düşürür
-        # tam hafta (iki ay birlikte) − önceki ayın kendi payı = BU AYIN mesai/norm'u
-        m_tam = max(0, (W + W_o + E + E_o) - T)
-        n_tam = min(E + E_o, max(0, T - (W + W_o)))
-        m_onc = max(0, (W_o + E_o) - T)             # taşıma yoksa 0 → eski davranış
-        n_onc = min(E_o, max(0, T - W_o))
-        mesai += max(0, m_tam - m_onc)              # RESMİ TATİL HARİÇ eşiği aşan → mesai
-        norm  += max(0, n_tam - n_onc)              # hafta içi off yerine hafta sonu → norm
-        _hafta_norm[(a, wk)] = max(0, n_tam - n_onc)   # H29: bu haftanın kaç HS günü yeşil
-        rtatil += tat                               # resmi tatilde çalışma → ayrı sayaç
+    W = E = rtatil = 0                              # hafta içi / hafta sonu / resmi tatil çalışması
+    for c in _gun:
+        if roster.at[a, c] in _OFF_LIKE:
+            continue                                # off / off_t / off_t2 / izin → çalışma değil
+        d = dt.date.fromisoformat(c)
+        if d in TATIL:
+            rtatil += 1                             # resmi tatilde çalışma → mesaiden AYRI
+        elif d.weekday() >= 5:
+            E += 1
+        else:
+            W += 1
+    kota = kota_map.get(a)                          # H17'nin GERÇEK kotası (yeniden hesaplanmaz)
+    if kota is None:                                # H17 kısıt koymadı (kota=0 / değişkensiz agent)
+        _norm_say[a] = 0
+        return 0, 0, rtatil
+    mesai = max(0, (W + E) - kota)                  # kotayı aşan gün → MESAİ
+    norm  = min(E, max(0, kota - W))                # hafta içi eksiğini kapatan hafta sonu → NORM
+    _norm_say[a] = norm
     return mesai, norm, rtatil
 
 
@@ -2060,17 +2051,26 @@ for _c in roster_2.columns:
         _col_info.append((_d.weekday() >= 5, str(_c)))
     except (ValueError, TypeError):
         _col_info.append(None)
-#  (2) her agent × hafta: hafta sonu çalışmasının KAÇI norm, kaçı mesai — GÜN bazında.
-#      Sayı H22'nin _hafta_norm'undan okunur (formül burada TEKRARLANMAZ) → renkler
-#      norm_gun / mesai_gun kolonlarıyla her zaman birebir tutar; sınır haftası
-#      taşıması (önceki ay çalışması) da otomatik yansır.
-#      Sıra: çalışılan hafta sonu günlerinin İLK `norm` tanesi NORM (yeşil), kalanı MESAİ (sarı).
+#  (2) hafta sonu çalışmasının KAÇI norm, kaçı mesai — GÜN bazında, AY genelinde.
+#      Sayı H22'nin _norm_say'inden okunur (formül burada TEKRARLANMAZ) → renkler
+#      norm_gun / mesai_gun kolonlarıyla her zaman birebir tutar.
+#      SIRA: çalışılan hafta sonu günlerinin SONdan `norm` tanesi NORM (yeşil),
+#      baştakiler MESAİ (sarı). Gerekçe: off'lar genelde hafta sonu çalışmasından
+#      SONRA alınıp borcu kapatır → borcu kapatılan günler sondakilerdir; karşılığı
+#      olmayan en eski hafta sonu günü mesai olarak kalır.
+#      Ör. çalışılan 8/16/22 Ağu, norm=2 → 16 ve 22 yeşil, 8 sarı.
+#      Hafta bazlı değil AY bazlı: mesai/norm artık ayın tamamında netleşiyor (H22).
 _norm_hucre = set()                                  # (agent, gün kolonu) → NORM sayılan hafta sonu günü
+_hs_kolon = sorted(c for c in _gun                   # tatil-dışı hafta sonu kolonları, kronolojik
+                   if dt.date.fromisoformat(c).weekday() >= 5
+                   and dt.date.fromisoformat(c) not in TATIL)
 for _a in roster_2.index:
-    for _wk, _h in _hafta.items():                   # _hafta: H22'de kurulan (wd/we/tat/wtatil) kırılımı
-        _we_calisan = [c for c in sorted(_h["we"]) if roster.at[_a, c] not in _OFF_LIKE]
-        for c in _we_calisan[:_hafta_norm.get((_a, _wk), 0)]:
-            _norm_hucre.add((_a, c))
+    _n = _norm_say.get(_a, 0)
+    if not _n:
+        continue                                     # hiç norm yok → hepsi mesai (sarı)
+    _we_calisan = [c for c in _hs_kolon if roster.at[_a, c] not in _OFF_LIKE]
+    for c in _we_calisan[-_n:]:                      # SONdan norm tanesi → yeşil
+        _norm_hucre.add((_a, c))
 _agents_sirali = list(roster_2.index)
 
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
