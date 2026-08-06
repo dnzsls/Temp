@@ -1745,6 +1745,53 @@ def _mesai_norm_say(a):
 _cal_top = (~roster[_gun].isin(_OFF_LIKE)).sum(axis=1)             # toplam çalışma
 _off     = (roster[_gun].isin(_OFF_ONLY)).sum(axis=1)             # off_gun = off + off_t + off_t2 (A)
 _mn = {a: _mesai_norm_say(a) for a in roster_2.index}
+
+# ── GÜN BAZINDA ETİKET: hangi hafta sonu günü NORM (yeşil), hangisi MESAİ (sarı) ──
+# TOPLAM sayı ay bazlı (_norm_say) — ama DAĞITIM hafta önceliklidir:
+#   1) AYNI HAFTA takası önce: o hafta hafta içi off'u varsa, o haftanın hafta sonu
+#      günü NORM sayılır ("Cuma off ↔ Cumartesi çalışma" göz önünde eşleşsin).
+#   2) Artan norm hakkı (borç BAŞKA haftada kapanmış) sondan geriye dağıtılır.
+# Sadece "sondan N tane" seçmek görsel olarak karıştırıyordu: aynı hafta içinde
+# offu olup hafta sonu çalışan gün MESAİ, norm ise alakasız bir haftada çıkıyordu.
+# Sağlama: Σ_hafta min(o hafta hafta sonu, o hafta hafta içi eksiği) ≤ ay normu
+# (çünkü ay eksiği = Σ hafta eksiği) → 1. adım toplamı asla aşamaz.
+_hafta_kolon = {}                                  # (yıl,hafta) → {"wd": [...], "we": [...]}
+for c in _gun:
+    d = dt.date.fromisoformat(c)
+    if d in TATIL:
+        continue                                   # resmi tatil ikisinin de dışında
+    wk = d.isocalendar()[:2]
+    _hafta_kolon.setdefault(wk, {"wd": [], "we": []})
+    _hafta_kolon[wk]["we" if d.weekday() >= 5 else "wd"].append(c)
+_hs_kolon = sorted(c for c in _gun                 # tatil-dışı hafta sonu kolonları, kronolojik
+                   if dt.date.fromisoformat(c).weekday() >= 5
+                   and dt.date.fromisoformat(c) not in TATIL)
+
+
+def _norm_gunleri(a):
+    """agentın NORM (yeşil) sayılacak hafta sonu gün kolonları."""
+    kalan = _norm_say.get(a, 0)
+    if not kalan:
+        return set()
+    secili = []
+    for wk in sorted(_hafta_kolon):                # 1) aynı hafta takası
+        h = _hafta_kolon[wk]
+        T = sum(1 for c in h["wd"] if roster.at[a, c] != "izin")        # kotaya giren hafta içi gün
+        W = sum(1 for c in h["wd"] if roster.at[a, c] not in _OFF_LIKE)  # o hafta çalışılan hafta içi
+        we = [c for c in h["we"] if roster.at[a, c] not in _OFF_LIKE]
+        k = min(len(we), max(0, T - W))             # o haftaki eksiği kapatan hafta sonu günü
+        if k:
+            secili += we[-k:]
+    secili = secili[:kalan]                         # güvenlik (teorik olarak zaten ≤ kalan)
+    if len(secili) < kalan:                         # 2) borç başka haftada kapanmış → sondan tamamla
+        _sec = set(secili)
+        artan = [c for c in _hs_kolon
+                 if roster.at[a, c] not in _OFF_LIKE and c not in _sec]
+        secili += artan[-(kalan - len(secili)):]
+    return set(secili)
+
+
+_norm_hucre = {(a, c) for a in roster_2.index for c in _norm_gunleri(a)}
 # calisma_gun = toplam − mesai − resmi_tatil (normal + arife + norm; overtime ve tatil hariç)
 roster_2["calisma_gun"]     = [int(_cal_top[a]) - _mn[a][0] - _mn[a][2] for a in roster_2.index]
 roster_2["mesai_gun"]       = [_mn[a][0] for a in roster_2.index]     # resmi tatil HARİÇ
@@ -2051,26 +2098,10 @@ for _c in roster_2.columns:
         _col_info.append((_d.weekday() >= 5, str(_c)))
     except (ValueError, TypeError):
         _col_info.append(None)
-#  (2) hafta sonu çalışmasının KAÇI norm, kaçı mesai — GÜN bazında, AY genelinde.
-#      Sayı H22'nin _norm_say'inden okunur (formül burada TEKRARLANMAZ) → renkler
-#      norm_gun / mesai_gun kolonlarıyla her zaman birebir tutar.
-#      SIRA: çalışılan hafta sonu günlerinin SONdan `norm` tanesi NORM (yeşil),
-#      baştakiler MESAİ (sarı). Gerekçe: off'lar genelde hafta sonu çalışmasından
-#      SONRA alınıp borcu kapatır → borcu kapatılan günler sondakilerdir; karşılığı
-#      olmayan en eski hafta sonu günü mesai olarak kalır.
-#      Ör. çalışılan 8/16/22 Ağu, norm=2 → 16 ve 22 yeşil, 8 sarı.
-#      Hafta bazlı değil AY bazlı: mesai/norm artık ayın tamamında netleşiyor (H22).
-_norm_hucre = set()                                  # (agent, gün kolonu) → NORM sayılan hafta sonu günü
-_hs_kolon = sorted(c for c in _gun                   # tatil-dışı hafta sonu kolonları, kronolojik
-                   if dt.date.fromisoformat(c).weekday() >= 5
-                   and dt.date.fromisoformat(c) not in TATIL)
-for _a in roster_2.index:
-    _n = _norm_say.get(_a, 0)
-    if not _n:
-        continue                                     # hiç norm yok → hepsi mesai (sarı)
-    _we_calisan = [c for c in _hs_kolon if roster.at[_a, c] not in _OFF_LIKE]
-    for c in _we_calisan[-_n:]:                      # SONdan norm tanesi → yeşil
-        _norm_hucre.add((_a, c))
+#  (2) hangi hafta sonu hücresi NORM (yeşil) — H22'de hesaplanan _norm_hucre kümesi.
+#      Formül burada TEKRARLANMAZ → renkler norm_gun / mesai_gun kolonlarıyla
+#      her zaman birebir tutar. Kural (H22): önce AYNI HAFTA takası (o hafta
+#      hafta içi off'u olan agentın o haftaki hafta sonu günü), artan hak sondan.
 _agents_sirali = list(roster_2.index)
 
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
