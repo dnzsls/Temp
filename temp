@@ -1,5 +1,20 @@
-import inspect
-from weekend_forecast_final import <o fonksiyonun_adı>   # subqueue min hesaplayan fonksiyon
-# ya da doğrudan modülün kaynağında:
-import weekend_forecast_final, inspect
-print("hours desteği:", "is_slot_in_shift(slot, hours['start']" in inspect.getsource(weekend_forecast_final))
+# tip başına günlük talep vs takım boyutları
+_hi = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5]
+_tal = {}
+for ds in _hi:
+    for v in gun_vardiyalari[ds]:
+        if (ds, v) in talep:
+            _tal.setdefault(saat[(ds, v)][0], []).append(talep[(ds, v)])
+
+print("tip → günlük talep (medyan / min-max / kaç gün):")
+for bas in sorted(_tal):
+    s = pd.Series(_tal[bas])
+    print(f"  {bas}:  medyan {s.median():5.1f}   {s.min():3d}-{s.max():3d}   ({len(s)} gün)")
+
+_boy = pd.Series({T: len(u) for T, u in takimlar.items()})
+print(f"\ntakım boyutu: medyan {_boy.median():.0f}  min {_boy.min()}  max {_boy.max()}  "
+      f"({len(_boy)} takım, toplam {_boy.sum()} kişi)")
+print("boyut dağılımı:", _boy.value_counts().sort_index().to_dict())
+print(f"\ngünlük toplam hafta içi talep: medyan "
+      f"{pd.Series([sum(talep[(ds, v)] for v in gun_vardiyalari[ds] if (ds, v) in talep) for ds in _hi]).median():.0f}"
+      f"  |  çalışabilir agent: {len(AGENTS)}")
