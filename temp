@@ -1,6 +1,20 @@
-_p = pd.DataFrame([{"tarih": ds[5:], "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
-                    "tip": saat[(ds, v)][0], "talep": talep[(ds, v)]}
-                   for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5
-                   for v in gun_vardiyalari[ds] if (ds, v) in talep])
-print(_p.pivot_table(index=["tarih", "gun"], columns="tip", values="talep",
-                     aggfunc="sum", fill_value=0).to_string())
+print(f"sabahçı: {len(sabah_agents)} / {len(AGENTS)}  |  "
+      f"geç+gece tipe girebilen: {len(AGENTS) - len(sabah_agents)}  "
+      f"(15:00+00:00 haftalık ihtiyaç ~67)")
+_ts = pd.Series({T: sum(1 for a in u if a in sabah_agents) for T, u in takimlar.items()})
+print("takım başına sabahçı:", _ts.value_counts().sort_index().to_dict())
+print(f"hiç sabahçısı olmayan takım: {(_ts == 0).sum()} / {len(_ts)}")
+
+# bölünmelerde AZINLIKTA kalan üyeler kim, nereye gidiyor
+_hi = df_sonuc[df_sonuc["tarih"].map(lambda ds: dt.date.fromisoformat(ds).weekday() < 5)].copy()
+_hi["hafta"] = _hi["tarih"].map(lambda ds: dt.date.fromisoformat(ds).isocalendar()[1])
+_hi["tip"]   = _hi["saat"].str.split("-").str[0]
+_u   = _hi.groupby(["takim", "hafta", "agent"])["tip"].first().reset_index()
+_ana = _u.groupby(["takim", "hafta"])["tip"].agg(lambda s: s.value_counts().idxmax())
+_u["ana"] = list(_ana.loc[list(zip(_u["takim"], _u["hafta"]))])
+_sap = _u[_u["tip"] != _u["ana"]]
+print(f"\nayrışan (üye,hafta): {len(_sap)} / {len(_u)}")
+print("  ayrışan nereye gitti :", _sap["tip"].value_counts().to_dict())
+print("  takımın ana tipi     :", _sap["ana"].value_counts().to_dict())
+print(f"  ayrışanların sabahçı oranı: "
+      f"{sum(1 for a in _sap['agent'] if a in sabah_agents)}/{len(_sap)}")
