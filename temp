@@ -1,20 +1,12 @@
-print(f"sabahçı: {len(sabah_agents)} / {len(AGENTS)}  |  "
-      f"geç+gece tipe girebilen: {len(AGENTS) - len(sabah_agents)}  "
-      f"(15:00+00:00 haftalık ihtiyaç ~67)")
-_ts = pd.Series({T: sum(1 for a in u if a in sabah_agents) for T, u in takimlar.items()})
-print("takım başına sabahçı:", _ts.value_counts().sort_index().to_dict())
-print(f"hiç sabahçısı olmayan takım: {(_ts == 0).sum()} / {len(_ts)}")
+print(f"durum : {solver.StatusName(status)}")
+print(f"amaç  : {solver.ObjectiveValue():.0f}")
+print(f"alt sınır: {solver.BestObjectiveBound():.0f}")
+_gap = (solver.ObjectiveValue() - solver.BestObjectiveBound()) / max(1, abs(solver.ObjectiveValue()))
+print(f"gap   : %{100*_gap:.1f}")
 
-# bölünmelerde AZINLIKTA kalan üyeler kim, nereye gidiyor
-_hi = df_sonuc[df_sonuc["tarih"].map(lambda ds: dt.date.fromisoformat(ds).weekday() < 5)].copy()
-_hi["hafta"] = _hi["tarih"].map(lambda ds: dt.date.fromisoformat(ds).isocalendar()[1])
-_hi["tip"]   = _hi["saat"].str.split("-").str[0]
-_u   = _hi.groupby(["takim", "hafta", "agent"])["tip"].first().reset_index()
-_ana = _u.groupby(["takim", "hafta"])["tip"].agg(lambda s: s.value_counts().idxmax())
-_u["ana"] = list(_ana.loc[list(zip(_u["takim"], _u["hafta"]))])
-_sap = _u[_u["tip"] != _u["ana"]]
-print(f"\nayrışan (üye,hafta): {len(_sap)} / {len(_u)}")
-print("  ayrışan nereye gitti :", _sap["tip"].value_counts().to_dict())
-print("  takımın ana tipi     :", _sap["ana"].value_counts().to_dict())
-print(f"  ayrışanların sabahçı oranı: "
-      f"{sum(1 for a in _sap['agent'] if a in sabah_agents)}/{len(_sap)}")
+_tw = _u.groupby(["takim", "hafta"])["tip"].nunique()
+_fazla = int((_tw - 1).sum())
+print(f"\ntakım-hafta: {len(_tw)}  |  tek tip: {(_tw == 1).sum()}  |  "
+      f"tip sayısı dağılımı: {_tw.value_counts().sort_index().to_dict()}")
+print(f"H19 gerçekleşen ceza: {W_TAKIM * _fazla}  → amacın %"
+      f"{100 * W_TAKIM * _fazla / solver.ObjectiveValue():.0f}'i")
