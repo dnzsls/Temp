@@ -531,6 +531,8 @@ TASIMA_GUNLER = sorted(d for i in range(1, AY_ILK.weekday() + 1)   # Pzt başlar
                        for d in [AY_ILK - dt.timedelta(days=i)]
                        if d not in GUN_SET)                 # planlanan ayın kendi günü ise taşıma değil
 ONCEKI_GUNLER = sorted(set(PENCERE_GUNLER) | set(TASIMA_GUNLER))   # okunacak tüm önceki ay günleri
+SINIR_AY_GUN  = [ds for ds in PLAN_GUNLER                   # sınır haftasının BU AYA düşen günleri
+                 if dt.date.fromisoformat(ds).isocalendar()[:2] == SINIR_HAFTA]   # (ör. 01-02 Ağu)
 
 onceki_gun, onceki_izin, onceki_off = {}, {}, {}   # agent → sınır İSO HAFTASINDA çalışma/izin/off gün sayısı
 onceki_offt          = {}                          # agent → off_t + off_t2 gün sayısı (blok ama kota nötr)
@@ -540,6 +542,17 @@ onceki_izin_hi       = {}                          # agent → HAFTA İÇİ izin
 onceki_musait_hi     = {}                          # agent → HAFTA İÇİ müsait gün (çalışma+off; izin/off_t hariç) → H16C
 onceki_tip           = {}                          # agent → hafta içi vardiya tipi (başlangıç); çok tipliyse None
 onceki_son_vardiya   = {}                          # agent → önceki ayın SON gününün vardiyası ('15:00-24:00') / None
+onceki_off_hi        = {}                          # agent → sınır haftasında HAFTA İÇİ off günü
+onceki_eksik         = {}                          # agent → SINIR HAFTASI ALACAĞI (norm hakkı), tavanlı
+# SINIR HAFTASI ALACAĞI — sınır ISO haftası TEK BİR HAFTA gibi değerlendirilir:
+#   o haftanın hafta içi günleri önceki ayda, hafta sonu günleri BU ayda.
+#   Önceki ayda hafta içi 4 gün çalışıp 1 gün OFF olmuşsa, o haftanın 5. günü
+#   bu ayın hafta sonuna düşer → o gün MESAİ değil NORM (takas).
+#   alacak = sınır haftasındaki hafta içi off günü  (izin/off_t hariç — onlar
+#            kotayı düşürür ya da bloktur, telafi gerektirmez)
+#   tavan  = sınır haftasının bu aya düşen gün sayısı (ör. 2 → Cmt+Pzr)
+# Daha geriye BAKILMAZ: önceki ayın diğer haftaları bu hesaba girmez (veri de
+# her zaman tüm ayı içermiyor). Kullanımı: H17 tavan, H22 mesai/norm, H29 renk.
 _tasima_uyari        = []                          # (agent, gün, sorun)
 
 
@@ -594,6 +607,9 @@ else:
         onceki_musait_hi[a] = sum(1 for d in TASIMA_GUNLER          # hafta içi MÜSAİT gün:
                                   if d.weekday() < 5                #   çalışma + off  (izin/off_t hariç)
                                   and (d in calisti or _gv.get(d) == "off"))
+        onceki_off_hi[a] = sum(1 for d in TASIMA_GUNLER             # hafta içi OFF → sınır haftası alacağı
+                               if d.weekday() < 5 and _gv.get(d) == "off")
+        onceki_eksik[a] = min(onceki_off_hi[a], len(SINIR_AY_GUN))  # tavan: bu aya düşen gün sayısı
         tipler = {_vardiya_parse(_gv[d])[0] for d in TASIMA_GUNLER      # hafta içi tip (H20 sürekliliği)
                   if d in calisti and d.weekday() < 5}
         if len(tipler) == 1:
@@ -642,6 +658,9 @@ else:
     _tip_dag = pd.Series([onceki_tip.get(a) for a in _agent_set & _tablo_set
                           if onceki_tip.get(a)]).value_counts()
     print(f"  hafta içi vardiya tipi dağılımı: {_tip_dag.to_dict()}")
+    _ek_dag = pd.Series({a: onceki_eksik.get(a, 0) for a in _es}).value_counts().sort_index()
+    print(f"  SINIR HAFTASI ALACAĞI (hafta içi off → bu ayın hafta sonu NORM sayılır): "
+          f"{_ek_dag.to_dict()}  |  bu aya düşen gün: {SINIR_AY_GUN} (tavan {len(SINIR_AY_GUN)})")
     if _tasima_uyari:
         print(f"  ⚠ {len(_tasima_uyari)} uyarı (ilk 10): {_tasima_uyari[:10]}")
     else:
@@ -1061,6 +1080,7 @@ print(f"akşam/gece ayda ≤{MAX_AKSAM_HAFTA} hafta (sert): {ng} agent, "
 ozel_agents = hafta_sonu_yasak | mesai_yok       # hamile/süt + mesaiye_kalamaz
 tatil_gun = len(TATIL)                            # resmi tatil günü sayısı (H16'dan)
 kota_map, ust_map = {}, {}                        # H23 raporu GERÇEK değerleri okusun (sapma olmasın)
+n_kredi = 0                                       # sınır haftası alacağı verilen agent sayısı
 
 for a in AGENTS:
     tum = []
@@ -1081,7 +1101,20 @@ for a in AGENTS:
     tatil_var = [x[(a, ds, v)] for ds in PLAN_GUNLER      # resmi tatilde çalışma değişkenleri
                  if dt.date.fromisoformat(ds) in TATIL
                  for v in gun_vardiyalari[ds] if (a, ds, v) in x]
-    ust = kota + _pay + tatil_gun                         # TOPLAM tavan (tüm tatiller çalışılırsa)
+    # SINIR HAFTASI ALACAĞI (H8C): önceki ayın son haftasında hafta içi off almışsa,
+    # o haftanın 5. günü bu ayın hafta sonuna düşer → MESAİ sayılmasın. Alacak ancak
+    # o gün FİİLEN çalışılırsa açılır (kredi ≤ sınır hafta sonu çalışması), yoksa
+    # agent alacağı ayın ortasındaki sıradan bir günde harcardı.
+    _ek = onceki_eksik.get(a, 0)
+    kredi = 0
+    if _ek:
+        sinir_var = [x[(a, ds, v)] for ds in SINIR_AY_GUN
+                     for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        if sinir_var:
+            kredi = model.NewIntVar(0, _ek, f"kredi_{a}")
+            model.Add(kredi <= sum(sinir_var))
+            n_kredi += 1
+    ust = kota + _pay + tatil_gun + _ek                   # TOPLAM tavan (tatil + alacak dahil)
     kota_map[a], ust_map[a] = kota, ust                  # H23 raporu için gerçek değerler
     model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
     # SERT tavan — resmi tatilde çalışma HARİÇ: mesai_gun (H22) ile BİREBİR aynı ölçü.
@@ -1090,11 +1123,12 @@ for a in AGENTS:
     # veriliyordu → agent tatili çalışmasa bile o payı NORMAL bir günde kullanıp
     # mesai_gun = MAX_MESAI + tatil_gun'a çıkabiliyordu (MAX_MESAI=2 iken 3 mesai).
     # Artık pay ancak tatil FİİLEN çalışılırsa açılıyor.
-    model.Add(calisma - sum(tatil_var) <= kota + _pay)
+    model.Add(calisma - sum(tatil_var) - kredi <= kota + _pay)
     model.Add(calisma <= ust)                             # toplam tavan (yukarıdakinin sonucu)
 
 print(f"çalışma aralığı: {len(AGENTS)} agent  (kota=iş günü−haftaiçi_izin; "
-      f"normal kota..kota+{MAX_MESAI}(mesai)+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)")
+      f"normal kota..kota+{MAX_MESAI}(mesai)+{tatil_gun}(tatil), özel flag={len(ozel_agents)} =kota)"
+      + (f"  |  sınır haftası alacağı: {n_kredi} agent" if n_kredi else ""))
 
 
 # %% [HÜCRE 17B] — RESMİ TATİL HAFTASI: ÖZEL AGENT HAFTALIK KOTA (sert) ─
@@ -1726,11 +1760,21 @@ _OFF_LIKE = _OFF_ONLY + ["izin"]                                   # çalışma-
 #       kota 21 → mesai 1 (3 değil), norm 2. Ayın sonundaki iki off, önceki haftaların
 #       hafta sonu çalışmasının borcunu kapatıyor ("borç kapatma" ay içinde geçerli).
 #
-# ÖNCEKİ AY TAŞIMASI BURAYA GİRMEZ: her ayın kendi kotası var, Temmuz'un fazlası
-# Temmuz'un mesaisidir. (Taşıma sert/yumuşak KURALLARDA — H12 7 gün, H15 11 saat,
-# H16C haftalık tavan, H20B off dengesi, H20E mesai eşiği — aynen duruyor.)
-# Resmi tatilde çalışma ikisinin de dışında, ayrı sayaçta.
-_norm_say = {}                                     # agent → kaç hafta sonu günü NORM (H29 rengi okur)
+# ÖNCEKİ AYDAN TEK İSTİSNA — SINIR HAFTASI ALACAĞI (onceki_eksik, H8C):
+# Sınır ISO haftasının hafta içi günleri önceki ayda, hafta sonu günleri BU ayda.
+# O haftada hafta içi off almışsa (ör. 4 gün çalışma + 1 off), haftanın 5. günü
+# bu ayın hafta sonuna düşer → MESAİ değil NORM. Alacak ancak o gün fiilen
+# çalışıldıysa kullanılır ve sınır haftasının bu aya düşen gün sayısıyla tavanlı.
+# Daha geriye BAKILMAZ (önceki ayın diğer haftaları hesaba girmez; veri de
+# her zaman tüm ayı içermiyor). H17'nin tavanı da aynı alacağı taşır → tutarlı.
+# Bunun dışında her ayın kendi kotası geçerlidir. (Taşımanın diğer kullanımları —
+# H12 7 gün, H15 11 saat, H16C haftalık tavan, H20B off dengesi, H20E mesai
+# eşiği — aynen duruyor.) Resmi tatilde çalışma ikisinin de dışında, ayrı sayaçta.
+_norm_say  = {}                                    # agent → kaç hafta sonu günü NORM (H29 rengi okur)
+_kredi_say = {}                                    # agent → sınır haftası alacağından FİİLEN kullanılan
+_SINIR_HS = [c for c in _gun                       # sınır haftasının BU AYA düşen (tatil-dışı) günleri
+             if dt.date.fromisoformat(c).isocalendar()[:2] == SINIR_HAFTA
+             and dt.date.fromisoformat(c) not in TATIL]
 
 
 def _mesai_norm_say(a):
@@ -1747,11 +1791,16 @@ def _mesai_norm_say(a):
             W += 1
     kota = kota_map.get(a)                          # H17'nin GERÇEK kotası (yeniden hesaplanmaz)
     if kota is None:                                # H17 kısıt koymadı (kota=0 / değişkensiz agent)
-        _norm_say[a] = 0
+        _norm_say[a] = _kredi_say[a] = 0
         return 0, 0, rtatil
-    mesai = max(0, (W + E) - kota)                  # kotayı aşan gün → MESAİ
-    norm  = min(E, max(0, kota - W))                # hafta içi eksiğini kapatan hafta sonu → NORM
-    _norm_say[a] = norm
+    # SINIR HAFTASI ALACAĞI (H8C/H17 ile AYNI ifade): önceki ayın son haftasında
+    # hafta içi off almışsa, bu ayın sınır hafta sonunda çalıştığı gün MESAİ değil
+    # NORM. Alacak ancak o gün fiilen çalışıldıysa kullanılır → min(...).
+    kredi = min(onceki_eksik.get(a, 0),
+                sum(1 for c in _SINIR_HS if roster.at[a, c] not in _OFF_LIKE))
+    mesai = max(0, (W + E) - kota - kredi)          # kotayı (+alacağı) aşan gün → MESAİ
+    norm  = min(E, max(0, kota - W) + kredi)        # hafta içi eksiğini + alacağı kapatan hafta sonu → NORM
+    _norm_say[a], _kredi_say[a] = norm, kredi
     return mesai, norm, rtatil
 
 
@@ -1792,7 +1841,10 @@ def _norm_gunleri(a):
         T = sum(1 for c in h["wd"] if roster.at[a, c] != "izin")        # kotaya giren hafta içi gün
         W = sum(1 for c in h["wd"] if roster.at[a, c] not in _OFF_LIKE)  # o hafta çalışılan hafta içi
         we = [c for c in h["we"] if roster.at[a, c] not in _OFF_LIKE]
-        k = min(len(we), max(0, T - W))             # o haftaki eksiği kapatan hafta sonu günü
+        eksik = max(0, T - W)                       # o haftanın hafta içi açığı
+        if wk == SINIR_HAFTA:                       # sınır haftasının hafta içi günleri ÖNCEKİ AYDA →
+            eksik += _kredi_say.get(a, 0)           #   açık oradan gelir (H8C alacağı)
+        k = min(len(we), eksik)                     # o haftaki eksiği kapatan hafta sonu günü
         if k:
             secili += we[-k:]
     secili = secili[:kalan]                         # güvenlik (teorik olarak zaten ≤ kalan)
