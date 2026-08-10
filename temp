@@ -37,15 +37,18 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        mesai_gun'ü ile birebir aynı ölçü (koşulsuz payda mesai_gun 3 çıkıyordu).
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
     H19 takım tek tip: takım o HAFTA tek vardiya tipinde (hafta içi; resmi tatil haftası muaf).
-                       Ayrılan üye yasak değil, CEZALI → aşağıda H19 yumuşak kalemi.
+                       Üye ayrılamaz — TEK istisna fiziksel imkânsızlık (sabahçı üye ↔ geç/gece
+                       tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
     H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu + resmi tatil haftası serbest).
                        Gösterge (agent_tip) H19'da kurulur, bu hücre onu kullanır.
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
-    H19 takım sapması : W_TAKIM(10) × takımının haftalık tipinden AYRILAN her (üye, hafta).
-                        Üye başına gradyanlı → 19/1 bölünme 1, 10/10 bölünme 10 birim.
-                        Kalibrasyon: 10 → sapma AGIR_ESIK(15)'e kadar takım bozulmaz.
+    H19 takım sapması : W_TAKIM(10) × fiziksel imkânsızlıkla ayrılan her (üye, hafta)
+                        → "kimseyi mahsur bırakmayan tipi seç" baskısı.
+    H19B geç vardiya geçmiş adaleti: W_GECMIS(5) × (takımın geçmiş geç-vardiya oranı − ortalama)+
+                        × 100, takım o hafta GEÇ tipe (≥GEC_BASLANGIC 15:00) atanırsa.
+                        Kaynak df_gecmis (takım × shift_adj × gün). Yeni değişken yok.
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta içi off (surplus): ağırlık = W_HI_OFF + W_SURPLUS_OFF×(1−w[gün]) × hafta içi off [sıkı/açık günde off pahalı, bol(yüksek net) günde ucuz → offları bol güne + hafta sonuna iter; w = H8B gün-net normalize].
     H20C hafta sonu adaleti: W_ADALET_HS(12)×(hs günü−FAIR_HS)+ + W_ADALET_HS2(12)×(hs günü−FAIR_HS−1)+ [konveks].
@@ -105,8 +108,13 @@ PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 RESMI_TATILLER   = []          # manuel resmi tatil tarihleri, ör. ["2026-07-15", "2026-08-30"]
 ARIFE_GUNLERI    = []          # arife (yarım gün) tarihleri, ör. ["2026-06-16"]; öğleden sonra resmi tatil
 ARIFE_SON_BASLANGIC = "09:00"  # arife günü flag'liler (süt/hamile/mesai) bu saate KADAR başlayabilir (4 saat → 13:00)
-SERBEST_COVERAGE = 5           # serbest bölge: talep ± SERBEST bedava (ceza yok) — HAFTA İÇİ
-AGIR_ESIK        = 15          # bunu aşan sapma AĞIR cezalı (konveks → sapma yayılır) — HAFTA İÇİ
+# HAFTA İÇİ coverage esnekliği — takım tipi SERT olduğu için genişletildi (5→10, 15→25):
+# takım artık bölünemediğinden model boşluğu "birkaç kişi kaydırarak" kapatamıyor,
+# tip başına kişi sayısı takım boyutlarına yuvarlanıyor. Dar serbest bölge bunu
+# cezaya çeviriyor ve takımı bölmeyi kârlı kılıyordu. Hafta sonu bandına (HS_TOL)
+# DOKUNULMADI — orada takım kuralı zaten yok.
+SERBEST_COVERAGE = 10          # serbest bölge: talep ± SERBEST bedava (ceza yok) — HAFTA İÇİ
+AGIR_ESIK        = 25          # bunu aşan sapma AĞIR cezalı (konveks → sapma yayılır) — HAFTA İÇİ
 GECE_BASLANGIC   = ("00:00", "24:00")   # gece vardiyası başlangıçları
 GECE_BUFFER      = 3           # hafta içi gece kovaları SERT band: talep ± 3 (fazlalık gündüzde kalır)
 HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (coverage'a tam otursun; takım bütünlüğü yok → boşaltılmasın)
@@ -135,7 +143,14 @@ W_EKSIK_HI  = 0                # HAFTA İÇİ eksik cezası (0 = mevcut davranı
 #   W_TAKIM ~ 10              → sapma AGIR_ESIK'e (15) kadar takımı bozmaz;
 #                               ötesinde W_COVERAGE2(20) devreye girince böler
 #   W_TAKIM > W_COVERAGE2(20) → coverage ne olursa olsun takım bütün kalır
-W_TAKIM      = 10              # takımdan ayrılan her (üye, hafta) için ceza (H19)
+W_TAKIM      = 10              # takımdan ayrılan her (üye, hafta) için ceza (H19).
+                               # Ayrılma artık SERT olarak sınırlı (sadece fiziksel
+                               # imkânsızlık) → bu ceza "kimseyi mahsur bırakmayan tipi
+                               # seç" yönünde çalışıyor, bölünmeyi satın alma aracı değil.
+# GEÇMİŞ GEÇ-VARDİYA ADALETİ (H19B) — df_gecmis'ten
+GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
+W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
+                               # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 4                # hafta içi off TABAN cezası (=norm) → "önce mesai" (2 dolmadan norm yapma)
 W_SURPLUS_OFF = 10             # hafta içi off SURPLUS ek cezası: ağırlık=W_HI_OFF+W_SURPLUS_OFF×(1−w[gün]) → sıkı(açık) günde off pahalı, bol(yüksek net) günde ucuz → offları bol güne iter (H8B/H20B)
@@ -308,6 +323,28 @@ if df_onceki is not None:
     print(df_onceki.head())
 else:
     print("df_onceki yok (önceki ay taşıması devre dışı kalacak — H8C)")
+
+# df_gecmis: TAKIM bazlı geçmiş vardiya dağılımı — H19B geç-vardiya adaleti için.
+# Kolonlar: teamleader_name | working_main_group | shift_adj | total_gun_sayisi
+#   ör. "büşra şen | samsun_kitle | 09:00-18:00 | 45"
+# Takım anahtarı H6 ile AYNI kurulur: working_main_group + " | " + teamleader_name.
+df_gecmis = globals().get("df_gecmis")
+if df_gecmis is not None:
+    df_gecmis = df_gecmis.copy()
+    df_gecmis.columns = [str(c).strip().lower() for c in df_gecmis.columns]
+    for _c in ("teamleader_name", "working_main_group", "shift_adj"):
+        df_gecmis[_c] = df_gecmis[_c].astype(str).str.strip()
+    df_gecmis["total_gun_sayisi"] = (pd.to_numeric(df_gecmis["total_gun_sayisi"],
+                                                   errors="coerce").fillna(0).astype(int))
+    df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
+                          + df_gecmis["teamleader_name"])          # H6 ile aynı anahtar
+    print(f"\ndf_gecmis: {df_gecmis.shape[0]} satır  |  "
+          f"{df_gecmis['takim'].nunique()} takım  |  "
+          f"toplam {df_gecmis['total_gun_sayisi'].sum()} gün")
+    print(f"df_gecmis shift_adj: {df_gecmis['shift_adj'].value_counts().head(10).to_dict()}")
+    print(df_gecmis.head())
+else:
+    print("df_gecmis yok (geç-vardiya geçmiş adaleti devre dışı kalacak — H19B)")
 
 
 # %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
@@ -1294,20 +1331,75 @@ for T, uyeler in takimlar.items():
             uye_tipler = [bas for bas in TIP_SET if (a, wk, bas) in agent_tip]
             if not uye_tipler:
                 continue                       # o hafta hiç çalışamıyor (izin/off_t)
+            # SERT: üye takımının tipinde kalmak ZORUNDA. Tek istisna FİZİKSEL
+            # imkânsızlık — takımın seçtiği tipi üye yapamıyorsa (ör. sabahçı üye,
+            # takım 15:00/geceye gitti → o tipte değişkeni yok). Kapı şart, yoksa
+            # o üye hiçbir vardiyada çalışamaz ve kota (sert) tutmaz → INFEASIBLE.
+            # Eskiden sapan HER ZAMAN açıktı ve ceza ödenerek bölünme satın
+            # alınabiliyordu; artık ancak yapamadığı tip seçilirse 1 olabilir.
+            yapamaz = [yv[bas] for bas in secenek if (a, wk, bas) not in agent_tip]
             sv = model.NewBoolVar(f"sap_{a}_{wk[0]}{wk[1]}")
             takim_sapan[(a, wk)] = sv
+            if yapamaz:
+                model.Add(sv <= sum(yapamaz))  # yapamadığı tip seçilmediyse ayrılamaz
+            else:
+                model.Add(sv == 0)             # her tipi yapabiliyor → ayrılma HAKKI YOK
             for bas in uye_tipler:
-                # takımın tipindeyse serbest; değilse sapan=1 (cezalı kaçış kapısı).
-                # Kapı ŞART: sabahçı üye takımı 15:00/00:00'a giderse hiçbir vardiyada
-                # çalışamaz, kota sert olduğu için model INFEASIBLE olurdu.
                 model.Add(agent_tip[(a, wk, bas)] <= yv.get(bas, 0) + sv)
 
 if takim_sapan:
     amac.append(W_TAKIM * sum(takim_sapan.values()))
 
 print(f"takım bütünlüğü (haftalık): {len(takimlar)} takım, {n_y} (takım,hafta) tek-tip "
-      f"seçimi [SERT]  |  {len(takim_sapan)} (üye,hafta) sapma kapısı (ağ. {W_TAKIM})")
+      f"seçimi [SERT]  |  {len(takim_sapan)} (üye,hafta) sapma değişkeni "
+      f"— ayrılma SADECE fiziksel imkânsızlıkta (ağ. {W_TAKIM})")
 print(f"  agent-hafta-tip göstergesi: {len(agent_tip)} (H20 ile ortak)")
+
+
+# %% [HÜCRE 19B] — GEÇ VARDİYA GEÇMİŞ ADALETİ (takım bazında, df_gecmis) ─
+# Geç vardiya (GEC_BASLANGIC=15:00 ve sonrası + gece) yükü TAKIMLAR arasında
+# yıllara yayılsın: geçmişte adil payın üstünde geç vardiya yapmış takım, bu ay
+# geç bir tipe atanırsa CEZALI. Az yapmış takım cezasız → model onları seçer.
+#
+# Ölçü ORAN (gün sayısı değil): büyük takımın toplam günü doğal olarak fazla.
+#   oran[T]  = takımın geç gün sayısı ÷ toplam gün sayısı
+#   ortalama = Σ geç gün ÷ Σ toplam gün        (ağırlıklı, tüm takımlar)
+#   katsayı[T] = round(W_GECMIS × max(0, oran[T] − ortalama) × 100)
+# Ceza doğrudan takim_tip değişkeninin KATSAYISINA giriyor → yeni değişken YOK,
+# model büyümüyor. Takım o hafta geç tipe giderse katsayı kadar ceza yazılır.
+# df_gecmis yoksa ya da W_GECMIS=0 ise hücre hiçbir şey yapmaz.
+_gec_dk = dakika(GEC_BASLANGIC)                    # "15:00" → 900 (gece 00:00→1440 dahil)
+gecmis_katsayi = {}                                # takım → geç tip başına ek ceza
+if df_gecmis is not None and W_GECMIS:
+    _gec = df_gecmis.copy()
+    _gec["_gec_mi"] = _gec["shift_adj"].map(                        # başlangıç ≥ 15:00 mı
+        lambda s: bool(_vardiya_parse(s)) and dakika(_vardiya_parse(s)[0]) >= _gec_dk)
+    _gec["_gec_gun"] = _gec["total_gun_sayisi"].where(_gec["_gec_mi"], 0)
+    _tk = _gec.groupby("takim")[["_gec_gun", "total_gun_sayisi"]].sum()
+    _tk.columns = ["gec", "top"]                                    # takım → geç / toplam gün
+    _ort = _tk["gec"].sum() / max(1, _tk["top"].sum())              # ağırlıklı ortalama oran
+    for T in takimlar:                                              # SADECE modeldeki takımlar
+        if T not in _tk.index or _tk.at[T, "top"] == 0:
+            continue                                                # geçmiş verisi yok → nötr
+        _oran = _tk.at[T, "gec"] / _tk.at[T, "top"]
+        _kat = round(W_GECMIS * max(0.0, _oran - _ort) * 100)
+        if _kat:
+            gecmis_katsayi[T] = _kat
+    _n_gec = 0
+    for (T, wk, bas), yv_ in takim_tip.items():
+        if T in gecmis_katsayi and dakika(bas) >= _gec_dk:
+            amac.append(gecmis_katsayi[T] * yv_)
+            _n_gec += 1
+    _eslesen = len(set(takimlar) & set(_tk.index))
+    print(f"geç vardiya geçmiş adaleti: df_gecmis'te {_eslesen}/{len(takimlar)} takım eşleşti  |  "
+          f"ortalama geç oran %{100 * _ort:.1f}  |  cezalı takım {len(gecmis_katsayi)}  |  "
+          f"{_n_gec} (takım,hafta,geç tip) terimi (ağ. {W_GECMIS})")
+    if gecmis_katsayi:
+        _ilk = sorted(gecmis_katsayi.items(), key=lambda kv: -kv[1])[:5]
+        print(f"  en cezalı 5 takım (geçmişte en çok geç çalışan): {_ilk}")
+else:
+    print("geç vardiya geçmiş adaleti: KAPALI "
+          f"({'df_gecmis yok' if df_gecmis is None else 'W_GECMIS=0'})")
 
 
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
