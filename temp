@@ -53,7 +53,10 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                         mesai günü zorunlu olarak hafta sonu günü → mesaiyi fiilen bu eşik sınırlar.
     H20D akşam/gece adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+; eşik türetilir.
     H20E haftalık yığılma: W_ADALET_MESAI(6) × (HAFTALIK BRÜT 5-üstü − FAIR_MESAI)+ → 6,6,6,4,0 gibi
-                        yığılmayı engeller. AY BAZLI mesai değil (o H17'de sert); norm'a dokunmaz.
+                        yığılmayı engeller. Norm'a dokunmaz.
+    H20E ay bazlı mesai adaleti (KOŞULLU): W_ADALET_MESAI × (mesai_gun − FAIR_MESAI_AY)+.
+                        FAIR_MESAI_AY talepten türetilir; SADECE MAX_MESAI'den küçükse kurulur
+                        (eşitse H17'nin sert tavanı aynı işi yapıyor → ölü terim olurdu).
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -152,7 +155,12 @@ FAIR_HS     = None             # agent başına adil HAFTA SONU günü (norm + m
                                # hafta içi gün) → bu eşik mesaiyi de bağlar. MAX_MESAI'yi
                                # yükseltsen bile fiilen sınırlayan kural budur.
 W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
-FAIR_MESAI  = 2                # "adil" fazla mesai (rotasyon hedefi, YUMUŞAK); üstü cezalı ama yasak değil
+FAIR_MESAI  = 2                # HAFTALIK yığılma eşiği (H20E): kaç hafta 5 günü aşabilir
+FAIR_MESAI_AY = None           # AY BAZLI adil mesai günü (H20E ikinci kısım)
+                               # → ceil((Σ talep − Σ kota) ÷ mesai yapabilen agent)
+                               # Terim SADECE türetilen değer MAX_MESAI'den küçükse kurulur:
+                               # eşitse sert tavan (H17) işi zaten yapıyor, ceza ölü kalır.
+                               # MAX_MESAI'yi 3-4'e çıkarırsan kendiliğinden devreye girer.
 MAX_MESAI   = 2                # SERT tavan: agent ay içinde EN FAZLA bu kadar mesai (ust=kota+MAX_MESAI). Ekip 3-4 yapabilir
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
@@ -1537,6 +1545,50 @@ for a in AGENTS:
 print(f"haftalık yığılma (6-günlük hafta): {nmes} agent, adil pay={FAIR_MESAI} hafta "
       f"(ağ. {W_ADALET_MESAI}; ölçü HAFTALIK brüt — H22'nin aylık mesai_gun'ünden farklı)"
       + (f"  |  sınır haftası taşıması: {nmes_tas} agent" if nmes_tas else ""))
+
+
+# ── AY BAZLI MESAİ ADALETİ (koşullu; H22'nin mesai_gun'ü ile AYNI ölçü) ────
+# ölçü: mesai_gun = (çalışma − resmi tatilde çalışma) − kota − sınır haftası alacağı
+# adil pay: (Σ talep − Σ kota) ÷ mesai YAPABİLEN agent  → talepten türetilir.
+# Terim SADECE FAIR_MESAI_AY < MAX_MESAI ise kurulur. Eşitse H17'nin sert tavanı
+# zaten aynı sınırı koyuyor → ceza hiç devreye girmez, boşuna ~1 değişken/agent
+# eklemenin anlamı yok (model zaten yakınsamakta zorlanıyor).
+# MAX_MESAI 3-4'e çıkarıldığında adil pay yerinde kalır, tavan yükselir → aradaki
+# fark cezalı olur ve mesai kişiler arasında yayılır. Manuel müdahale gerekmez.
+if FAIR_MESAI_AY is None:
+    _mesai_ihtiyac = max(0, sum(talep.values()) - sum(kota_map.values()))
+    _mesai_uygun = len([a for a in kota_map if a not in ozel_agents])   # özel flag mesai yapamaz
+    FAIR_MESAI_AY = (-(-_mesai_ihtiyac // _mesai_uygun) if _mesai_uygun else MAX_MESAI)
+    print(f"FAIR_MESAI_AY otomatik: (Σtalep {sum(talep.values())} − Σkota "
+          f"{sum(kota_map.values())}) = {_mesai_ihtiyac} mesai-günü ÷ {_mesai_uygun} "
+          f"uygun agent = {_mesai_ihtiyac / max(1, _mesai_uygun):.2f} → FAIR_MESAI_AY = "
+          f"{FAIR_MESAI_AY}")
+
+nma = 0
+if FAIR_MESAI_AY < MAX_MESAI:
+    for a in AGENTS:
+        if a not in kota_map or a in ozel_agents:
+            continue                                   # özel flag: H17'de pay 0 → mesai zaten yok
+        tum = [x[(a, ds, v)] for ds in PLAN_GUNLER
+               for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        tat_v = [x[(a, ds, v)] for ds in PLAN_GUNLER
+                 if dt.date.fromisoformat(ds) in TATIL
+                 for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+        if not tum:
+            continue
+        # eşik: kota + adil pay + sınır haftası alacağı. Alacak için ÜST SINIR
+        # (onceki_eksik) kullanılıyor — H17'deki `kredi` değişkeninin tavanı;
+        # yani ceza tarafı bilerek MÜSAMAHALI, kimseyi haksız cezalandırmaz.
+        fz = model.NewIntVar(0, MAX_MESAI, f"aymesai_{a}")
+        model.Add(fz >= sum(tum) - sum(tat_v) - kota_map[a]
+                  - FAIR_MESAI_AY - onceki_eksik.get(a, 0))
+        amac.append(W_ADALET_MESAI * fz)
+        nma += 1
+    print(f"ay bazlı mesai adaleti: {nma} agent, adil pay={FAIR_MESAI_AY} "
+          f"(tavan MAX_MESAI={MAX_MESAI}, ağ. {W_ADALET_MESAI})")
+else:
+    print(f"ay bazlı mesai adaleti: KURULMADI — adil pay {FAIR_MESAI_AY} = "
+          f"MAX_MESAI {MAX_MESAI}, sert tavan (H17) zaten aynı sınırı koyuyor")
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
