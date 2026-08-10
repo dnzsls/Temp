@@ -35,7 +35,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        kota = ayın iş günü − hafta içi izin. Özel flag (hamile/süt/mesai) → pay 0.
                        Tatil payı KOŞULLU: ancak tatil fiilen çalışılırsa açılır → H22'nin
                        mesai_gun'ü ile birebir aynı ölçü (koşulsuz payda mesai_gun 3 çıkıyordu).
-    H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off.
+    H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off — CIFT_HS_OFF ile aç/kapa (varsayılan True).
     H19 takım tek tip: takım o HAFTA tek vardiya tipinde (hafta içi; resmi tatil haftası muaf).
                        Üye ayrılamaz — TEK istisna fiziksel imkânsızlık (sabahçı üye ↔ geç/gece
                        tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
@@ -118,6 +118,9 @@ AGIR_ESIK        = 25          # bunu aşan sapma AĞIR cezalı (konveks → sap
 GECE_BASLANGIC   = ("00:00", "24:00")   # gece vardiyası başlangıçları
 GECE_BUFFER      = 3           # hafta içi gece kovaları SERT band: talep ± 3 (fazlalık gündüzde kalır)
 HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (coverage'a tam otursun; takım bütünlüğü yok → boşaltılmasın)
+CIFT_HS_OFF      = True        # H18 aç/kapa: True → her agent ayda EN AZ 1 tam Cmt+Pzr off (SERT)
+                               # False → kural hiç kurulmaz. Hafta sonu kapasitesi sıkışırsa
+                               # (sert band + takım tipi + adalet eşikleri) ilk gevşetilecek yer.
 MIN_KOVA         = 1           # SERT taban: talebi olan HER kova en az bu kadar kişi almalı
                                # (min(MIN_KOVA, talep) → talebi 0 olan kova zorlanmaz).
                                # Gerekçe: hafta içi gündüzde sert band yok + W_EKSIK_HI=0 →
@@ -1230,20 +1233,24 @@ for ds in PLAN_GUNLER:
             hs_ciftleri.append((ds, pzr))
 
 n = 0
-for a in AGENTS:
-    cift_off = []
-    for cmt, pzr in hs_ciftleri:
-        gun_var = [x[(a, cmt, v)] for v in gun_vardiyalari[cmt] if (a, cmt, v) in x]
-        gun_var += [x[(a, pzr, v)] for v in gun_vardiyalari[pzr] if (a, pzr, v) in x]
-        co = model.NewBoolVar(f"ciftoff_{a}_{cmt}")
-        for xv in gun_var:
-            model.Add(co + xv <= 1)              # o hafta sonu çalışıyorsa co=0
-        cift_off.append(co)
-    if cift_off:
-        model.Add(sum(cift_off) >= 1)            # en az bir tam hafta sonu off
-        n += 1
-
-print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), {len(hs_ciftleri)} hafta sonu")
+if CIFT_HS_OFF:
+    for a in AGENTS:
+        cift_off = []
+        for cmt, pzr in hs_ciftleri:
+            gun_var = [x[(a, cmt, v)] for v in gun_vardiyalari[cmt] if (a, cmt, v) in x]
+            gun_var += [x[(a, pzr, v)] for v in gun_vardiyalari[pzr] if (a, pzr, v) in x]
+            co = model.NewBoolVar(f"ciftoff_{a}_{cmt}")
+            for xv in gun_var:
+                model.Add(co + xv <= 1)          # o hafta sonu çalışıyorsa co=0
+            cift_off.append(co)
+        if cift_off:
+            model.Add(sum(cift_off) >= 1)        # en az bir tam hafta sonu off
+            n += 1
+    print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), "
+          f"{len(hs_ciftleri)} hafta sonu")
+else:
+    print(f"çift hafta sonu off: KAPALI (CIFT_HS_OFF=False) — {len(hs_ciftleri)} "
+          f"hafta sonu çifti var ama kısıt kurulmadı")
 
 
 # %% [HÜCRE 19] — TAKIM BÜTÜNLÜĞÜ (takım hafta boyu TEK tip + cezalı istisna) ─
