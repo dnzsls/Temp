@@ -13,7 +13,9 @@ kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
 KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
   SERT KISITLAR (ihlal edilemez):
-    H9  müsaitlik    : izinli gün → değişken yok (atanamaz).
+    H9  müsaitlik    : izin + off_t2 → değişken yok (atanamaz). off_t YUMUŞAK: değişken açılır,
+                       model karşılayamazsa çalıştırır ve W_OFF_T cezası yer (H20B-3);
+                       karşılanmayan gün Excel'de KIRMIZI (H29 lejantı).
     H10 hafta sonu cov.: hafta sonu kovaları talep ± HS_TOL(2) sıkı band (tam otursun).
     H10 min kova     : talebi olan HER kova ≥ min(MIN_KOVA(1), talep) — aktif vardiya boş kalamaz.
     H10 gece coverage: hafta içi gece kovaları (00:00/24:00) talep ± GECE_BUFFER(3) bandı.
@@ -49,6 +51,9 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H19B geç vardiya geçmiş adaleti: W_GECMIS(5) × (takımın geçmiş geç-vardiya oranı − ortalama)+
                         × 100, takım o hafta GEÇ tipe (≥GEC_BASLANGIC 15:00) atanırsa.
                         Kaynak df_gecmis (takım × shifts_asj × gün). Yeni değişken yok.
+    H20B off_t talebi : W_OFF_T(25) × off_t günü ÇALIŞILIRSA → "verebildiğini ver".
+                        off_t2 SERT (bloklu, hep karşılanır); off_t yumuşak. Karşılanmayan
+                        gün Excel'de KIRMIZI. off_t günleri hafta içi off cezasının dışında.
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
     H20B hafta içi off (surplus): ağırlık = W_HI_OFF + W_SURPLUS_OFF×(1−w[gün]) × hafta içi off [sıkı/açık günde off pahalı, bol(yüksek net) günde ucuz → offları bol güne + hafta sonuna iter; w = H8B gün-net normalize].
     H20C hafta sonu adaleti: W_ADALET_HS(12)×(hs günü−FAIR_HS)+ + W_ADALET_HS2(12)×(hs günü−FAIR_HS−1)+ [konveks].
@@ -154,6 +159,12 @@ W_TAKIM      = 10              # takımdan ayrılan her (üye, hafta) için ceza
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
 W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
                                # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
+# off_t YUMUŞAK oldu (off_t2 SERT kaldı): off_t günü artık bloklanmıyor, değişken
+# açılıyor ve model o gün ÇALIŞTIRIRSA ceza yiyor → "karşılayabildiğini karşıla".
+# Karşılanmayan talep Excel'de KIRMIZI hücre olarak görünür (H29 lejantı).
+# Kalibrasyon: W_OFF_T, hafta içi off cezasının (W_HI_OFF+surplus = 4..14) ÜSTÜNDE
+# olmalı, yoksa model off vermeyi zaten pahalı bulur ve talebi hiç karşılamaz.
+W_OFF_T     = 25               # off_t talebi KARŞILANMAZSA (o gün çalışılırsa) kişi-gün cezası
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 4                # hafta içi off TABAN cezası (=norm) → "önce mesai" (2 dolmadan norm yapma)
 W_SURPLUS_OFF = 10             # hafta içi off SURPLUS ek cezası: ağırlık=W_HI_OFF+W_SURPLUS_OFF×(1−w[gün]) → sıkı(açık) günde off pahalı, bol(yüksek net) günde ucuz → offları bol güne iter (H8B/H20B)
@@ -188,7 +199,11 @@ MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar 
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
-DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
+ONCEKI_GOSTER = True           # Excel roster'ına ÖNCEKİ AY günlerini de bas (salt okunur, H29).
+                               # Aralık = TASIMA_GUNLER (sınır ISO haftasının önceki aya düşen
+                               # günleri, ör. 27-31 Tem). df_onceki yoksa kendiliğinden atlanır.
+
+DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]   # Pazar = "Paz" (Excel gösterimiyle aynı)
 
 
 # %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
@@ -444,19 +459,24 @@ tatil_haftalari = {d.isocalendar()[:2] for d in _TATIL if d.weekday() < 5}
 
 # 3) agent başına birleştir → izin_map (kotadan düşer) + off_block_map (blok, kota DÜŞMEZ)
 izin_map = {}
-off_block_map = {}
+off_block_map = {}                                     # off_t2 → SERT blok (değişken açılmaz)
+off_soft_map = {}                                      # off_t  → YUMUŞAK talep (değişken açılır, cezalı)
 off_tip_map = {}                                       # code -> {tarih: off_t/off_t2} (roster etiketi)
 for _, row in df_tam.iterrows():
     code = str(row["agent_user_code"]).strip()
     izin = set()
     off_block = set()
+    off_soft = set()
     off_tip = {}
     for d, tipi in tip_map.get(code, {}).items():      # df_izin+df_off tarihlerini tipe ayır
         if tipi == "izin":
             izin.add(d)
-        else:                                          # off_t / off_t2 → blok ama kota düşmez
+        elif tipi == "off_t2":                         # SERT: her zaman karşılanır → blok
             off_block.add(d)
-            off_tip[d] = tipi                          # tipini sakla (off_t / off_t2 ayrı göster)
+            off_tip[d] = tipi
+        else:                                          # off_t → YUMUŞAK talep, blok DEĞİL
+            off_soft.add(d)                            #   karşılanmazsa H20B(3) cezası
+            off_tip[d] = tipi
     if _b(row, "idari_izinli_flg") or _b(row, "dogum_izni_flg"):
         izin |= GUN_SET                                # tüm ay
     sut = _b(row, "sut_izni_flg")                      # süt izni → tatil haftası emilimi
@@ -474,10 +494,12 @@ for _, row in df_tam.iterrows():
     #  • hafta sonu izin → anlamsız (zaten off) → kaldır ("off" görünür).
     if sut or _b(row, "hamile_flg"):
         off_block = set()                                # off_t/off_t2 yok say → normal çalışma
+        off_soft = set()
         off_tip = {}
         izin = {d for d in izin if d.weekday() < 5}      # hafta sonu izinleri at → "off"
     izin_map[code] = izin
     off_block_map[code] = off_block
+    off_soft_map[code] = off_soft
     off_tip_map[code] = off_tip
 
 df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
@@ -485,7 +507,9 @@ df_tam["izin_gun_sayisi"] = df_tam["agent_user_code"].map(
 
 tam_ay = sum(1 for v in izin_map.values() if v >= GUN_SET)
 print(f"izin girişi olan agent: {sum(1 for v in izin_map.values() if v)}  |  "
-      f"off_block (off_t/off_t2) olan agent: {sum(1 for v in off_block_map.values() if v)}")
+      f"off_t2 (SERT blok) olan agent: {sum(1 for v in off_block_map.values() if v)}  |  "
+      f"off_t (YUMUŞAK talep) olan agent: {sum(1 for v in off_soft_map.values() if v)} "
+      f"({sum(len(v) for v in off_soft_map.values())} kişi-gün)")
 print(f"tüm-ay izinli (idari/doğum): {tam_ay}")
 print("en çok izinli 10 agent:")
 print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
@@ -608,6 +632,7 @@ onceki_tip           = {}                          # agent → hafta içi vardiy
 onceki_son_vardiya   = {}                          # agent → önceki ayın SON gününün vardiyası ('15:00-24:00') / None
 onceki_off_hi        = {}                          # agent → sınır haftasında HAFTA İÇİ off günü
 onceki_eksik         = {}                          # agent → SINIR HAFTASI ALACAĞI (norm hakkı), tavanlı
+onceki_gunluk        = {}                          # agent → {tarih: ham değer} — Excel'de salt okunur basım (H29)
 # SINIR HAFTASI ALACAĞI — sınır ISO haftası TEK BİR HAFTA gibi değerlendirilir:
 #   o haftanın hafta içi günleri önceki ayda, hafta sonu günleri BU ayda.
 #   Önceki ayda hafta içi 4 gün çalışıp 1 gün OFF olmuşsa, o haftanın 5. günü
@@ -661,6 +686,7 @@ else:
             elif v not in ({"izin", "off"} | OFF_T_DEGERLERI):
                 _tasima_uyari.append((a, d.isoformat(), f"tanınmayan değer: {v}"))
         onceki_calisti[a] = calisti
+        onceki_gunluk[a] = dict(_gv)                         # ham değerler → H29 salt-okunur kolonlar
         # sınır ISO haftası sayaçları (haftalık kurallar) — pencere günleri BURAYA girmez
         onceki_gun[a]  = len(calisti & set(TASIMA_GUNLER))
         onceki_izin[a] = sum(1 for d in TASIMA_GUNLER if _gv.get(d) == "izin")
@@ -733,13 +759,16 @@ else:
 
 # %% [HÜCRE 9] — CP-SAT MODEL + KARAR DEĞİŞKENLERİ ─────────────────────
 # x[(agent, gün, vardiya)] = 1 → o agent o gün o vardiyada çalışıyor.
-# BLOK gün için değişken AÇILMAZ (o gün atanamaz): izin ∪ off_block (off_t/off_t2).
-# Fark kota'da: izin kotadan düşer (H17), off_block düşmez — ama ikisi de burada bloklu.
+# BLOK gün için değişken AÇILMAZ (o gün atanamaz): izin ∪ off_block (SADECE off_t2).
+#   izin   → bloklu, kotadan DÜŞER (H17)
+#   off_t2 → bloklu, kota düşmez (SERT talep, her zaman karşılanır)
+#   off_t  → BLOKLU DEĞİL (yumuşak talep): değişken açılır, model karşılamazsa
+#            H20B(3) cezası yer → "verebildiğini ver". Karşılanmayan gün Excel'de kırmızı.
 model = cp_model.CpModel()
 
 x = {}
 for a in AGENTS:
-    bloklu = izin_map.get(a, set()) | off_block_map.get(a, set())   # izin + off_t/off_t2
+    bloklu = izin_map.get(a, set()) | off_block_map.get(a, set())   # izin + off_t2
     for ds in PLAN_GUNLER:
         if dt.date.fromisoformat(ds) in bloklu:
             continue
@@ -748,7 +777,7 @@ for a in AGENTS:
 
 ust_sinir = len(AGENTS) * len(talep)
 print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
-      f"blok (izin+off_t/off_t2) günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
+      f"blok (izin+off_t2) günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
 
 
 # %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST, SERT BAND YOK) ─────
@@ -1486,21 +1515,40 @@ for a in AGENTS:
 #     off göstergesi = 1 − Σx (o gün çalışmadıysa 1). gun_off_w yoksa nötr 0.5.
 n2 = 0
 for a in AGENTS:
+    _soft = off_soft_map.get(a, set())         # off_t günleri bu cezanın DIŞINDA
     for ds in PLAN_GUNLER:
         d = dt.date.fromisoformat(ds)
         if d.weekday() >= 5 or d in TATIL:
             continue                          # hafta sonu / resmi tatil → bu cezanın dışında
+        if d in _soft:
+            continue                          # TALEP EDİLMİŞ off (off_t) → model tercihi değil;
+                                              #   kendi cezası (3) var, burada iki kez sayılmasın
         gunluk = [x[(a, ds, v)] for v in gun_vardiyalari[ds] if (a, ds, v) in x]
         if not gunluk:
-            continue                          # o gün değişken yok (izin/off_t) → off sayılmaz
+            continue                          # o gün değişken yok (izin/off_t2) → off sayılmaz
         agirlik = W_HI_OFF + round(W_SURPLUS_OFF * (1 - gun_off_w.get(ds, 0.5)))
         amac.append(agirlik * (1 - sum(gunluk)))   # off (1−çalıştı) → gün ağırlığı kadar ceza
         n2 += 1
+
+# (3) off_t = YUMUŞAK off talebi → KARŞILANMAZSA ceza ("verebildiğini ver").
+#     off_t2 bloklu olduğu için buraya girmez (zaten her zaman karşılanır).
+#     Ceza o gün ÇALIŞMAYA konuyor → model önce bu günleri off bırakmaya çalışır.
+#     W_OFF_T, hafta içi off cezasından (4..14) yüksek seçilmeli; yoksa off vermek
+#     zaten pahalı olduğu için talep hiç karşılanmaz.
+n3 = 0
+for a in AGENTS:
+    for d in sorted(off_soft_map.get(a, set())):
+        ds = d.isoformat()
+        gunluk = [x[(a, ds, v)] for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
+        if gunluk:
+            amac.append(W_OFF_T * sum(gunluk))     # o gün çalıştırılırsa ceza
+            n3 += 1
 
 print(f"haftalık off dengesi: {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})"
       + (f"  |  sınır haftası taşıması: {n1_tas} agent" if n1_tas else ""))
 print(f"hafta içi off (surplus ağırlıklı): {n2} (agent,gün) ceza terimi "
       f"(taban {W_HI_OFF} + surplus {W_SURPLUS_OFF}×(1−w) → sıkı gün pahalı)")
+print(f"off_t (yumuşak talep): {n3} (agent,gün) talep — karşılanmazsa ağ. {W_OFF_T}")
 
 
 # %% [HÜCRE 20C] — HAFTA SONU ADALETİ (agent bazında, adil-pay üstü ceza) ─
@@ -1893,30 +1941,43 @@ agent_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
 # roster matrisi: TÜM agentlar × gün; hücre = izin / saat / off
 # index = (takım, agent) → aynı takım üyeleri yan yana
 hucreler = []
+offt_karsilanmadi = set()                            # (agent, tarih) → off_t istendi ama ÇALIŞTIRILDI
+offt_karsilandi = set()                              # (agent, tarih) → off_t istendi ve off verildi
 for a in AGENTS:
     izinli = izin_map.get(a, set())
     off_tipli = off_tip_map.get(a, {})               # tarih → off_t / off_t2
+    soft = off_soft_map.get(a, set())                # off_t (yumuşak) günleri
     tk = agent_takim.get(a, "")
     for ds in PLAN_GUNLER:
-        if dt.date.fromisoformat(ds) in izinli:
+        d = dt.date.fromisoformat(ds)
+        if d in izinli:
             deger = "izin"
-        elif dt.date.fromisoformat(ds) in off_tipli:
-            deger = off_tipli[dt.date.fromisoformat(ds)]   # off_t / off_t2 (blok, kota nötr)
+        elif d in off_tipli and d not in soft:       # off_t2 → SERT blok, kesin off
+            deger = off_tipli[d]
         else:
             deger = "off"
             for v in gun_vardiyalari[ds]:
                 if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
                     bas, bit = saat[(ds, v)]
                     # arife günü flag'li agent → yarım gün: gerçek bitiş = başlangıç + 4 saat (≈13:00)
-                    if dt.date.fromisoformat(ds) in ARIFE and a in arife_kisitli:
+                    if d in ARIFE and a in arife_kisitli:
                         m = dakika(bas) + 4 * 60
                         bit = f"{m // 60:02d}:{m % 60:02d}"
                     deger = f"{bas}-{bit}"
                     # resmi tatilde çalışma = MESAİ (overtime) → başına etiket (arife değil)
-                    if dt.date.fromisoformat(ds) in TATIL:
+                    if d in TATIL:
                         deger = f"mesai {deger}"
                     break
+            if d in soft:                            # off_t YUMUŞAK talebi → karşılandı mı
+                if deger == "off":
+                    deger = "off_t"                  # karşılandı → normal off_t hücresi
+                    offt_karsilandi.add((a, ds))
+                else:
+                    offt_karsilanmadi.add((a, ds))   # karşılanmadı → H29'da KIRMIZI
         hucreler.append({"takim": tk, "agent": a, "tarih": ds, "deger": deger})
+
+print(f"off_t talebi: {len(offt_karsilandi)} karşılandı  |  "
+      f"{len(offt_karsilanmadi)} KARŞILANMADI (Excel'de kırmızı)")
 
 roster = pd.DataFrame(hucreler).pivot(index="agent", columns="tarih", values="deger")
 roster.insert(0, "takim", roster.index.map(lambda a: agent_takim.get(a, "")))  # takım = kolon
@@ -2035,12 +2096,15 @@ _hs_kolon = sorted(c for c in _gun                 # tatil-dışı hafta sonu ko
 
 
 def _norm_gunleri(a):
-    """agentın NORM (yeşil) sayılacak hafta sonu gün kolonları."""
+    """(NORM günleri, TELAFİ günleri) — ikisi de kotaya sayılır, ücretli mesai DEĞİL.
+    NORM   = AYNI HAFTA takası (o haftanın hafta içi off'unun karşılığı)
+    TELAFİ = BAŞKA HAFTADAKİ fazla off'un telafisi (aynı haftada karşılığı yok)
+    """
     kalan = _norm_say.get(a, 0)
     if not kalan:
-        return set()
-    secili = []
-    for wk in sorted(_hafta_kolon):                # 1) aynı hafta takası
+        return set(), set()
+    ayni = []
+    for wk in sorted(_hafta_kolon):                # 1) aynı hafta takası → NORM
         h = _hafta_kolon[wk]
         T = sum(1 for c in h["wd"] if roster.at[a, c] != "izin")        # kotaya giren hafta içi gün
         W = sum(1 for c in h["wd"] if roster.at[a, c] not in _OFF_LIKE)  # o hafta çalışılan hafta içi
@@ -2050,17 +2114,22 @@ def _norm_gunleri(a):
             eksik += _kredi_say.get(a, 0)           #   açık oradan gelir (H8C alacağı)
         k = min(len(we), eksik)                     # o haftaki eksiği kapatan hafta sonu günü
         if k:
-            secili += we[-k:]
-    secili = secili[:kalan]                         # güvenlik (teorik olarak zaten ≤ kalan)
-    if len(secili) < kalan:                         # 2) borç başka haftada kapanmış → sondan tamamla
-        _sec = set(secili)
+            ayni += we[-k:]
+    ayni = ayni[:kalan]                             # güvenlik (teorik olarak zaten ≤ kalan)
+    telafi = []
+    if len(ayni) < kalan:                           # 2) borç BAŞKA haftada kapanmış → TELAFİ
+        _sec = set(ayni)
         artan = [c for c in _hs_kolon
                  if roster.at[a, c] not in _OFF_LIKE and c not in _sec]
-        secili += artan[-(kalan - len(secili)):]
-    return set(secili)
+        telafi = artan[-(kalan - len(ayni)):]
+    return set(ayni), set(telafi)
 
 
-_norm_hucre = {(a, c) for a in roster_2.index for c in _norm_gunleri(a)}
+_norm_hucre, _telafi_hucre = set(), set()          # (agent, gün) → NORM (yeşil) / TELAFİ (açık yeşil)
+for _a in roster_2.index:
+    _n, _t = _norm_gunleri(_a)
+    _norm_hucre |= {(_a, c) for c in _n}
+    _telafi_hucre |= {(_a, c) for c in _t}
 # calisma_gun = toplam − mesai − resmi_tatil (normal + arife + norm; overtime ve tatil hariç)
 roster_2["calisma_gun"]     = [int(_cal_top[a]) - _mn[a][0] - _mn[a][2] for a in roster_2.index]
 roster_2["mesai_gun"]       = [_mn[a][0] for a in roster_2.index]     # resmi tatil HARİÇ
@@ -2340,75 +2409,158 @@ df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
-from openpyxl.styles import Font, PatternFill
 
-_BOLD    = Font(bold=True)
-_KIRMIZI = PatternFill("solid", fgColor="FFC7CE")          # off → açık kırmızı
-_TURUNCU = PatternFill("solid", fgColor="FFC000")          # resmi tatil çalışması → turuncu
-_SARI    = PatternFill("solid", fgColor="FFEB9C")          # hafta sonu MESAİ haftası → sarı
-_YESIL   = PatternFill("solid", fgColor="C6EFCE")          # hafta sonu NORM haftası → yeşil
-_GRI     = PatternFill("solid", fgColor="D9D9D9")          # off_t / off_t2 (blok, kota nötr) → gri
+# ── GÖRÜNÜM: hücre metni + kategori (renk anahtarı) ────────────────────
+# Roster'ın İÇ değerleri sade kalır ("off", "izin", "09:00-18:00" ...) çünkü H22'nin
+# mesai/norm hesabı onları okuyor. Excel'e basarken burada OKUNUR metne çevriliyor:
+# etiket üst satır, saat alt satır (LEJANT sayfasındaki gösterimle birebir).
+from openpyxl.styles import Font, PatternFill, Alignment
 
-# Excel roster başlıkları: gün kolonlarına gün adı ekle (haftaları ayırt et) → "06-01 Pzt"
-def _gun_etiket(c):
-    try:
-        d = dt.date.fromisoformat(str(c))
-        return f"{str(c)[5:]} {DAY_TR[d.weekday()]}"
-    except (ValueError, TypeError):
-        return c                                    # takim/flag/özet kolonları → değişmez
-roster_xl = roster_2.rename(columns=_gun_etiket)
+_BOLD = Font(bold=True)
+_WRAP = Alignment(wrap_text=True, horizontal="center", vertical="center")
 
-# Renklendirme hazırlığı:
-#  (1) kolon → (hafta sonu mu, kolon adı); takim/flag/özet kolonları None
-_col_info = []
-for _c in roster_2.columns:
-    try:
-        _d = dt.date.fromisoformat(str(_c))
-        _col_info.append((_d.weekday() >= 5, str(_c)))
-    except (ValueError, TypeError):
-        _col_info.append(None)
-#  (2) hangi hafta sonu hücresi NORM (yeşil) — H22'de hesaplanan _norm_hucre kümesi.
-#      Formül burada TEKRARLANMAZ → renkler norm_gun / mesai_gun kolonlarıyla
-#      her zaman birebir tutar. Kural (H22): önce AYNI HAFTA takası (o hafta
-#      hafta içi off'u olan agentın o haftaki hafta sonu günü), artan hak sondan.
-_agents_sirali = list(roster_2.index)
+# kategori → dolgu rengi (None = dolgusuz).  LEJANT sayfası bu sözlükten üretilir.
+LEJANT = [
+    ("İZİN",              "izin",       "CCC0DA", "Yıllık izin / idari izin — HARD, model değiştiremez"),
+    ("OFF_T",             "off_t",      "DCE6F1", "Agent off talebi (off_t) — SOFT, model karşıladı"),
+    ("OFF_T2",            "off_t2",     "8DB4E2", "Agent off talebi (off_t2) — HARD, her zaman karşılanır"),
+    ("OFF",               "off",        None,     "Modelin kendi verdiği off (talep yok)"),
+    ("RESMİ TATİL MESAİ", "resmi_tatil", "FFC000", "Resmi tatil gününde çalışma (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("ARİFE",             "arife",      "FCD5B4", "Arife günü — hamile/süt/mesaiye kalamaz agent, 09:00-13:00"),
+    ("ARİFE MESAİ",       "arife_mesai", "E6B8D9", "Arife günü — diğer agentlar (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("NORM + vardiya",    "norm",       "C6EFCE", "Hafta sonu çalışma, AYNI HAFTA hafta içi off'un karşılığı (kota İÇİNDE)"),
+    ("MESAİ + vardiya",   "mesai",      "FFD966", "Hafta sonu çalışma, AYLIK kotayı aşan (ücretli mesai)"),
+    ("TELAFİ + vardiya",  "telafi",     "D9EAD3", "Hafta sonu çalışma, BAŞKA haftadaki fazla off'un telafisi (ücretli mesai DEĞİL)"),
+    ("kırmızı hücre",     "offt_kars",  "FF7C80", "off_t talebi vardı ama KARŞILANMADI — agent o gün çalışıyor"),
+    ("dolgusuz",          "normal",     None,     "Normal hafta içi çalışma"),
+    (f"--- ÖNCEKİ AY ({'geçmiş, plan dışı, salt okunur'}) ---", None, None, ""),
+    ("saat aralığı",      "onc_calisma", "D9D9D9", "Önceki ayda çalışılmış gün"),
+    ("İZİN",              "onc_izin",   "DAE3F3", "Önceki ayda yıllık/idari izin"),
+    ("H.İZİN",            "onc_hizin",  "F4B183", "Önceki ay haftalık izin günü (süt izni düzeni), off DEĞİL"),
+    ("OFF",               "onc_off",    "F2F2F2", "Önceki ayda off"),
+    ("boş",               "onc_bos",    None,     "Önceki ayda o güne ait kayıt yok"),
+]
+_FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
+         for _, k, c, _d in LEJANT if k}
+
+_ONC_HIZIN = {"h.izin", "h_izin", "haftalik_izin", "haftalık_izin"}   # tanınan haftalık-izin etiketleri
+
+
+def _gorunum(a, c):
+    """BU AY hücresi → (Excel metni, kategori). c = 'YYYY-MM-DD' kolon adı."""
+    v = roster.at[a, c]
+    d = dt.date.fromisoformat(c)
+    if v == "izin":
+        return "İZİN", "izin"
+    if v == "off_t2":
+        return "OFF_T2", "off_t2"
+    if v == "off_t":
+        return "OFF_T", "off_t"
+    if v == "off":
+        return "OFF", "off"
+    _sa = v.replace("mesai ", "")                       # ham saat aralığı
+    if d in TATIL:
+        metin, kat = f"RESMİ TATİL MESAİ\n{_sa}", "resmi_tatil"
+    elif d in ARIFE:
+        metin, kat = ((f"ARİFE\n{_sa}", "arife") if a in arife_kisitli
+                      else (f"ARİFE MESAİ\n{_sa}", "arife_mesai"))
+    elif d.weekday() >= 5:
+        if (a, c) in _norm_hucre:
+            metin, kat = f"NORM\n{_sa}", "norm"
+        elif (a, c) in _telafi_hucre:
+            metin, kat = f"TELAFİ\n{_sa}", "telafi"
+        else:
+            metin, kat = f"MESAİ\n{_sa}", "mesai"
+    else:
+        metin, kat = _sa, "normal"                      # hafta içi normal → dolgusuz
+    if (a, c) in offt_karsilanmadi:                     # off_t istendi ama çalıştırıldı
+        kat = "offt_kars"                               # etiket kalır, renk KIRMIZI olur
+    return metin, kat
+
+
+def _onceki_gorunum(a, d):
+    """ÖNCEKİ AY hücresi (salt okunur) → (metin, kategori). d = date."""
+    v = onceki_gunluk.get(a, {}).get(d)
+    if v is None:
+        return "", "onc_bos"
+    if v == "izin":
+        return "İZİN", "onc_izin"
+    if v in _ONC_HIZIN:
+        return "H.İZİN", "onc_hizin"
+    if v == "off":
+        return "OFF", "onc_off"
+    if v in OFF_T_DEGERLERI:
+        return v.upper(), "onc_off"
+    return (v, "onc_calisma") if _vardiya_parse(v) else (str(v).upper(), "onc_bos")
+
+
+# ── EXCEL TABLOSU: agent_name + takım + flag + [önceki ay] + bu ay + özet ──
+_ad = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
+                df_tam["agent_name"].astype(str).str.strip()))
+_agents_sirali = list(roster_2.index)                   # satır sırası = agent kodu
+_ozet_kol = [c for c in roster_2.columns if c not in _gun and c != "takim"]
+
+_ONC_KOL = [d for d in TASIMA_GUNLER] if (ONCEKI_GOSTER and onceki_gunluk) else []
+_satirlar, _kat = [], {}                                # _kat[(agent, kolon adı)] = kategori
+for _a in _agents_sirali:
+    _r = {"agent_name": _ad.get(_a, _a), "takim": roster_2.at[_a, "takim"]}
+    for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
+        _r[_k] = roster_2.at[_a, _k]
+    for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
+        _kol = f"{_d.day} {['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'][_d.month - 1]} {DAY_TR[_d.weekday()]}"
+        _m, _kt = _onceki_gorunum(_a, _d)
+        _r[_kol], _kat[(_a, _kol)] = _m, _kt
+    for _c in _gun:                                     # BU AY
+        _d = dt.date.fromisoformat(_c)
+        _kol = f"{_d.day} {DAY_TR[_d.weekday()]}"
+        _m, _kt = _gorunum(_a, _c)
+        _r[_kol], _kat[(_a, _kol)] = _m, _kt
+    for _k in _ozet_kol:                                # calisma/mesai/norm/off + önceki ay özet
+        _r[_k] = roster_2.at[_a, _k]
+    _satirlar.append(_r)
+
+roster_xl = pd.DataFrame(_satirlar).set_index("agent_name")
 
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
-    roster_xl.to_excel(_xl, sheet_name="roster")                      # agent = index, gün-adlı başlık
+    roster_xl.to_excel(_xl, sheet_name="roster")
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
+    pd.DataFrame([{"gösterim": g, "anlam": d} for g, _k, _c, d in LEJANT]) \
+        .to_excel(_xl, sheet_name="LEJANT", index=False)
 
-    # başlık satırı (1. satır) tüm sheet'lerde BOLD
-    for _ws in _xl.book.worksheets:
+    for _ws in _xl.book.worksheets:                     # başlık satırı BOLD
         for _cell in _ws[1]:
             _cell.font = _BOLD
 
-    # roster sheet renklendirme:
-    #   off=kırmızı | resmi tatil çalışması=turuncu | hafta sonu MESAİ=sarı | hafta sonu NORM=yeşil
+    # roster: kategori → dolgu + iki satırlı hücre için wrap
     _ws = _xl.sheets["roster"]
+    _kol_ad = [_c.value for _c in _ws[1]]               # A1 = index başlığı (agent_name)
     for _row in _ws.iter_rows(min_row=2):
-        _a = _agents_sirali[_row[0].row - 2]                 # bu satırın agenti
+        _a = _agents_sirali[_row[0].row - 2]
         for _cell in _row:
-            _v = _cell.value
-            if not isinstance(_v, str):
-                continue
-            if _v == "off":
-                _cell.fill = _KIRMIZI
-            elif _v in ("off_t", "off_t2"):                  # blok off (kota nötr) → gri
-                _cell.fill = _GRI
-            elif _v == "izin":
-                continue                                     # izin → renksiz
-            elif _v.startswith("mesai"):                     # resmi tatil çalışması
-                _cell.fill = _TURUNCU
-            else:                                            # vardiya → hafta sonuysa mesai/norm rengi
-                _j = _cell.column - 2                        # index kolonu (1) hariç
-                if 0 <= _j < len(_col_info) and _col_info[_j] and _col_info[_j][0]:
-                    _cell.fill = (_YESIL if (_a, _col_info[_j][1]) in _norm_hucre
-                                  else _SARI)                # GÜN bazında: norm=yeşil, diğeri mesai=sarı
+            _c_ad = _kol_ad[_cell.column - 1]
+            _kt = _kat.get((_a, _c_ad))
+            if _kt is None:
+                continue                                # takim/flag/özet kolonu → dokunma
+            _cell.alignment = _WRAP
+            if _FILL.get(_kt):
+                _cell.fill = _FILL[_kt]
+
+    # LEJANT: gösterim hücresini kendi rengiyle boya (örnek kutucuk gibi)
+    _wl = _xl.sheets["LEJANT"]
+    for _i, (_g, _k, _c, _d) in enumerate(LEJANT, start=2):
+        if _k and _FILL.get(_k):
+            _wl.cell(row=_i, column=1).fill = _FILL[_k]
+    _wl.column_dimensions["A"].width = 24
+    _wl.column_dimensions["B"].width = 80
 
 print(f"Excel yazıldı: {XLSX_PATH}")
-print(f"  Sheet1 'roster': {roster_2.shape[0]} agent × {roster_2.shape[1]} kolon")
+print(f"  Sheet1 'roster': {roster_xl.shape[0]} agent × {roster_xl.shape[1]} kolon"
+      + (f"  ({len(_ONC_KOL)} önceki ay kolonu: {_ONC_KOL[0]}..{_ONC_KOL[-1]})"
+         if _ONC_KOL else "  (önceki ay kolonu yok)"))
 print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
+print(f"  Sheet4 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
+      f"{len(offt_karsilanmadi)}")
