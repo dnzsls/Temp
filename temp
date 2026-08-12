@@ -50,7 +50,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                         → "kimseyi mahsur bırakmayan tipi seç" baskısı.
     H19B geç vardiya geçmiş adaleti: W_GECMIS(5) × (takımın geçmiş geç-vardiya oranı − ortalama)+
                         × 100, takım o hafta GEÇ tipe (≥GEC_BASLANGIC 15:00) atanırsa.
-                        Kaynak df_gecmis (takım × shifts_asj × gün). Yeni değişken yok.
+                        Kaynak df_gecmis (takım × shifts_adj × gün). Yeni değişken yok.
     H20B off_t talebi : W_OFF_T(25) × off_t günü ÇALIŞILIRSA → "verebildiğini ver".
                         off_t2 SERT (bloklu, hep karşılanır); off_t yumuşak. Karşılanmayan
                         gün Excel'de KIRMIZI. off_t günleri hafta içi off cezasının dışında.
@@ -343,14 +343,14 @@ else:
     print("df_onceki yok (önceki ay taşıması devre dışı kalacak — H8C)")
 
 # df_gecmis: TAKIM bazlı geçmiş vardiya dağılımı — H19B geç-vardiya adaleti için.
-# Kolonlar: teamleader_name | working_main_group | shifts_asj | total_gun_sayisi
+# Kolonlar: teamleader_name | working_main_group | shifts_adj | total_gun_sayisi
 #   ör. "büşra şen | samsun_kitle | 09:00-18:00 | 45"
 # Takım anahtarı H6 ile AYNI kurulur: working_main_group + " | " + teamleader_name.
 df_gecmis = globals().get("df_gecmis")
 if df_gecmis is not None:
     df_gecmis = df_gecmis.copy()
     df_gecmis.columns = [str(c).strip().lower() for c in df_gecmis.columns]
-    for _c in ("teamleader_name", "working_main_group", "shifts_asj"):
+    for _c in ("teamleader_name", "working_main_group", "shifts_adj"):
         df_gecmis[_c] = df_gecmis[_c].astype(str).str.strip()
     df_gecmis["total_gun_sayisi"] = (pd.to_numeric(df_gecmis["total_gun_sayisi"],
                                                    errors="coerce").fillna(0).astype(int))
@@ -359,7 +359,7 @@ if df_gecmis is not None:
     print(f"\ndf_gecmis: {df_gecmis.shape[0]} satır  |  "
           f"{df_gecmis['takim'].nunique()} takım  |  "
           f"toplam {df_gecmis['total_gun_sayisi'].sum()} gün")
-    print(f"df_gecmis shifts_asj: {df_gecmis['shifts_asj'].value_counts().head(10).to_dict()}")
+    print(f"df_gecmis shifts_adj: {df_gecmis['shifts_adj'].value_counts().head(10).to_dict()}")
     print(df_gecmis.head())
 else:
     print("df_gecmis yok (geç-vardiya geçmiş adaleti devre dışı kalacak — H19B)")
@@ -1408,7 +1408,7 @@ _gec_dk = dakika(GEC_BASLANGIC)                    # "15:00" → 900 (gece 00:00
 gecmis_katsayi = {}                                # takım → geç tip başına ek ceza
 if df_gecmis is not None and W_GECMIS:
     _gec = df_gecmis.copy()
-    _gec["_gec_mi"] = _gec["shifts_asj"].map(                        # başlangıç ≥ 15:00 mı
+    _gec["_gec_mi"] = _gec["shifts_adj"].map(                        # başlangıç ≥ 15:00 mı
         lambda s: bool(_vardiya_parse(s)) and dakika(_vardiya_parse(s)[0]) >= _gec_dk)
     _gec["_gec_gun"] = _gec["total_gun_sayisi"].where(_gec["_gec_mi"], 0)
     _tk = _gec.groupby("takim")[["_gec_gun", "total_gun_sayisi"]].sum()
