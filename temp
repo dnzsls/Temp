@@ -1491,6 +1491,72 @@ else:
           f"({'df_gecmis yok' if df_gecmis is None else 'W_GECMIS=0'})")
 
 
+# %% [HÜCRE 19C] — TAKIM-TİP BAŞLANGIÇ İPUCU (solution hint) ───────────
+# SORUN (H25B ile ölçüldü): hafta içi eksiğin ~%86'sı YAPISAL DEĞİL, takım→tip
+# tahsisinin kötü olmasından. Çözücü 09:00'a ihtiyaçtan 30-46 kişi FAZLA takım
+# atarken 11:00/15:00'ı 20-39 kişi EKSİK bırakıyordu. Her haftada
+# Σ(zirve talep) ≤ toplam agent olduğu için daha iyi bir tahsis MATEMATİKSEL
+# OLARAK VAR — çözücü 600 sn'de bulamıyor (takım×hafta×tip knapsack'i).
+#
+# ÇÖZÜM: modeli DEĞİŞTİRMEDEN çözücüye iyi bir başlangıç noktası ver.
+#   1) her (hafta, tip) için ZİRVE hafta içi talep (H19 gereği takım hafta boyu
+#      o tipte → kapasite zirveyi karşılamalı)
+#   2) açgözlü tahsis: takımlar BÜYÜKTEN küçüğe, her biri o an açığı EN BÜYÜK
+#      olan tipe → büyük takımlar büyük açıkları kapatır (klasik LPT sezgiseli)
+#   3) seçilen y[T,hafta,tip] = 1, diğerleri 0 olarak AddHint
+# Hint SADECE arama başlangıcı; kısıt DEĞİL. Çözücü daha iyisini bulursa onu
+# kullanır, tutmazsa yok sayar → risk yok, takım bölünmesi yok, ağırlık değişmiyor.
+# Hücre ayrıca açgözlü tahsisin bıraktığı açığı basar: çözücünün bulduğuyla
+# (H25B [3]) karşılaştırınca ipucunun ne kadar iyi olduğu görünür.
+TAKIM_HINT = True                                  # False → hiç ipucu verme (eski davranış)
+
+_hint = {}                                         # y değişkeni → 0/1
+_hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
+if TAKIM_HINT and takim_tip:
+    _boyut = {T: len(u) for T, u in takimlar.items()}
+    for _wk in sorted(haftalar):
+        if _wk in tatil_haftalari:
+            continue
+        _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
+        if not _hi:
+            continue
+        # (1) tip → o haftanın ZİRVE günlük talebi
+        _ihtiyac = {}
+        for _t in hafta_tipler.get(_wk, []):
+            _ihtiyac[_t] = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                                    if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                                for ds in _hi), default=0)
+        if not _ihtiyac:
+            continue
+        _acik_once = sum(_ihtiyac.values())        # hiç takım atanmamış hâl
+        _kalan = dict(_ihtiyac)
+        # (2) açgözlü: büyük takım → en büyük açık
+        for T in sorted(takimlar, key=lambda t: -_boyut[t]):
+            _uygun = [_t for _t in _ihtiyac if (T, _wk, _t) in takim_tip]
+            if not _uygun:
+                continue                           # takımın o hafta seçeneği yok
+            _sec = max(_uygun, key=lambda t: _kalan.get(t, 0))
+            _kalan[_sec] = _kalan.get(_sec, 0) - _boyut[T]
+            for _t in _uygun:                      # (3) hint: seçilen 1, diğerleri 0
+                _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
+        _hint_ozet.append((_wk, _acik_once,
+                           sum(max(0, v) for v in _kalan.values())))
+    for _var, _val in _hint.items():
+        model.AddHint(_var, _val)
+
+if _hint:
+    _top_acik = sum(a for _, _, a in _hint_ozet)
+    print(f"takım-tip başlangıç ipucu: {len(_hint)} y değişkenine hint verildi "
+          f"({len(_hint_ozet)} hafta)")
+    print(f"  açgözlü tahsisin bıraktığı toplam açık: {_top_acik} kişi "
+          f"(hafta bazında: {[(f'{w[0]}-W{w[1]}', a) for w, _, a in _hint_ozet]})")
+    print(f"  → H25B [3]'teki açıkla karşılaştır: ipucu daha iyiyse çözücü "
+          f"buradan başlayıp iyileştirecek (hint kısıt DEĞİL, tutmazsa yok sayılır)")
+else:
+    print(f"takım-tip başlangıç ipucu: KAPALI "
+          f"({'TAKIM_HINT=False' if not TAKIM_HINT else 'takim_tip boş'})")
+
+
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
 # Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
 # (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
@@ -1804,10 +1870,16 @@ else:
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
+COZUM_SURE_SN = 1800               # süre sınırı (sn). 600 → 1800: model yakınsamıyor
+                                   # (gap %72), asıl zorluk takım×hafta×tip tahsisi.
+                                   # H19C ipucu iyi bir başlangıç veriyor, kalan süre
+                                   # iyileştirmeye gidiyor. Süreyi uzatmak sonucu
+                                   # KÖTÜLEŞTİRMEZ — en iyi BULUNAN çözüm alınır.
+
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
-solver.parameters.max_time_in_seconds = 600        # süre sınırı → en iyi BULUNAN'ı al (optimal şart değil)
+solver.parameters.max_time_in_seconds = COZUM_SURE_SN   # en iyi BULUNAN'ı al (optimal şart değil)
 solver.parameters.log_search_progress = True       # ilerlemeyi terminale bas (feasible bulundu mu görürsün)
 status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
