@@ -2352,11 +2352,35 @@ print(f"    Σ ust   (SERT tavan = kota+mesai+tatil+alacak) : {_top_ust}")
 print(f"    gerçekleşen atama (arife hariç)  : {_gercek_atama}")
 _acik = _top_talep - _top_ust
 if _acik > 0:
-    print(f"    ⚠ YAPISAL AÇIK: talep, mutlak tavanı {_acik} kişi-gün AŞIYOR →")
-    print(f"      hiçbir ağırlık bunu kapatamaz. MAX_MESAI'yi artır ya da kadro/outsource.")
+    print(f"    ⚠ TOPLAM YAPISAL AÇIK: talep, mutlak tavanı {_acik} kişi-gün AŞIYOR.")
 else:
-    print(f"    ✓ tavan yeterli (fazla kapasite {-_acik} kişi-gün) → eksik DAĞITIM sorunu,")
-    print(f"      yapısal değil. Kullanılmayan tavan: {_top_ust - _gercek_atama} kişi-gün.")
+    print(f"    toplam tavan yeterli (fazla {-_acik} kişi-gün); "
+          f"kullanılmayan tavan {_top_ust - _gercek_atama} kişi-gün.")
+
+# ── 1B) HAFTA İÇİ / HAFTA SONU AYRI BİLANÇO — asıl belirleyici olan bu ────
+# Toplam karşılaştırma YANILTICI: kotanın ÜSTÜNDEKİ kapasite (mesai payı) zorunlu
+# olarak HAFTA SONU günüdür (kota = tüm müsait hafta içi gün). Hafta sonu doluysa
+# o kapasite ölü kalır, hafta içine AKTARILAMAZ.
+#   hafta içi TAVAN  = Σ kota           (agent en fazla tüm müsait hafta içi gününü çalışır)
+#   hafta sonu TAVAN = Σ (ust − kota)   (mesai + tatil + sınır alacağı payı)
+# Hafta içi talep Σ kota'yı aşıyorsa fark YAPISALDIR: takım-tip düzeltmesi,
+# ağırlık, MAX_MESAI — hiçbiri kapatamaz (mesai hafta içine gün ekleyemez).
+_talep_hi = sum(k for (ds, _v), k in talep.items()
+                if dt.date.fromisoformat(ds).weekday() < 5)
+_talep_hs = _top_talep - _talep_hi
+_hs_tavan = _top_ust - _top_kota
+print(f"\n[1B] HAFTA İÇİ / HAFTA SONU AYRI (mesai kapasitesi hafta içine AKTARILAMAZ)")
+print(f"    HAFTA İÇİ  talep {_talep_hi:6d}  vs tavan (Σkota) {_top_kota:6d}  "
+      f"→ {'⚠ YAPISAL AÇIK ' + str(_talep_hi - _top_kota) if _talep_hi > _top_kota else 'tavan yeterli (+' + str(_top_kota - _talep_hi) + ')'}")
+print(f"    HAFTA SONU talep {_talep_hs:6d}  vs tavan (Σust−Σkota) {_hs_tavan:6d}  "
+      f"→ {'⚠ AÇIK ' + str(_talep_hs - _hs_tavan) if _talep_hs > _hs_tavan else 'tavan yeterli (+' + str(_hs_tavan - _talep_hs) + ')'}")
+if _talep_hi > _top_kota:
+    _yap = _talep_hi - _top_kota
+    print(f"    → Hafta içi eksiğin EN AZ {_yap} kişi-günü YAPISAL. Kalanı dağıtım.")
+    print(f"      Yapısal kısmın çaresi: kadro/outsource ya da Stage-1 hafta içi talebini")
+    print(f"      düşürmek. MAX_MESAI ve takım-tip ayarı bu kısma DOKUNAMAZ.")
+else:
+    print(f"    → Hafta içi eksik tamamen DAĞITIM sorunu (takım-tip tahsisi, [3]'e bak).")
 
 # ── 2) EKSİK NEREDE ───────────────────────────────────────────────────
 _eks = df_cov[df_cov["fark"] < 0].copy()
