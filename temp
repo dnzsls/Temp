@@ -46,6 +46,10 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
+    H10 eksik (asimetrik): W_EKSIK_HS(25) × hafta sonu eksik kişi — serbest bölge YOK.
+                        25 > W_ADALET_HS+W_ADALET_HS2(24) → adil payın 1 üstündeki gün,
+                        MESAİ olsa bile doldurulur; 2 üstü (36) doldurulmaz → kendiliğinden
+                        sınırlı. W_EKSIK_HI(0) → hafta içi eksik hâlâ bedava.
     H19 takım sapması : W_TAKIM(10) × fiziksel imkânsızlıkla ayrılan her (üye, hafta)
                         → "kimseyi mahsur bırakmayan tipi seç" baskısı.
     H19B geç vardiya geçmiş adaleti: W_GECMIS(5) × (takımın geçmiş geç-vardiya oranı − ortalama)+
@@ -61,7 +65,8 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                         mesai günü zorunlu olarak hafta sonu günü → mesaiyi fiilen bu eşik sınırlar.
     H20D akşam/gece adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+; eşik türetilir.
     H20E haftalık yığılma: W_ADALET_MESAI(6) × (HAFTALIK BRÜT 5-üstü − FAIR_MESAI)+ → 6,6,6,4,0 gibi
-                        yığılmayı engeller. Norm'a dokunmaz.
+                        yığılmayı engeller. Norm'a dokunmaz. FAIR_MESAI artık MAX_MESAI'den
+                        TÜRETİLİR (eskiden sabit 2 → sert tavanı 4 yapsan da mesai 2'de takılıyordu).
     H20E ay bazlı mesai adaleti (KOŞULLU): W_ADALET_MESAI × (mesai_gun − FAIR_MESAI_AY)+.
                         FAIR_MESAI_AY talepten türetilir; SADECE MAX_MESAI'den küçükse kurulur
                         (eşitse H17'nin sert tavanı aynı işi yapıyor → ölü terim olurdu).
@@ -138,9 +143,20 @@ W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapma
 # amaç fonksiyonunda 0'a mal oluyordu; hafta sonu sert bandı da talep−HS_TOL(2)'ye
 # izin verdiği için model her hafta sonu kovasında bandın ALT ucunda oturuyordu.
 # Kalibrasyon: bir kovaya kişi eklemek eksiği 1 azaltır (kazanç = W_EKSIK).
-#   W_EKSIK < W_ADALET_HS(12) → boşluk SADECE adil pay altındaki agentlarla dolar.
-#   W_EKSIK > W_ADALET_HS     → adil payı aşan hafta sonu günleri de verilir (coverage öncelikli).
-W_EKSIK_HS  = 4                # HAFTA SONU eksik kişi başına ceza
+# Bir agenta FAZLADAN bir hafta sonu günü vermenin MARJİNAL maliyeti (adil pay F):
+#   F   → F+1 gün : W_ADALET_HS(12)
+#   F+1 → F+2 gün : W_ADALET_HS + W_ADALET_HS2 = 24  (konveks 2. kademe)
+#   gün MESAİ ise + W_ADALET_MESAI(6) haftalık + W_ADALET_MESAI(6) aylık = +12
+# Yani adil payın bir üstündeki MESAİ günü 12+12 = 24'e mal oluyor.
+#   W_EKSIK_HS = 4  → 4 < 12: model hiçbir kovayı adil pay üstüne çıkarak doldurmaz,
+#                     her hafta sonu kovasında sert bandın ALT ucunda (talep−HS_TOL) oturur;
+#                     MAX_MESAI'yi yükseltmek hiçbir şey değiştirmez (tavan boş kalır).
+#   W_EKSIK_HS = 25 → 25 > 24: adil payın 1 ÜSTÜNDEKİ gün, mesai olsa bile doldurulur.
+#                     Bir sonraki gün 24+12 = 36 > 25 → orada durur (kendiliğinden sınırlı).
+# 25 = W_ADALET_HS + W_ADALET_HS2 + 1. Adalet ağırlıklarını değiştirirsen bunu da güncelle.
+# NOT: W_OFF_T de 25 — hafta sonu eksiği ile off_t talebi ÇAKIŞIRSA berabere kalırlar.
+#      off_t/coverage dengesi ayrıca ele alınacak (hafta içi tarafı W_EKSIK_HI).
+W_EKSIK_HS  = 25               # HAFTA SONU eksik kişi başına ceza (coverage > adalet)
 W_EKSIK_HI  = 0                # HAFTA İÇİ eksik cezası (0 = mevcut davranış; takım bütünlüğü
                                # üzerindeki etkisi ölçülmeden açılmasın)
 # TAKIM BÜTÜNLÜĞÜ (H19): ceza artık "fazladan TİP" değil, takımının haftalık
@@ -184,7 +200,15 @@ FAIR_HS     = None             # agent başına adil HAFTA SONU günü (norm + m
                                # hafta içi gün) → bu eşik mesaiyi de bağlar. MAX_MESAI'yi
                                # yükseltsen bile fiilen sınırlayan kural budur.
 W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
-FAIR_MESAI  = 2                # HAFTALIK yığılma eşiği (H20E): kaç hafta 5 günü aşabilir
+FAIR_MESAI  = None             # HAFTALIK yığılma eşiği (H20E): kaç hafta 5 günü aşabilir
+                               # → None ise MAX_MESAI'den türetilir (H20E).
+                               # Eskiden SABİT 2'ydi: MAX_MESAI'yi 4 yapsan bile 3. ve 4.
+                               # mesai günü haftalık brütte eşiği aşıp W_ADALET_MESAI(6)
+                               # ceza yiyordu → sert tavan açılsa da mesai 2'de takılıyordu.
+                               # MAX_MESAI mesai günü yapan agent en fazla o kadar HAFTADA
+                               # 5 günü aşar → doğru eşik MAX_MESAI. Ölü terim DEĞİL: haftalık
+                               # brüt (Σ max(0,·)) aylık mesaiden büyük olabilir → 6,6,6,4,0
+                               # gibi yığılma aylık mesai 1 iken bile cezalı kalır.
 FAIR_MESAI_AY = None           # AY BAZLI adil mesai günü (H20E ikinci kısım)
                                # → ceil((Σ talep − Σ kota) ÷ mesai yapabilen agent)
                                # Terim SADECE türetilen değer MAX_MESAI'den küçükse kurulur:
@@ -1647,13 +1671,22 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
 #   H17 buna karışmaz (aylık nete bakar) → zamansal yığılmayı sadece bu hücre engeller.
 # Norm haftası (4 hafta içi + 1 hafta sonu = 5 gün) → max(0,5−5)=0 → cezasız.
 #
-# AYLIK mesai adaleti neden YOK: toplam mesai ihtiyacı ÷ mesai yapabilen agent
-# (özel flag hariç) ≈ MAX_MESAI'ye eşit çıkıyor → türetilmiş FAIR_MESAI = MAX_MESAI
-# olur ve yumuşak ceza hiç devreye girmez; sert tavan (H17) işi zaten yapıyor.
-# MAX_MESAI 3-4'e çıkarılırsa o zaman buraya AY BAZLI ikinci bir terim eklenmeli:
-#   fazla_ay >= (calisma − tatil_çalışma − kota) − FAIR_MESAI_AY   [FAIR_MESAI_AY türetilir]
+# AY BAZLI mesai adaleti bu hücrenin SONUNDA ayrı bir terim (FAIR_MESAI_AY).
 # Hafta sonu YÜKÜ (norm+mesai birlikte) H20C'nin işi — mesai günü zorunlu olarak
 # hafta sonu günüdür, o yüzden fiilen mesaiyi sınırlayan eşik FAIR_HS'tir.
+
+# ADİL PAY OTOMATİK (FAIR_MESAI is None): eşik = MAX_MESAI.
+# Gerekçe: MAX_MESAI mesai günü yapan bir agent en fazla MAX_MESAI HAFTADA 5 günü
+# aşar (her mesai günü ayrı bir haftaya düşse bile). Eşik bunun ALTINDA kalırsa
+# sert tavanla çelişir: H17 "4 mesai yapabilirsin" derken bu hücre 3. ve 4. güne
+# ceza yazar → tavan açık ama kimse kullanmaz (sabit 2 iken tam olarak bu oluyordu).
+# Ölü terim değil: haftalık brüt = Σ max(0,·) negatifi kestiği için aylık mesaiden
+# BÜYÜK olabilir → 6,6,6,4,0 gibi yığılma aylık mesai 1 iken bile cezalı kalır.
+if FAIR_MESAI is None:
+    FAIR_MESAI = MAX_MESAI
+    print(f"FAIR_MESAI otomatik: MAX_MESAI={MAX_MESAI} → FAIR_MESAI = {FAIR_MESAI} "
+          f"(haftalık brüt eşiği; sert tavanla çelişmesin)")
+
 nmes, nmes_tas = 0, 0
 for a in AGENTS:
     if a not in kota_map:
