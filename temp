@@ -46,16 +46,17 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
-    H10 eksik (asimetrik): W_EKSIK_HS(25) × hafta sonu eksik kişi — serbest bölge YOK.
-                        25 > W_ADALET_HS+W_ADALET_HS2(24) → adil payın 1 üstündeki gün,
-                        MESAİ olsa bile doldurulur; 2 üstü (36) doldurulmaz → kendiliğinden
-                        sınırlı. W_EKSIK_HI(0) → hafta içi eksik hâlâ bedava.
+    H10 eksik (asimetrik): W_EKSIK_HS(25) / W_EKSIK_HI(25) × eksik kişi — serbest bölge YOK,
+                        hafta içi ve hafta sonu EŞİT. 25 > W_ADALET_HS+W_ADALET_HS2(24) →
+                        adil payın 1 üstündeki gün MESAİ olsa bile doldurulur; 2 üstü (36)
+                        doldurulmaz → kendiliğinden sınırlı. 25 > W_OFF_T(20) → off_t sadece
+                        o günün kovası bolken verilir.
     H19 takım sapması : W_TAKIM(10) × fiziksel imkânsızlıkla ayrılan her (üye, hafta)
                         → "kimseyi mahsur bırakmayan tipi seç" baskısı.
     H19B geç vardiya geçmiş adaleti: W_GECMIS(5) × (takımın geçmiş geç-vardiya oranı − ortalama)+
                         × 100, takım o hafta GEÇ tipe (≥GEC_BASLANGIC 15:00) atanırsa.
                         Kaynak df_gecmis (takım × shifts_adj × gün). Yeni değişken yok.
-    H20B off_t talebi : W_OFF_T(25) × off_t günü ÇALIŞILIRSA → "verebildiğini ver".
+    H20B off_t talebi : W_OFF_T(20) × off_t günü ÇALIŞILIRSA → "verebildiğini ver".
                         off_t2 SERT (bloklu, hep karşılanır); off_t yumuşak. Karşılanmayan
                         gün Excel'de KIRMIZI. off_t günleri hafta içi off cezasının dışında.
     H20B haftalık off : W_HAFTA_OFF(3) × (haftalık off − 2)  [izin hariç → 4-gün haftasını engelle].
@@ -67,9 +68,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H20E haftalık yığılma: W_ADALET_MESAI(6) × (HAFTALIK BRÜT 5-üstü − FAIR_MESAI)+ → 6,6,6,4,0 gibi
                         yığılmayı engeller. Norm'a dokunmaz. FAIR_MESAI artık MAX_MESAI'den
                         TÜRETİLİR (eskiden sabit 2 → sert tavanı 4 yapsan da mesai 2'de takılıyordu).
-    H20E ay bazlı mesai adaleti (KOŞULLU): W_ADALET_MESAI × (mesai_gun − FAIR_MESAI_AY)+.
+    H20E ay bazlı mesai adaleti (KOŞULLU): W_ADALET_MESAI_AY(2) × (mesai_gun − FAIR_MESAI_AY)+.
                         FAIR_MESAI_AY talepten türetilir; SADECE MAX_MESAI'den küçükse kurulur
                         (eşitse H17'nin sert tavanı aynı işi yapıyor → ölü terim olurdu).
+                        Ağırlık haftalık terimden AYRI ve düşük (2): aynı hafta sonu günü
+                        FAIR_HS'te de vergilendiği için 6'da coverage'ı bloke ediyordu.
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -154,11 +157,19 @@ W_COVERAGE2 = 20               # coverage sapma 15 ÜSTÜ ek ceza (büyük sapma
 #   W_EKSIK_HS = 25 → 25 > 24: adil payın 1 ÜSTÜNDEKİ gün, mesai olsa bile doldurulur.
 #                     Bir sonraki gün 24+12 = 36 > 25 → orada durur (kendiliğinden sınırlı).
 # 25 = W_ADALET_HS + W_ADALET_HS2 + 1. Adalet ağırlıklarını değiştirirsen bunu da güncelle.
-# NOT: W_OFF_T de 25 — hafta sonu eksiği ile off_t talebi ÇAKIŞIRSA berabere kalırlar.
-#      off_t/coverage dengesi ayrıca ele alınacak (hafta içi tarafı W_EKSIK_HI).
 W_EKSIK_HS  = 25               # HAFTA SONU eksik kişi başına ceza (coverage > adalet)
-W_EKSIK_HI  = 0                # HAFTA İÇİ eksik cezası (0 = mevcut davranış; takım bütünlüğü
-                               # üzerindeki etkisi ölçülmeden açılmasın)
+# HAFTA İÇİ eksik: 0 → 25. Eskiden BEDAVAYDI (sert band da yok, sapmanın ilk 10'u
+# serbest) → model hafta içi bir kovayı eksik bırakmayı hiç umursamıyordu; hafta içi
+# off vermek (ceza 4..14) ile off_t karşılamak (25) coverage'ın önüne geçiyordu.
+# Hafta sonuyla AYNI değer bilinçli: "bir eksik kişi, hangi gün olursa olsun bir eksik kişi".
+# Sonuçları:
+#   • hafta içi off pahalılaşır (25 > 4..14) → agent hafta içini çalışır, hafta sonunu
+#     mesai olarak alır = "full kapasite" (norm takası yerine mesai).
+#   • off_t (20) < 25 → off_t artık SADECE o günün kovası bolsa verilir; eksik
+#     yaratacağı günde verilmez. "Bazılarına vermese de olurdu" isteği bu.
+# UYARI: bu, tek seferde yapılan EN BÜYÜK ağırlık değişikliği. Coverage her şeyi
+# ezmeye başlar (off dağılımı bozulur, off_t karşılama oranı düşer) → 15'e çek.
+W_EKSIK_HI  = 25               # HAFTA İÇİ eksik kişi başına ceza (hafta sonuyla eşit)
 # TAKIM BÜTÜNLÜĞÜ (H19): ceza artık "fazladan TİP" değil, takımının haftalık
 # tipinden AYRILAN her (üye, hafta). Eski kurgu gradyansızdı — 19/1 bölünme ile
 # 10/10 bölünme aynı cezayı yiyordu, model ilk kişiyi ayırdıktan sonra gerisini
@@ -180,7 +191,14 @@ W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya y
 # Karşılanmayan talep Excel'de KIRMIZI hücre olarak görünür (H29 lejantı).
 # Kalibrasyon: W_OFF_T, hafta içi off cezasının (W_HI_OFF+surplus = 4..14) ÜSTÜNDE
 # olmalı, yoksa model off vermeyi zaten pahalı bulur ve talebi hiç karşılamaz.
-W_OFF_T     = 25               # off_t talebi KARŞILANMAZSA (o gün çalışılırsa) kişi-gün cezası
+W_OFF_T     = 20               # off_t talebi KARŞILANMAZSA (o gün çalışılırsa) kişi-gün cezası
+                               # 25 → 20: eksik cezasının (25) ALTINDA olmalı. Eşitken model
+                               # "off_t ver" ile "kovayı doldur" arasında kayıtsızdı ve off_t'yi
+                               # coverage eksikken bile herkese veriyordu. Artık off_t o günün
+                               # kovası bolsa verilir (eksik yaratmaz → bedava), sıkı günde
+                               # verilmez. Kesin off gereken agent için off_t2 var (SERT).
+                               # Yine de hafta içi off cezasının (4..14) ÜSTÜNDE → talep
+                               # edilmemiş off'a göre öncelikli.
 W_HAFTA_OFF = 3                # haftalık >2 off cezası (yumuşak → 4-gün haftasını engelle, izin hariç)
 W_HI_OFF    = 4                # hafta içi off TABAN cezası (=norm) → "önce mesai" (2 dolmadan norm yapma)
 W_SURPLUS_OFF = 10             # hafta içi off SURPLUS ek cezası: ağırlık=W_HI_OFF+W_SURPLUS_OFF×(1−w[gün]) → sıkı(açık) günde off pahalı, bol(yüksek net) günde ucuz → offları bol güne iter (H8B/H20B)
@@ -199,7 +217,18 @@ FAIR_HS     = None             # agent başına adil HAFTA SONU günü (norm + m
                                # NOT: mesai günü zorunlu olarak hafta sonu günüdür (kota = tüm
                                # hafta içi gün) → bu eşik mesaiyi de bağlar. MAX_MESAI'yi
                                # yükseltsen bile fiilen sınırlayan kural budur.
-W_ADALET_MESAI = 6             # MESAİ (overtime) adaleti: adil pay üstü her fazla mesai gününe ceza (H20E)
+W_ADALET_MESAI = 6             # HAFTALIK yığılma ağırlığı (H20E 1. kısım): FAIR_MESAI üstü brüt
+W_ADALET_MESAI_AY = 2          # AY BAZLI mesai adaleti ağırlığı (H20E 2. kısım) — AYRI tutuldu.
+                               # 6 → 2 indirildi. Sebep: aynı fiziksel gün (hafta sonu günü)
+                               # hem FAIR_HS hem burada vergilendiriliyor → 4. mesai gününün
+                               # maliyeti 12+12 = 24 iken kazanç (W_EKSIK_HS) 25'ti; 1 puanlık
+                               # marjla çalışıyordu. FAIR_MESAI_AY talepten türetildiği için
+                               # gelecek ay 2 yerine 1 çıksa maliyet 30 olup mesai sessizce
+                               # 2'de takılırdı. Ağırlık 2'de: maliyet 12+4 = 16, marj 9 →
+                               # türetim 0'a düşse bile (12+8=20 < 25) davranış bozulmuyor.
+                               # Terim KALDIRILMADI: eşit coverage değerli iki agent arasında
+                               # az mesai yapanı seçmeye devam ediyor (ücretli mesai dengesi).
+                               # FAIR_HS bunu yapamaz — norm ile mesaiyi ayırt etmiyor.
 FAIR_MESAI  = None             # HAFTALIK yığılma eşiği (H20E): kaç hafta 5 günü aşabilir
                                # → None ise MAX_MESAI'den türetilir (H20E).
                                # Eskiden SABİT 2'ydi: MAX_MESAI'yi 4 yapsan bile 3. ve 4.
@@ -1762,10 +1791,13 @@ if FAIR_MESAI_AY < MAX_MESAI:
         fz = model.NewIntVar(0, MAX_MESAI, f"aymesai_{a}")
         model.Add(fz >= sum(tum) - sum(tat_v) - kota_map[a]
                   - FAIR_MESAI_AY - onceki_eksik.get(a, 0))
-        amac.append(W_ADALET_MESAI * fz)
+        amac.append(W_ADALET_MESAI_AY * fz)         # AYRI ağırlık (haftalık terimden düşük)
         nma += 1
     print(f"ay bazlı mesai adaleti: {nma} agent, adil pay={FAIR_MESAI_AY} "
-          f"(tavan MAX_MESAI={MAX_MESAI}, ağ. {W_ADALET_MESAI})")
+          f"(tavan MAX_MESAI={MAX_MESAI}, ağ. {W_ADALET_MESAI_AY}) — "
+          f"{MAX_MESAI}. mesai gününün maliyeti: {W_ADALET_HS} (FAIR_HS) + "
+          f"{W_ADALET_MESAI_AY * max(0, MAX_MESAI - FAIR_MESAI_AY)} (bu terim) "
+          f"vs kazanç {W_EKSIK_HS} (W_EKSIK_HS)")
 else:
     print(f"ay bazlı mesai adaleti: KURULMADI — adil pay {FAIR_MESAI_AY} = "
           f"MAX_MESAI {MAX_MESAI}, sert tavan (H17) zaten aynı sınırı koyuyor")
