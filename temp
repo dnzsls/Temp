@@ -2318,6 +2318,159 @@ print(df_cov.reindex(df_cov["fark"].abs().sort_values(ascending=False).index)
       .head(12).to_string(index=False))
 
 
+# %% [HÜCRE 25B] — EKSİK COVERAGE TEŞHİSİ (neden dolmadı?) ─────────────
+# "Coverage yine eksik" sorusunun cevabını 5 adımda arar. Sıra ÖNEMLİ: üstteki
+# adım sorunu açıklıyorsa alttakiler semptomdur, ağırlıkla çözülmez.
+#   1) YAPISAL KAPASİTE — Σtalep, tüm agentların TOPLAM tavanını aşıyor mu?
+#      Aşıyorsa hiçbir ağırlık/parametre kapatamaz; tek çare kadro/outsource
+#      ya da Stage-1 talebini düşürmek.
+#   2) EKSİK NEREDE — hafta içi / hafta sonu, gün, vardiya tipi kırılımı.
+#   3) TAKIM-TİP TAHSİSİ — hafta içi kova ancak takımı O HAFTA o tipe atanmış
+#      agentlarla dolar (H19 SERT). Tipe atanan toplam kişi < o tipin talebi ise
+#      eksik buradan gelir; ağırlık değil TAKIM/TİP granülerliği sorunudur.
+#   4) KİM NEREDE — eksik kovalarda, o gün müsait olan agentlar nereye gitmiş
+#      (başka tip / off / off_t / izin / yapısal yasak).
+#   5) AĞIRLIK KONTROLÜ — eksik cezası gerçekten bağlayıcı mı, yoksa başka bir
+#      ceza mı daha pahalı (amaç fonksiyonundaki payları).
+from collections import Counter, defaultdict
+
+print("=" * 78)
+print("H25B — EKSİK COVERAGE TEŞHİSİ")
+print("=" * 78)
+
+# ── 1) YAPISAL KAPASİTE BİLANÇOSU ─────────────────────────────────────
+_arife_atama = sum(solver.Value(x[(a, ds, v)]) for (a, ds, v) in x
+                   if v == ARIFE_YARIM)                     # coverage dışı → düş
+_gercek_atama = sum(solver.Value(x[k]) for k in x) - _arife_atama
+_top_talep = sum(talep.values())
+_top_kota  = sum(kota_map.values())
+_top_ust   = sum(ust_map.values())
+print(f"\n[1] YAPISAL KAPASİTE (kişi-gün)")
+print(f"    Σ talep (tüm kovalar)            : {_top_talep}")
+print(f"    Σ kota  (SERT taban, H17)        : {_top_kota}")
+print(f"    Σ ust   (SERT tavan = kota+mesai+tatil+alacak) : {_top_ust}")
+print(f"    gerçekleşen atama (arife hariç)  : {_gercek_atama}")
+_acik = _top_talep - _top_ust
+if _acik > 0:
+    print(f"    ⚠ YAPISAL AÇIK: talep, mutlak tavanı {_acik} kişi-gün AŞIYOR →")
+    print(f"      hiçbir ağırlık bunu kapatamaz. MAX_MESAI'yi artır ya da kadro/outsource.")
+else:
+    print(f"    ✓ tavan yeterli (fazla kapasite {-_acik} kişi-gün) → eksik DAĞITIM sorunu,")
+    print(f"      yapısal değil. Kullanılmayan tavan: {_top_ust - _gercek_atama} kişi-gün.")
+
+# ── 2) EKSİK NEREDE ───────────────────────────────────────────────────
+_eks = df_cov[df_cov["fark"] < 0].copy()
+_eks["eksik"] = -_eks["fark"]
+_eks["hs"] = _eks["tarih"].map(lambda ds: dt.date.fromisoformat(ds).weekday() >= 5)
+_eks["gun"] = _eks["tarih"].map(lambda ds: DAY_TR[dt.date.fromisoformat(ds).weekday()])
+_eks["tip"] = _eks["saat"].str.split("-").str[0]
+print(f"\n[2] EKSİK KIRILIMI  (toplam {int(_eks['eksik'].sum())} kişi-gün, "
+      f"{len(_eks)} kova)")
+_hi_e = int(_eks.loc[~_eks["hs"], "eksik"].sum())
+_hs_e = int(_eks.loc[_eks["hs"], "eksik"].sum())
+print(f"    HAFTA İÇİ : {_hi_e:5d}  ({len(_eks[~_eks['hs']])} kova)  ← W_EKSIK_HI={W_EKSIK_HI}")
+print(f"    HAFTA SONU: {_hs_e:5d}  ({len(_eks[_eks['hs']])} kova)  ← W_EKSIK_HS={W_EKSIK_HS}, sert band ±{HS_TOL}")
+print("    vardiya tipine göre:")
+for _t, _g in _eks.groupby("tip"):
+    print(f"      {_t}: {int(_g['eksik'].sum()):4d} kişi-gün, {len(_g)} kova")
+print("    güne göre (en kötü 10):")
+_gun_e = _eks.groupby(["tarih", "gun"])["eksik"].sum().sort_values(ascending=False)
+for (_ds, _g), _v in _gun_e.head(10).items():
+    print(f"      {_ds} {_g}: {int(_v)} kişi-gün")
+
+# ── 3) TAKIM-TİP TAHSİSİ (hafta içi kovaların ASIL kısıtı) ────────────
+# H19 SERT: agent o hafta ancak takımının seçtiği tipte çalışabilir. Yani bir
+# tipin o haftaki KAPASİTESİ = o tipe atanan takımların üye sayısı. Talep bunu
+# aşıyorsa kova matematiksel olarak dolamaz — ağırlıkla ilgisi yok.
+_secim = {}                                        # (takım, hafta) → seçilen tip
+for (_T, _wk, _bas), _b in takim_tip.items():
+    if solver.Value(_b):
+        _secim[(_T, _wk)] = _bas
+_tip_kapasite = defaultdict(int)                   # (hafta, tip) → atanan üye sayısı
+for (_T, _wk), _bas in _secim.items():
+    _tip_kapasite[(_wk, _bas)] += len(takimlar.get(_T, []))
+print(f"\n[3] TAKIM-TİP TAHSİSİ vs TALEP  (hafta içi, H19 sert kuralı)")
+print(f"    {'hafta':>10} {'tip':>7} {'zirve talep':>12} {'tipe atanan kişi':>18}  durum")
+_tip_sorun = 0
+for _wk in sorted(haftalar):
+    if _wk in tatil_haftalari:
+        continue
+    _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
+    _tipler = sorted({saat[(ds, v)][0] for ds in _hi
+                      for v in gun_vardiyalari[ds] if (ds, v) in talep})
+    for _t in _tipler:
+        _zirve = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                          if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                      for ds in _hi), default=0)
+        _kap = _tip_kapasite.get((_wk, _t), 0)
+        _dur = "✓" if _kap >= _zirve else f"⚠ AÇIK {_zirve - _kap}"
+        if _kap < _zirve:
+            _tip_sorun += 1
+        print(f"    {_wk[0]}-W{_wk[1]:>3} {_t:>7} {_zirve:>12} {_kap:>18}  {_dur}")
+if _tip_sorun:
+    print(f"    ⚠ {_tip_sorun} (hafta,tip) kombinasyonunda takım kapasitesi talebin ALTINDA →")
+    print(f"      hafta içi eksiğin ANA sebebi bu. Çözüm ağırlık DEĞİL: takım-tip")
+    print(f"      granülerliği (W_TAKIM düşür / takım bölünmesine izin ver) ya da")
+    print(f"      Stage-1'de tip dağılımını takım boyutlarına yaklaştır.")
+else:
+    print(f"    ✓ her (hafta,tip) için atanan takım kapasitesi zirve talebi karşılıyor →")
+    print(f"      hafta içi eksik takım-tip tahsisinden DEĞİL, gün içi dağılımdan.")
+
+# ── 4) KİM NEREDE — en kötü 10 eksik kovada agentların gittiği yer ────
+print(f"\n[4] EN KÖTÜ 10 EKSİK KOVA — o gün agentlar nerede?")
+_kot = _eks.sort_values("eksik", ascending=False).head(10)
+for _, _r in _kot.iterrows():
+    _ds, _v, _t = _r["tarih"], _r["vardiya"], _r["saat"].split("-")[0]
+    _d = dt.date.fromisoformat(_ds)
+    _c = Counter()
+    for a in AGENTS:
+        if (a, _ds, _v) in x and solver.Value(x[(a, _ds, _v)]) == 1:
+            _c["BU KOVADA"] += 1
+            continue
+        if _d in izin_map.get(a, set()):
+            _c["izin"] += 1
+        elif _d in off_block_map.get(a, set()):
+            _c["off_t2"] += 1
+        elif (a, _ds, _v) not in x:
+            _c["değişken yok"] += 1
+        elif a in sabah_agents and not (dakika(saat[(_ds, _v)][0]) < dakika(saat[(_ds, _v)][1])
+                                        and dakika(saat[(_ds, _v)][1]) <= LIMIT):
+            _c["sabahçı (H13)"] += 1
+        elif a in hafta_sonu_yasak and _d.weekday() >= 5:
+            _c["hamile/süt (H14)"] += 1
+        elif (_d.weekday() < 5
+              and _secim.get((agent_takim.get(a), _d.isocalendar()[:2])) not in (None, _t)):
+            # H19 SERT: takımı o hafta BAŞKA tipe atanmış → bu kovaya giremez.
+            # Bu kişiler "off" görünse bile sebep off tercihi değil, takım kilidi.
+            _c["takım TİPİ farklı (H19)"] += 1
+        else:
+            _hucre = roster.at[a, _ds] if _ds in roster.columns else None
+            if _hucre in ("off", "off_t"):
+                _c["OFF verilmiş" if _hucre == "off" else "off_t verilmiş"] += 1
+            elif _hucre in _OFF_LIKE:
+                _c[str(_hucre)] += 1
+            elif isinstance(_hucre, str) and _hucre.replace("mesai ", "").split("-")[0] != _t:
+                _c["BAŞKA TİPTE çalışıyor"] += 1
+            else:
+                _c["aynı tip, başka kova"] += 1
+    print(f"    {_ds} {_r['gun']} {_r['saat']}: talep {int(_r['talep'])}, "
+          f"atanan {int(_r['atanan'])}, EKSİK {int(_r['eksik'])}")
+    print(f"        {dict(_c.most_common())}")
+
+# ── 5) AMAÇ FONKSİYONU PAYLARI — hangi ceza gerçekten bağlayıcı ───────
+# Eksik cezası toplam amacın küçük bir kısmıysa, model onu "ucuz" buluyordur.
+_eksik_ceza = (_hi_e * W_EKSIK_HI) + (_hs_e * W_EKSIK_HS)
+_offt_ceza  = len(offt_karsilanmadi) * W_OFF_T
+print(f"\n[5] AMAÇ FONKSİYONU PAYLARI  (toplam = {solver.ObjectiveValue():.0f})")
+print(f"    eksik coverage cezası : {_eksik_ceza:>10}  "
+      f"(%{100 * _eksik_ceza / max(1, solver.ObjectiveValue()):.1f})")
+print(f"    off_t karşılanmayan   : {_offt_ceza:>10}  "
+      f"({len(offt_karsilanmadi)} kişi-gün × {W_OFF_T})")
+print(f"    → eksik payı düşükse model eksiği ucuz buluyor; ama önce [1] ve [3]'e bak,")
+print(f"      orada yapısal/tahsis sorunu varsa ağırlık artırmak İŞE YARAMAZ.")
+print("=" * 78)
+
+
 # %% [HÜCRE 26] — VARDİYA TABLOLARI (talep vs atanan) ──────────────────
 # df_sonuc'a takım eşlemesi (yoksa)
 if "takim" not in df_sonuc.columns:
