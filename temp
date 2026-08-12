@@ -2414,29 +2414,33 @@ df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 # Roster'ın İÇ değerleri sade kalır ("off", "izin", "09:00-18:00" ...) çünkü H22'nin
 # mesai/norm hesabı onları okuyor. Excel'e basarken burada OKUNUR metne çevriliyor:
 # etiket üst satır, saat alt satır (LEJANT sayfasındaki gösterimle birebir).
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 _BOLD = Font(bold=True)
 _WRAP = Alignment(wrap_text=True, horizontal="center", vertical="center")
+# Hücre çizgileri: dolgu rengi Excel'in kendi kılavuz çizgilerini örtüyor → her
+# hücreye ince kenarlık. Renkli hücreler birbirine yapışık görünmesin.
+_INCE = Side(style="thin", color="BFBFBF")
+_BORDER = Border(left=_INCE, right=_INCE, top=_INCE, bottom=_INCE)
 
 # kategori → dolgu rengi (None = dolgusuz).  LEJANT sayfası bu sözlükten üretilir.
 LEJANT = [
-    ("İZİN",              "izin",       "CCC0DA", "Yıllık izin / idari izin — HARD, model değiştiremez"),
-    ("OFF_T",             "off_t",      "DCE6F1", "Agent off talebi (off_t) — SOFT, model karşıladı"),
-    ("OFF_T2",            "off_t2",     "8DB4E2", "Agent off talebi (off_t2) — HARD, her zaman karşılanır"),
-    ("OFF",               "off",        None,     "Modelin kendi verdiği off (talep yok)"),
-    ("RESMİ TATİL MESAİ", "resmi_tatil", "FFC000", "Resmi tatil gününde çalışma (aylık iş günü sayılmaz, ücretli mesai)"),
-    ("ARİFE",             "arife",      "FCD5B4", "Arife günü — hamile/süt/mesaiye kalamaz agent, 09:00-13:00"),
+    ("İZİN",              "izin",       "E4D7F5", "Yıllık izin / idari izin — HARD, model değiştiremez"),
+    ("OFF_T",             "off_t",      "CCE5FF", "Agent off talebi (off_t) — SOFT, model karşıladı"),
+    ("OFF_T2",            "off_t2",     "8FC7FF", "Agent off talebi (off_t2) — HARD, her zaman karşılanır"),
+    ("OFF",               "off",        "F3F2E9", "Modelin kendi verdiği off (talep yok)"),
+    ("RESMİ TATİL MESAİ", "resmi_tatil", "F8CBAD", "Resmi tatil gününde çalışma (aylık iş günü sayılmaz, ücretli mesai)"),
+    ("ARİFE",             "arife",      "D0E0E3", "Arife günü — hamile/süt/mesaiye kalamaz agent, 09:00-13:00"),
     ("ARİFE MESAİ",       "arife_mesai", "E6B8D9", "Arife günü — diğer agentlar (aylık iş günü sayılmaz, ücretli mesai)"),
     ("NORM + vardiya",    "norm",       "C6EFCE", "Hafta sonu çalışma, AYNI HAFTA hafta içi off'un karşılığı (kota İÇİNDE)"),
-    ("MESAİ + vardiya",   "mesai",      "FFD966", "Hafta sonu çalışma, AYLIK kotayı aşan (ücretli mesai)"),
+    ("MESAİ + vardiya",   "mesai",      "FFE599", "Hafta sonu çalışma, AYLIK kotayı aşan (ücretli mesai)"),
     ("TELAFİ + vardiya",  "telafi",     "D9EAD3", "Hafta sonu çalışma, BAŞKA haftadaki fazla off'un telafisi (ücretli mesai DEĞİL)"),
     ("kırmızı hücre",     "offt_kars",  "FF7C80", "off_t talebi vardı ama KARŞILANMADI — agent o gün çalışıyor"),
     ("dolgusuz",          "normal",     None,     "Normal hafta içi çalışma"),
     (f"--- ÖNCEKİ AY ({'geçmiş, plan dışı, salt okunur'}) ---", None, None, ""),
-    ("saat aralığı",      "onc_calisma", "D9D9D9", "Önceki ayda çalışılmış gün"),
-    ("İZİN",              "onc_izin",   "DAE3F3", "Önceki ayda yıllık/idari izin"),
-    ("H.İZİN",            "onc_hizin",  "F4B183", "Önceki ay haftalık izin günü (süt izni düzeni), off DEĞİL"),
+    ("saat aralığı",      "onc_calisma", "FFF3F3", "Önceki ayda çalışılmış gün"),
+    ("İZİN",              "onc_izin",   "EDE3F7", "Önceki ayda yıllık/idari izin"),
+    ("H.İZİN",            "onc_hizin",  "FCE4D6", "Önceki ay haftalık izin günü (süt izni düzeni), off DEĞİL"),
     ("OFF",               "onc_off",    "F2F2F2", "Önceki ayda off"),
     ("boş",               "onc_bos",    None,     "Önceki ayda o güne ait kayıt yok"),
 ]
@@ -2532,12 +2536,15 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
         for _cell in _ws[1]:
             _cell.font = _BOLD
 
-    # roster: kategori → dolgu + iki satırlı hücre için wrap
+    # roster: kategori → dolgu + iki satırlı hücre için wrap + hücre çizgileri
     _ws = _xl.sheets["roster"]
     _kol_ad = [_c.value for _c in _ws[1]]               # A1 = index başlığı (agent_name)
-    for _row in _ws.iter_rows(min_row=2):
-        _a = _agents_sirali[_row[0].row - 2]
+    for _row in _ws.iter_rows(min_row=1):
+        _a = (_agents_sirali[_row[0].row - 2] if _row[0].row >= 2 else None)
         for _cell in _row:
+            _cell.border = _BORDER                      # başlık dahil TÜM hücreler çizgili
+            if _a is None:
+                continue                                # başlık satırı → dolgu/wrap yok
             _c_ad = _kol_ad[_cell.column - 1]
             _kt = _kat.get((_a, _c_ad))
             if _kt is None:
