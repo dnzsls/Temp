@@ -3142,12 +3142,19 @@ for _ds, _tip in _hedefler:
             continue                               # hiçbir üyesi bu tipi yapamıyor
         _aday.append((_T, len(_uyeler2), _uygun, _s, _verici_pay.get(_s, 0)))
     _aday.sort(key=lambda r: (-r[4], -r[2]))       # önce payı bol verici, sonra büyük takım
-    print(f"    {'takım':<38} {'üye':>4} {'uygun':>6} {'verici tip':>11} "
-          f"{'verici EN DAR gün payı':>23}")
+    # Her satır TEK BAŞINA "bu takımı taşısaydık" senaryosu (kümülatif DEĞİL):
+    #   verici SONRA = vericinin en dar gün payı − taşınan uygun üye
+    #                  (NEGATİF → verici o gün açığa düşer, bedeli bu)
+    #   eksik SONRA  = incelenen kovanın kalan eksiği
+    print(f"    {'takım':<30} {'üye':>4} {'uygun':>6} {'verici':>7} {'pay':>5} "
+          f"{'verici SONRA':>13} {'eksik SONRA':>12}  sonuç")
+    _kalan_eksik0 = _t_tip - _a_tip
     for _T, _b, _u, _s, _p in _aday[:10]:
-        _not = ("taşınabilir" if _p >= _u else
-                f"⚠ verici {_u - _p} açığa düşer")
-        print(f"    {_T[:38]:<38} {_b:>4} {_u:>6} {_s:>11} {_p:>+23}   {_not}")
+        _kv = _p - _u                              # taşıma sonrası vericinin payı
+        _ke = max(0, _kalan_eksik0 - _u)           # taşıma sonrası hedefin eksiği
+        _not = ("taşınabilir" if _kv >= 0 else f"⚠ verici {-_kv} açığa düşer")
+        print(f"    {_T[:30]:<30} {_b:>4} {_u:>6} {_s:>7} {_p:>+5} "
+              f"{_kv:>+13} {_ke:>12}  {_not}")
     # BEDELSİZ toplam: aynı vericiden birden çok takım alınırsa pay TÜKENİR →
     # verici bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
     _butce = dict(_verici_pay)
