@@ -3123,15 +3123,24 @@ for _ds, _tip in _hedefler:
 
     # ── [4] TAŞIMA ADAYLARI — hangi takım gelebilirdi, bedeli ne? ────
     # Takım tipi HAFTALIK → taşınırsa verici tip TÜM HAFTA o üyeleri kaybeder.
-    # Gerçek bedel = vericinin o haftadaki EN DAR günü, ölçü MÜSAİT ÜYE − TALEP.
-    # (Eskiden 'atanan − talep' idi → park edilmiş fazlalığı pay sanıyordu, bkz.
-    #  _tip_musait açıklaması. 15:00 için +10 gösteriyordu, gerçeği +40'tı.)
+    # Bedel İKİ ÖLÇÜYLE veriliyor, çünkü tek ölçü yanıltıyor:
+    #   ATANAN payı  = atanan − talep      → "kimse yerinden kıpırdamazsa" (ALT sınır)
+    #       Ör. 3 Ağu 15:00: atanan 66, talep 56 → +10. Büşra'nın 11 kişisi giderse
+    #       55 kalır → −1. Bu KÖTÜMSER: o tipte O GÜN OFF olan üyeler yok sayılıyor.
+    #   MÜSAİT payı  = o tipte çalışabilen üye − talep  → "off'takiler çekilebilir"
+    #       (ÜST sınır). Aynı örnekte +27, taşıma sonrası +16. Bu İYİMSER: o kişinin
+    #       kotası / haftalık off tavanı el verir mi diye BAKMIYOR.
+    # GERÇEK ikisinin arasında: ATANAN payı ≥ 0 kalıyorsa taşıma bedelsiz;
+    # negatife düşüp MÜSAİT payı pozitifse, aradaki fark kadar kişinin off'tan
+    # çekilmesi gerekir (mümkün olabilir de olmayabilir de) → "sınırda".
     print(f"\n[4] TAŞIMA ADAYLARI  (başka tipteki takımlar — {_tip}'e çekilebilir mi?)")
     _hi_gun = [g for g in _hafta_gun if dt.date.fromisoformat(g).weekday() < 5]
-    _verici_pay = {}                               # tip → o haftadaki EN DAR gün payı
+    _pay_at, _pay_mu = {}, {}                      # tip → o haftadaki EN DAR gün payı
     for _t in set(_tip_uye):
-        _verici_pay[_t] = min((_tip_musait(g, _t, _wk) - _gun_tip_sayi(g, _t)[0]
-                               for g in _hi_gun), default=0)
+        _pay_at[_t] = min((_gun_tip_sayi(g, _t)[1] - _gun_tip_sayi(g, _t)[0]
+                           for g in _hi_gun), default=0)
+        _pay_mu[_t] = min((_tip_musait(g, _t, _wk) - _gun_tip_sayi(g, _t)[0]
+                           for g in _hi_gun), default=0)
     _aday = []
     for _T, _uyeler2 in takimlar.items():
         _s = _secim_d.get((_T, _wk))
@@ -3140,37 +3149,47 @@ for _ds, _tip in _hedefler:
         _uygun = sum(1 for a in _uyeler2 if _yapabilir(a, _ds, _tip))
         if not _uygun:
             continue                               # hiçbir üyesi bu tipi yapamıyor
-        _aday.append((_T, len(_uyeler2), _uygun, _s, _verici_pay.get(_s, 0)))
-    _aday.sort(key=lambda r: (-r[4], -r[2]))       # önce payı bol verici, sonra büyük takım
-    # Her satır TEK BAŞINA "bu takımı taşısaydık" senaryosu (kümülatif DEĞİL):
-    #   verici SONRA = vericinin en dar gün payı − taşınan uygun üye
-    #                  (NEGATİF → verici o gün açığa düşer, bedeli bu)
-    #   eksik SONRA  = incelenen kovanın kalan eksiği
-    print(f"    {'takım':<30} {'üye':>4} {'uygun':>6} {'verici':>7} {'pay':>5} "
-          f"{'verici SONRA':>13} {'eksik SONRA':>12}  sonuç")
+        _aday.append((_T, len(_uyeler2), _uygun, _s,
+                      _pay_at.get(_s, 0), _pay_mu.get(_s, 0)))
+    _aday.sort(key=lambda r: (-r[4], -r[5], -r[2]))   # önce bedelsiz, sonra ulaşılabilir
+    # Her satır TEK BAŞINA "bu takımı taşısaydık" senaryosu (kümülatif DEĞİL).
+    print(f"    {'takım':<28} {'üye':>4} {'uygun':>6} {'verici':>7} "
+          f"{'ATANAN pay→sonra':>17} {'MÜSAİT pay→sonra':>17} {'eksik→':>7}  sonuç")
     _kalan_eksik0 = _t_tip - _a_tip
-    for _T, _b, _u, _s, _p in _aday[:10]:
-        _kv = _p - _u                              # taşıma sonrası vericinin payı
+    for _T, _b, _u, _s, _pa, _pm in _aday[:10]:
+        _ka, _km = _pa - _u, _pm - _u              # taşıma sonrası verici payları
         _ke = max(0, _kalan_eksik0 - _u)           # taşıma sonrası hedefin eksiği
-        _not = ("taşınabilir" if _kv >= 0 else f"⚠ verici {-_kv} açığa düşer")
-        print(f"    {_T[:30]:<30} {_b:>4} {_u:>6} {_s:>7} {_p:>+5} "
-              f"{_kv:>+13} {_ke:>12}  {_not}")
-    # BEDELSİZ toplam: aynı vericiden birden çok takım alınırsa pay TÜKENİR →
-    # verici bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
-    _butce = dict(_verici_pay)
-    _serbest = 0
-    for _T, _b, _u, _s, _p in _aday:
-        if _butce.get(_s, 0) >= _u:
-            _butce[_s] -= _u
-            _serbest += _u
-    print(f"    → BEDELSİZ taşınabilecek toplam kişi: {_serbest}  "
-          f"(eksik {_t_tip - _a_tip})   [verici payları TÜKETİLEREK hesaplandı]")
-    if _serbest >= _t_tip - _a_tip:
-        print(f"      Eksiği kapatmaya YETERDİ → çözücü daha iyi bir tahsis bulamamış")
-        print(f"      (takım×hafta×tip knapsack'i). H19C ipucunu güçlendirmek gerekir.")
+        _not = ("bedelsiz" if _ka >= 0 else
+                (f"sınırda: {-_ka} kişi off'tan çekilmeli" if _km >= 0 else
+                 f"⚠ verici {-_km} açık (off'ta da yok)"))
+        print(f"    {_T[:28]:<28} {_b:>4} {_u:>6} {_s:>7} "
+              f"{f'{_pa:+d}→{_ka:+d}':>17} {f'{_pm:+d}→{_km:+d}':>17} {_ke:>7}  {_not}")
+    # TOPLAM: aynı vericiden birden çok takım alınırsa pay TÜKENİR → verici
+    # bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
+    # İki bütçe ayrı ayrı: BEDELSİZ (atanan) ve ULAŞILABİLİR (müsait).
+    _s_at = _s_mu = 0
+    _b_at, _b_mu = dict(_pay_at), dict(_pay_mu)
+    for _T, _b, _u, _s, _pa, _pm in _aday:
+        if _b_at.get(_s, 0) >= _u:
+            _b_at[_s] -= _u
+            _s_at += _u
+        if _b_mu.get(_s, 0) >= _u:
+            _b_mu[_s] -= _u
+            _s_mu += _u
+    print(f"    → taşınabilecek toplam kişi:  BEDELSİZ {_s_at}  |  "
+          f"ULAŞILABİLİR {_s_mu}   (eksik {_kalan_eksik0})")
+    print(f"      [verici payları TÜKETİLEREK; BEDELSİZ = kimse yerinden kıpırdamadan,")
+    print(f"       ULAŞILABİLİR = vericide o gün off olanlar da çalıştırılırsa]")
+    if _s_at >= _kalan_eksik0:
+        print(f"      BEDELSİZ bile eksiği kapatmaya YETERDİ → çözücü daha iyi bir")
+        print(f"      tahsis bulamamış (takım×hafta×tip knapsack'i) → H19C ipucu.")
+    elif _s_mu >= _kalan_eksik0:
+        print(f"      Bedelsiz YETMEZ ama vericideki off'lar çekilirse yeter →")
+        print(f"      tahsis + off yerleşimi BİRLİKTE düzeltilmeli, tek başına takım")
+        print(f"      taşımak vericiyi açığa düşürür.")
     else:
-        print(f"      YETMEZDİ: taşınabilecek {_serbest} kişi < eksik {_t_tip - _a_tip}.")
-        print(f"      Kalanı için verici tipler de açık → gerçek kapasite sorunu.")
+        print(f"      İkisi de YETMEZ: en iyi hâlde {_s_mu} < eksik {_kalan_eksik0}")
+        print(f"      → gerçek kapasite sorunu, tahsisle kapanmaz.")
 
 print("=" * 78)
 
