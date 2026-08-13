@@ -2938,6 +2938,203 @@ print(f"        kurulamaz; bir üst TOL'e geç ya da hafta sonunu ağırlıkla y
 print("=" * 78)
 
 
+# %% [HÜCRE 25D] — TEK KOVA RÖNTGENİ (SALT OKUNUR) ────────────────────
+# SORU: "3 Ağustos 09:00'da 59 lazımdı, 26 atandı — neden 2 takım daha
+#        buraya konmadı?"
+# Bu hücre TEK bir (gün, vardiya tipi) için dört adımda cevap arar. Sıra ÖNEMLİ:
+#   [1] GÜN mü dar? O gün toplam talep vs o gün müsait agent. Gün genelinde
+#       kapasite yoksa tip değiştirmek HİÇBİR ŞEY çözmez — kova başka kovadan
+#       çalar, toplam eksik aynı kalır.
+#   [2] TİP kapasitesi ne? H19 SERT: kova ancak o hafta o tipe atanmış takımlarla
+#       dolar. Atanan üye sayısı talebin altındaysa matematiksel olarak dolamaz.
+#   [3] Kapasite VARDI da gelmedi mi? O tipe atanmış üyeler o gün nerede —
+#       off / izin / off_t / aynı tipte başka kova. "Kapasite yok" ile
+#       "kapasite var ama off verilmiş" bambaşka iki sorun, çözümleri de farklı.
+#   [4] Hangi takım TAŞINABİLİRDİ, bedeli ne? Kritik nokta: takım tipi HAFTALIK.
+#       Pazartesi için bir takımı 09:00'a çekersen o takım TÜM HAFTA orada kalır
+#       → verici tip başka bir gün açığa düşebilir. Bu yüzden vericinin o
+#       haftadaki EN DAR günü hesaplanıyor; taşımanın gerçek bedeli o.
+# Model değişmiyor, salt okunur.
+INCELE_KOVA = []        # [("2026-08-03", "09:00"), ...] — BOŞ ise en kötü N eksik
+INCELE_SAYI = 3         # otomatik seçimde kaç kova incelensin
+
+print("=" * 78)
+print("H25D — TEK KOVA RÖNTGENİ (neden bu kova eksik kaldı?)")
+print("=" * 78)
+
+# hedef listesi: elle verilmediyse en çok eksiği olan kovalar (tip bazında birleşik)
+if INCELE_KOVA:
+    _hedefler = [(ds, tip) for ds, tip in INCELE_KOVA]
+else:
+    _eks_tip = {}                                  # (gün, tip) → toplam eksik
+    for (ds, v), kisi in talep.items():
+        _at = sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]))
+        if _at < kisi:
+            _k = (ds, saat[(ds, v)][0])
+            _eks_tip[_k] = _eks_tip.get(_k, 0) + (kisi - _at)
+    _hedefler = [k for k, _ in sorted(_eks_tip.items(), key=lambda kv: -kv[1])][:INCELE_SAYI]
+
+_secim_d = {}                                      # (takım, hafta) → seçilen tip
+for (_T, _wk, _bas), _b in takim_tip.items():
+    if solver.Value(_b):
+        _secim_d[(_T, _wk)] = _bas
+
+
+def _gun_tip_sayi(ds, tip):
+    """o gün, o tipteki kovaların (talep, atanan) toplamı."""
+    _t = _a = 0
+    for v in gun_vardiyalari.get(ds, []):
+        if (ds, v) in talep and saat[(ds, v)][0] == tip:
+            _t += talep[(ds, v)]
+            _a += sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]))
+    return _t, _a
+
+
+def _yapabilir(a, ds, tip):
+    """agent o gün o TİPTE fiziksel olarak çalışabilir mi (sert yasaklar)."""
+    for v in gun_vardiyalari.get(ds, []):
+        if (a, ds, v) not in x or saat[(ds, v)][0] != tip:
+            continue
+        bas, bit = saat[(ds, v)]
+        if a in sabah_agents and not (dakika(bas) < dakika(bit) and dakika(bit) <= LIMIT):
+            continue                               # H13 sabahçı
+        if a in junior_agents and bas in GECE_TIPLERI:
+            continue                               # H14B kıdem/gece
+        if a in hafta_sonu_yasak and dt.date.fromisoformat(ds).weekday() >= 5:
+            continue                               # H14 hamile/süt
+        return True
+    return False
+
+
+for _ds, _tip in _hedefler:
+    _d = dt.date.fromisoformat(_ds)
+    _wk = _d.isocalendar()[:2]
+    _hafta_gun = haftalar.get(_wk, [])
+    _t_tip, _a_tip = _gun_tip_sayi(_ds, _tip)
+    print(f"\n{'─' * 74}")
+    print(f"KOVA: {_ds} {DAY_TR[_d.weekday()]}  tip {_tip}  →  talep {_t_tip}, "
+          f"atanan {_a_tip}, EKSİK {_t_tip - _a_tip}   (ISO hafta {_wk[0]}-W{_wk[1]})")
+    print(f"{'─' * 74}")
+
+    # ── [1] GÜN BİLANÇOSU ────────────────────────────────────────────
+    _g_talep = sum(talep[(_ds, v)] for v in gun_vardiyalari[_ds] if (_ds, v) in talep)
+    _g_atanan = sum(1 for a in AGENTS for v in gun_vardiyalari[_ds]
+                    if (a, _ds, v) in x and solver.Value(x[(a, _ds, v)])
+                    and (_ds, v) in talep)
+    _g_musait = sum(1 for a in AGENTS
+                    if any((a, _ds, v) in x for v in gun_vardiyalari[_ds]))
+    _g_izin = sum(1 for a in AGENTS if _d in izin_map.get(a, set()))
+    _g_offt2 = sum(1 for a in AGENTS if _d in off_block_map.get(a, set()))
+    print(f"\n[1] GÜN BİLANÇOSU ({_ds})")
+    print(f"    o günün TOPLAM talebi (tüm tipler) : {_g_talep}")
+    print(f"    o gün atanan (tüm tipler)          : {_g_atanan}  "
+          f"→ günlük açık {_g_talep - _g_atanan}")
+    print(f"    o gün DEĞİŞKENİ olan agent         : {_g_musait} "
+          f"(izin {_g_izin}, off_t2 {_g_offt2} hariç)")
+    if _g_musait < _g_talep:
+        print(f"    ⚠ GÜN DAR: müsait agent ({_g_musait}) < günlük talep ({_g_talep}) →")
+        print(f"      bu kovayı doldurmak BAŞKA kovayı boşaltır. Takım taşımak toplam")
+        print(f"      eksiği DEĞİŞTİRMEZ, sadece yerini değiştirir.")
+    else:
+        print(f"    → gün genelinde {_g_musait - _g_talep} kişilik pay var; sorun")
+        print(f"      DAĞITIMDA (tip tahsisi / off yerleşimi) → [2] ve [3]'e bak.")
+
+    # ── [2] O HAFTA TİP TAHSİSİ ──────────────────────────────────────
+    _tip_uye, _tip_takim = {}, {}
+    for _T, _uyeler in takimlar.items():
+        _s = _secim_d.get((_T, _wk))
+        if _s is None:
+            continue
+        _tip_uye[_s] = _tip_uye.get(_s, 0) + len(_uyeler)
+        _tip_takim.setdefault(_s, []).append((_T, len(_uyeler)))
+    print(f"\n[2] O HAFTANIN TİP TAHSİSİ  (H19: takım hafta boyu tek tipte)")
+    print(f"    {'tip':>7} {'takım':>6} {'üye':>5} {'o gün talep':>12} "
+          f"{'o gün atanan':>13} {'hafta zirve talep':>18}")
+    for _t in sorted(set(_tip_uye) | {_tip}):
+        _tt, _ta = _gun_tip_sayi(_ds, _t)
+        _zirve = max((_gun_tip_sayi(g, _t)[0] for g in _hafta_gun
+                      if dt.date.fromisoformat(g).weekday() < 5), default=0)
+        _im = "  ← İNCELENEN" if _t == _tip else ""
+        print(f"    {_t:>7} {len(_tip_takim.get(_t, [])):>6} {_tip_uye.get(_t, 0):>5} "
+              f"{_tt:>12} {_ta:>13} {_zirve:>18}{_im}")
+    _kap = _tip_uye.get(_tip, 0)
+    if _kap < _t_tip:
+        print(f"    ⚠ Bu tipe atanan TOPLAM üye {_kap} < talep {_t_tip} → kova")
+        print(f"      matematiksel olarak dolamaz. Eksiğin ≥{_t_tip - _kap}'i tahsis kaynaklı.")
+    else:
+        print(f"    → Tipe atanan üye ({_kap}) talebi ({_t_tip}) karşılıyor; demek ki")
+        print(f"      üyeler o gün ÇALIŞMIYOR → [3]'e bak.")
+
+    # ── [3] BU TİPE ATANANLAR O GÜN NEREDE ───────────────────────────
+    _uyeler = [a for _T, _u in takimlar.items()
+               if _secim_d.get((_T, _wk)) == _tip for a in _u]
+    _c = Counter()
+    for a in _uyeler:
+        _calisti = None
+        for v in gun_vardiyalari[_ds]:
+            if (a, _ds, v) in x and solver.Value(x[(a, _ds, v)]):
+                _calisti = v
+                break
+        if _calisti is not None:
+            _c["BU TİPTE ÇALIŞIYOR" if saat[(_ds, _calisti)][0] == _tip
+               else f"BAŞKA TİPTE ({saat[(_ds, _calisti)][0]})"] += 1
+        elif _d in izin_map.get(a, set()):
+            _c["izin"] += 1
+        elif _d in off_block_map.get(a, set()):
+            _c["off_t2 (sert blok)"] += 1
+        elif _d in off_soft_map.get(a, set()):
+            _c["off_t (talep edilmiş off)"] += 1
+        elif not _yapabilir(a, _ds, _tip):
+            _c["bu TİPİ yapamaz (sabahçı/kıdem/hamile)"] += 1
+        else:
+            _c["OFF verilmiş (model tercihi)"] += 1
+    print(f"\n[3] BU TİPE ATANMIŞ {len(_uyeler)} ÜYE, {_ds} GÜNÜ NEREDE?")
+    for _k, _n in _c.most_common():
+        print(f"    {_k:<42} {_n:>5}")
+    _bosta = _c.get("OFF verilmiş (model tercihi)", 0) + _c.get("off_t (talep edilmiş off)", 0)
+    if _bosta:
+        print(f"    → {_bosta} kişi bu tipte ve müsait ama ÇALIŞTIRILMAMIŞ. Sebep tahsis")
+        print(f"      değil, off yerleşimi: H20B hafta içi off cezası (W_HI_OFF+surplus)")
+        print(f"      ya da haftalık off tavanı bu günü off yapmayı seçmiş.")
+
+    # ── [4] TAŞIMA ADAYLARI — hangi takım gelebilirdi, bedeli ne? ────
+    # Takım tipi HAFTALIK → taşınırsa verici tip TÜM HAFTA o üyeleri kaybeder.
+    # Gerçek bedel = vericinin o haftadaki EN DAR günü (min: atanan − talep).
+    print(f"\n[4] TAŞIMA ADAYLARI  (başka tipteki takımlar — {_tip}'e çekilebilir mi?)")
+    _hi_gun = [g for g in _hafta_gun if dt.date.fromisoformat(g).weekday() < 5]
+    _verici_pay = {}                               # tip → o haftadaki EN DAR gün payı
+    for _t in set(_tip_uye):
+        _verici_pay[_t] = min((_gun_tip_sayi(g, _t)[1] - _gun_tip_sayi(g, _t)[0]
+                               for g in _hi_gun), default=0)
+    _aday = []
+    for _T, _uyeler2 in takimlar.items():
+        _s = _secim_d.get((_T, _wk))
+        if _s is None or _s == _tip:
+            continue                               # zaten bu tipte / o hafta tipi yok
+        _uygun = sum(1 for a in _uyeler2 if _yapabilir(a, _ds, _tip))
+        if not _uygun:
+            continue                               # hiçbir üyesi bu tipi yapamıyor
+        _aday.append((_T, len(_uyeler2), _uygun, _s, _verici_pay.get(_s, 0)))
+    _aday.sort(key=lambda r: (-r[4], -r[2]))       # önce payı bol verici, sonra büyük takım
+    print(f"    {'takım':<38} {'üye':>4} {'uygun':>6} {'verici tip':>11} "
+          f"{'vericinin EN DAR gün payı':>26}")
+    for _T, _b, _u, _s, _p in _aday[:10]:
+        _not = ("taşınabilir" if _p >= _u else
+                f"⚠ verici {_u - _p} açığa düşer")
+        print(f"    {_T[:38]:<38} {_b:>4} {_u:>6} {_s:>11} {_p:>+26}   {_not}")
+    _serbest = sum(_u for _, _, _u, _, _p in _aday if _p >= _u)
+    print(f"    → BEDELSİZ taşınabilecek toplam kişi: {_serbest}  "
+          f"(eksik {_t_tip - _a_tip})")
+    if _serbest >= _t_tip - _a_tip:
+        print(f"      Eksiği kapatmaya YETERDİ → çözücü daha iyi bir tahsis bulamamış")
+        print(f"      (takım×hafta×tip knapsack'i). H19C ipucunu güçlendirmek gerekir.")
+    else:
+        print(f"      YETMEZDİ: taşınabilecek {_serbest} kişi < eksik {_t_tip - _a_tip}.")
+        print(f"      Kalanı için verici tipler de açık → gerçek kapasite sorunu.")
+
+print("=" * 78)
+
+
 # %% [HÜCRE 26] — VARDİYA TABLOLARI (talep vs atanan) ──────────────────
 # df_sonuc'a takım eşlemesi (yoksa)
 if "takim" not in df_sonuc.columns:
