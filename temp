@@ -2638,6 +2638,137 @@ print(f"      orada yapısal/tahsis sorunu varsa ağırlık artırmak İŞE YARA
 print("=" * 78)
 
 
+# %% [HÜCRE 25C] — ORANSAL ADALET TAVANI SİMÜLASYONU (SALT OKUNUR) ─────
+# SORU: mesai/norm dengesini AĞIRLIK yerine KISIT ile yönetsek ne olurdu?
+#   önerilen kısıt:  N × deger_a  ≤  M + N × TOL     (M = Σ deger_a, N = uygun agent)
+#   sadeleşmiş hâli: deger_a ≤ (fiili ortalama) + TOL  → "kimse ortalamanın TOL üstüne çıkamaz"
+# Bu hücre kısıtı KURMAZ. Mevcut çözümü okuyup "kursaydık ne olurdu"yu ölçer:
+#   kaç agent tavanın üstünde, o kişilerden kaç gün alınırdı, o günleri BAŞKASI
+#   alabilir mi (emilim kapasitesi), ve hafta sonunda sert bandı kırar mıydı.
+# Model değişmiyor → yeniden çözmeye gerek yok, H22'den sonra istediğin an koşar.
+#
+# İKİ TARAF SİMETRİK DEĞİL:
+#   MESAİ tavanı  → HACMİ kısar. Bağlarsa agent daha az gün çalışır; hafta sonu
+#                   sert bandı norm ile doldurulabildiği için kayıp HAFTA İÇİ
+#                   kovalara gider = yumuşak ceza. INFEASIBLE olmaz.
+#   HAFTA SONU tavanı → YERİ kısar. Bağlarsa o Cmt/Pzr kovasına kimse konamaz,
+#                   ama kovanın SERT alt sınırı var (talep − HS_TOL) → INFEASIBLE.
+# Bu yüzden [2]'nin altında ayrı bir fizibilite kontrolü ([3]) var; mesaide gerekmiyor.
+print("=" * 78)
+print("H25C — ORANSAL ADALET TAVANI SİMÜLASYONU (model DEĞİŞMEZ, sadece ölçüm)")
+print("=" * 78)
+
+_TOL_LISTE = (0, 1, 2)
+
+
+def _oransal(baslik, deger, uygun, tavan_map=None, birim="kişi-gün"):
+    """Her TOL için tavanı ve etkisini yazdır.
+    deger    : agent → mevcut sayı (mesai günü / hafta sonu günü)
+    uygun    : kısıtın kapsayacağı agent kümesi (N buradan gelir)
+    tavan_map: agent → o agentın FİİLEN çıkabileceği en yüksek değer
+               (mesai: MAX_MESAI; hafta sonu: müsait hafta sonu günü sayısı)
+               → emilim kapasitesi bununla sınırlanır, hayali kapasite sayılmaz
+    """
+    M = sum(deger.get(a, 0) for a in uygun)
+    N = len(uygun)
+    if not N:
+        print(f"\n{baslik}: uygun agent yok → atlandı")
+        return
+    print(f"\n{baslik}")
+    print(f"    fiili toplam M = {M} {birim}  |  uygun agent N = {N}  |  "
+          f"ortalama = {M / N:.2f}")
+    _dag = Counter(deger.get(a, 0) for a in uygun)
+    print(f"    mevcut dağılım (değer → agent): {dict(sorted(_dag.items()))}")
+    print(f"    {'TOL':>4} {'tavan':>6} {'üstünde':>9} {'taşınacak':>10} "
+          f"{'emilim kap.':>12}  sonuç")
+    for _tol in _TOL_LISTE:
+        _cap = M // N + _tol                       # N×d ≤ M + N×TOL  ⇔  d ≤ M/N + TOL
+        _ust = [a for a in uygun if deger.get(a, 0) > _cap]
+        _tasin = sum(deger[a] - _cap for a in _ust)          # tavanın üstünden alınacak gün
+        _emilim = 0                                          # geri kalanın tavana kadar boşluğu
+        for a in uygun:
+            _lim = _cap if tavan_map is None else min(_cap, tavan_map.get(a, _cap))
+            _emilim += max(0, _lim - deger.get(a, 0))
+        _sonuc = ("✓ toplam korunur (yük başkasına geçer)" if _emilim >= _tasin
+                  else f"⚠ en az {_tasin - _emilim} {birim} KAYBOLUR")
+        print(f"    {_tol:>4} {_cap:>6} {len(_ust):>9} {_tasin:>10} "
+              f"{_emilim:>12}  {_sonuc}")
+    print(f"    NOT: tavan FİİLİ toplamdan (M) türüyor. Kısıt kurulunca model M'yi")
+    print(f"         değiştirirse tavan da değişir → bu tablo ilk-adım tahminidir.")
+    print(f"         'emilim kapasitesi' üst sınırdır: o agent o GÜN müsait mi ayrı mesele.")
+
+
+# ── 1) MESAİ (ay bazlı, H22'nin mesai_gun'ü ile AYNI ölçü) ────────────
+_m_uygun = [a for a in roster_2.index if a in kota_map and a not in ozel_agents]
+_m_deger = {a: int(roster_2.at[a, "mesai_gun"]) for a in _m_uygun}
+_oransal(f"[1] MESAİ  (uygun = kota_map'te olan ve özel flag'siz; MAX_MESAI={MAX_MESAI})",
+         _m_deger, _m_uygun, {a: MAX_MESAI for a in _m_uygun}, "mesai-günü")
+print(f"    → bu taraf bağlarsa kayıp HAFTA İÇİ kovalara gider (yumuşak ceza), "
+      f"INFEASIBLE riski YOK.")
+
+# ── 2) HAFTA SONU GÜNÜ (norm + mesai BİRLİKTE — H20C'nin ölçüsü) ──────
+_hs_kol = [c for c in _gun if dt.date.fromisoformat(c).weekday() >= 5
+           and dt.date.fromisoformat(c) not in TATIL]
+_hs_uygun = [a for a in roster.index if a not in hafta_sonu_yasak]
+_hs_deger = {a: sum(1 for c in _hs_kol if roster.at[a, c] not in _OFF_LIKE)
+             for a in _hs_uygun}
+# her agentın FİİLEN çıkabileceği tavan: o hafta sonu günlerinde değişkeni var mı
+# (izin/off_t2 → değişken yok). H18 açıksa 1 tam Cmt+Pzr off ZORUNLU → −2.
+_hs_musait = {}
+for a in _hs_uygun:
+    _m = sum(1 for c in _hs_kol
+             if any((a, c, v) in x for v in gun_vardiyalari.get(c, [])))
+    _hs_musait[a] = max(0, _m - (2 if CIFT_HS_OFF else 0))
+_oransal("[2] HAFTA SONU GÜNÜ  (norm + mesai birlikte; uygun = hamile/süt HARİÇ)",
+         _hs_deger, _hs_uygun, _hs_musait, "hafta sonu günü")
+
+# ── 3) HAFTA SONU FİZİBİLİTE — tavan sert bandı kırar mı? ─────────────
+# Hafta sonu kovalarının SERT alt sınırı: talep − HS_TOL. Toplamı karşılamak için
+# gereken kişi-gün ile, tavan altında kalan TOPLAM kapasiteyi karşılaştır:
+#   kapasite(TOL) = Σ_a min(tavan, o agentın müsait hafta sonu günü)
+# kapasite < gereken → o TOL ile model ÇÖZÜMSÜZ olur (H25B'deki gibi eksik yazmaz).
+_gereken_hs = sum(max(0, kisi - HS_TOL) for (ds, v), kisi in talep.items()
+                  if dt.date.fromisoformat(ds).weekday() >= 5)
+_M_hs = sum(_hs_deger.values())
+_N_hs = len(_hs_uygun)
+print(f"\n[3] HAFTA SONU FİZİBİLİTE  (sert band alt sınırı: talep − HS_TOL={HS_TOL})")
+print(f"    sert band için GEREKEN toplam : {_gereken_hs} kişi-gün")
+print(f"    şu an atanan                  : {_M_hs} kişi-gün "
+      f"(fazla {_M_hs - _gereken_hs})")
+print(f"    {'TOL':>4} {'tavan':>6} {'tavan altı kapasite':>20}  durum")
+for _tol in _TOL_LISTE:
+    _cap = (_M_hs // _N_hs + _tol) if _N_hs else 0
+    _kap = sum(min(_cap, _hs_musait[a]) for a in _hs_uygun)
+    _dur = ("✓ güvenli" if _kap >= _gereken_hs
+            else f"⚠ INFEASIBLE RİSKİ — {_gereken_hs - _kap} kişi-gün AÇIK")
+    print(f"    {_tol:>4} {_cap:>6} {_kap:>20}  {_dur}")
+print(f"    NOT: bu TOPLAM kontrolü. Toplam yetse bile tek bir gün dolmayabilir →")
+print(f"         aşağıdaki gün bazlı tabloya bak.")
+
+# gün bazlı: o gün gerçekten müsait agent, o günün sert alt sınırını karşılıyor mu
+print(f"\n    gün bazlı (en dar 10 hafta sonu günü — tavandan BAĞIMSIZ, ham müsaitlik):")
+_gun_satir = []
+for _ds in sorted({c for c in _hs_kol}):
+    _min_gerek = sum(max(0, talep[(_ds, v)] - HS_TOL) for v in gun_vardiyalari[_ds]
+                     if (_ds, v) in talep)
+    _mus = sum(1 for a in _hs_uygun
+               if any((a, _ds, v) in x for v in gun_vardiyalari[_ds]))
+    _gun_satir.append((_ds, _min_gerek, _mus, _mus - _min_gerek))
+for _ds, _g, _m, _f in sorted(_gun_satir, key=lambda t: t[3])[:10]:
+    _d = dt.date.fromisoformat(_ds)
+    print(f"      {_ds} {DAY_TR[_d.weekday()]}: sert alt sınır {_g:4d}  "
+          f"müsait agent {_m:4d}  pay {_f:+5d}"
+          f"{'   ⚠ DAR' if _f < 0.15 * max(1, _g) else ''}")
+
+# ── 4) KARAR ÖZETİ ────────────────────────────────────────────────────
+print(f"\n[4] OKUMA KILAVUZU")
+print(f"    [1] 'taşınacak' düşük + 'emilim' yüksek → mesai kısıtı ucuz, uygulanabilir.")
+print(f"    [1] 'KAYBOLUR' çıkıyorsa → o TOL ile toplam mesai düşer, coverage eksiği artar.")
+print(f"    [3] herhangi bir TOL'de 'INFEASIBLE RİSKİ' → hafta sonu tavanı O TOL ile")
+print(f"        kurulamaz; bir üst TOL'e geç ya da hafta sonunu ağırlıkla yönetmeye devam et.")
+print("=" * 78)
+
+
 # %% [HÜCRE 26] — VARDİYA TABLOLARI (talep vs atanan) ──────────────────
 # df_sonuc'a takım eşlemesi (yoksa)
 if "takim" not in df_sonuc.columns:
