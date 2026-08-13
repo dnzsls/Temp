@@ -1597,25 +1597,52 @@ print(f"haftada aynı vardiya kısıtı: {n} (agent × hafta)  [göstergeler H19
 #  (2) Off önce HAFTA SONU olsun → hafta içi off'a küçük ceza. Eşitlikte model
 #      hafta sonunu off seçer; hafta sonu coverage için hafta içi off gerekirse esner.
 
-# (1) haftalık fazla off (>2)
-# SINIR HAFTASI TAŞIMASI (H8C): önceki ayın off'ları da o haftanın off'u.
-#   off = avail − çalışma → önceki ayın ÇALIŞMA günleri iki tarafa da eklenir ve
-#   sadeleşir; geriye sadece `onceki_off` kalır → eşik onun kadar aşağı iner.
-#   Ör. Temmuz'da 4 gün çalışma + 1 off → Ağustos 01-02'nin ikisi de off olursa
-#   o ISO haftada 3 off (4 günlük hafta) → ceza. Biri çalışılırsa ceza yok.
-n1, n1_tas = 0, 0
+# HAFTALIK OFF TAVANI — SERT (yeni) + yumuşak ceza (eski, tercih olarak duruyor)
+#   SERT kural: bir agent bir ISO HAFTADA en fazla MAX_HAFTA_OFF(2) gün OFF olur.
+#   Sayıma GİRMEYENLER: izin (değişkeni yok), off_t2 (değişkeni yok), resmi tatil,
+#   ve off_t (değişkeni VAR ama TALEP EDİLMİŞ off → agentın kendi isteği, tavanı
+#   yemesin). Yani "modelin kendi verdiği off" ≤ 2.
+#   Gerekçe: yumuşak hâli (ağırlık 3) hiç direnmiyordu — hafta içi off cezasıyla
+#   birlikte 3. off ~7-17'ye mal oluyordu, model rahatça ödüyordu. Roster'da
+#   çift hafta sonu off + hafta içi off (3) ve hatta 2 hafta içi + 1 hafta sonu
+#   desenleri çıkıyordu.
+#   SINIR HAFTASI: sert kural SADECE bu ayın günlerini sayar; Temmuz'un off'ları
+#   girmez. Aksi hâlde 1-2 Ağustos (ikisi de hafta sonu) + Temmuz'dan 1 off ile
+#   hamile/süt agent daha baştan ihlalde olurdu (H14: hafta sonu çalışamaz).
+#   Yumuşak ceza (Temmuz'u SAYAN) aynen duruyor → sınır haftasında tercih olarak
+#   çalışmaya devam ediyor, ama çözümsüzlük yaratmıyor.
+HAFTA_OFF_SERT = True              # False → sadece eski yumuşak ceza
+MAX_HAFTA_OFF  = 2                 # bir ISO haftada en fazla kaç OFF (off_t hariç)
+
+n1, n1_tas, n1_sert = 0, 0, 0
+_off_kapasite = {}                 # agent → Σ haftalık off tavanı (fizibilite kontrolü)
+_off_zorunlu  = {}                 # agent → off_t dışı müsait gün sayısı
 for a in AGENTS:
+    _soft_a = off_soft_map.get(a, set())      # off_t günleri → tavanın DIŞINDA
+    _kap = _mus = 0
     for (yil, hafta), hafta_gunleri in haftalar.items():
         gun_var = []                          # bu agentın o haftadaki çalışma değişkenleri
         izinsiz_gun = set()                   # o hafta değişkeni olan (izinsiz) günler
+        sert_var, sert_gun = [], 0            # off_t HARİÇ günler → sert kural
         for ds in hafta_gunleri:
-            if dt.date.fromisoformat(ds) in TATIL:   # resmi tatil → izin gibi, avail'e girmez
-                continue                             # (tatili dinlemek off sayılmasın)
+            d = dt.date.fromisoformat(ds)
+            if d in TATIL:                    # resmi tatil → izin gibi, avail'e girmez
+                continue                      # (tatili dinlemek off sayılmasın)
             gunluk = [x[(a, ds, v)] for v in gun_vardiyalari[ds] if (a, ds, v) in x]
             if gunluk:
                 gun_var += gunluk
                 izinsiz_gun.add(ds)
+                if d not in _soft_a:           # off_t günü sert sayıma girmez
+                    sert_var += gunluk
+                    sert_gun += 1
         avail = len(izinsiz_gun)
+        # ── SERT: o haftada off_t dışı günlerin en fazla MAX_HAFTA_OFF'u off olabilir
+        if HAFTA_OFF_SERT and sert_gun > MAX_HAFTA_OFF:
+            model.Add(sum(sert_var) >= sert_gun - MAX_HAFTA_OFF)
+            n1_sert += 1
+        _mus += sert_gun
+        _kap += min(MAX_HAFTA_OFF, sert_gun)
+        # ── YUMUŞAK (eski): önceki ayın off'larını da sayar, tercih olarak kalıyor
         onc_cal = onc_off = 0                 # önceki aydan taşınan çalışma / off
         if (yil, hafta) == SINIR_HAFTA and a in onceki_gun:
             onc_cal, onc_off = onceki_gun[a], onceki_off[a]
@@ -1626,6 +1653,27 @@ for a in AGENTS:
         model.Add(fazla_off >= (avail + onc_off - 2) - sum(gun_var))   # off>2 olursa ceza
         amac.append(W_HAFTA_OFF * fazla_off)
         n1 += 1
+    _off_zorunlu[a], _off_kapasite[a] = _mus, _kap
+
+# ── FİZİBİLİTE ÖN KONTROLÜ (sert kural için) ──────────────────────────
+# Sert kuralı haftalar üzerinden toplarsak:  Σ çalışma(off_t dışı) ≥ müsait − tavan
+# Çalışma toplamı H17'nin ust'unu aşamaz → gerek şart:  müsait − tavan ≤ ust
+# Sağlanmıyorsa o agent kuralı ASLA tutturamaz → model INFEASIBLE olur.
+# 45 dakikalık çözümün sonunda öğrenmek yerine burada listeliyoruz.
+if HAFTA_OFF_SERT:
+    _fiz = [(a, _off_zorunlu[a], _off_kapasite[a], ust_map[a])
+            for a in AGENTS
+            if a in ust_map and _off_zorunlu[a] - _off_kapasite[a] > ust_map[a]]
+    if _fiz:
+        print(f"⚠ HAFTALIK OFF SERT KURALI TUTMAZ: {len(_fiz)} agent "
+              f"(müsait − haftalık tavan > çalışma tavanı) → model INFEASIBLE olur:")
+        for a, _m, _k, _u in _fiz[:10]:
+            print(f"     {a}: off_t dışı müsait {_m}, haftalık off tavanı toplamı {_k}, "
+                  f"zorunlu çalışma {_m - _k} > ust {_u}")
+        print(f"     → HAFTA_OFF_SERT=False yap ya da MAX_HAFTA_OFF'u artır.")
+    else:
+        print(f"✓ haftalık off sert kuralı fizibil: {len(AGENTS)} agentın hepsi "
+              f"haftada ≤{MAX_HAFTA_OFF} off ile kotasını doldurabiliyor")
 
 # (2) hafta içi off cezası — GÜN-BAZLI ağırlıklı (H8B surplus'a göre):
 #     ağırlık(gün) = W_HI_OFF + round(W_SURPLUS_OFF × (1 − gun_off_w[gün]))
@@ -1663,7 +1711,10 @@ for a in AGENTS:
             amac.append(W_OFF_T * sum(gunluk))     # o gün çalıştırılırsa ceza
             n3 += 1
 
-print(f"haftalık off dengesi: {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})"
+print(f"haftalık off: SERT tavan {n1_sert} (agent,hafta) kısıtı "
+      f"(≤{MAX_HAFTA_OFF} off, off_t/off_t2/izin/tatil hariç)"
+      if HAFTA_OFF_SERT else "haftalık off SERT tavan: KAPALI")
+print(f"haftalık off dengesi (yumuşak): {n1} (agent,hafta) fazla-off cezası (ağ. {W_HAFTA_OFF})"
       + (f"  |  sınır haftası taşıması: {n1_tas} agent" if n1_tas else ""))
 print(f"hafta içi off (surplus ağırlıklı): {n2} (agent,gün) ceza terimi "
       f"(taban {W_HI_OFF} + surplus {W_SURPLUS_OFF}×(1−w) → sıkı gün pahalı)")
@@ -1870,11 +1921,11 @@ else:
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
-COZUM_SURE_SN = 1800               # süre sınırı (sn). 600 → 1800: model yakınsamıyor
-                                   # (gap %72), asıl zorluk takım×hafta×tip tahsisi.
-                                   # H19C ipucu iyi bir başlangıç veriyor, kalan süre
-                                   # iyileştirmeye gidiyor. Süreyi uzatmak sonucu
-                                   # KÖTÜLEŞTİRMEZ — en iyi BULUNAN çözüm alınır.
+COZUM_SURE_SN = 2700               # süre sınırı (sn) — fiilen kullanılan değer.
+                                   # NOT: süre SORUN DEĞİL. 2700 sn'de de çözücü
+                                   # takım-tip tahsisini iyileştiremiyor (gap %72,
+                                   # 10 (hafta,tip) kombinasyonu açık kalıyor).
+                                   # Yani ek süre çözüm değil → H19C ipucu / sabitleme.
 
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
 solver = cp_model.CpSolver()
@@ -2821,7 +2872,10 @@ _ozet_kol = [c for c in roster_2.columns if c not in _gun and c != "takim"]
 _ONC_KOL = [d for d in TASIMA_GUNLER] if (ONCEKI_GOSTER and onceki_gunluk) else []
 _satirlar, _kat = [], {}                                # _kat[(agent, kolon adı)] = kategori
 for _a in _agents_sirali:
-    _r = {"agent_name": _ad.get(_a, _a), "takim": roster_2.at[_a, "takim"]}
+    # agent_kod: index agent_name olduğu için kod KOLON olarak duruyor — isim
+    # tekrar edebilir, kod tekildir; başka tabloyla eşleştirme kodla yapılır.
+    _r = {"agent_name": _ad.get(_a, _a), "agent_kod": _a,
+          "takim": roster_2.at[_a, "takim"]}
     for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
         _r[_k] = roster_2.at[_a, _k]
     for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
