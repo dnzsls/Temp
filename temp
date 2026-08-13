@@ -28,6 +28,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        her şey ay içiyle sınırlı çalışır (geriye uyumlu).
     H13 sabah_calisir: bitişi ≤20:00, gece/ertesi-güne-sarkan vardiya yok.
     H14 hamile/süt   : Cmt/Pzr çalışamaz.
+    H14B kıdem/gece  : kıdemi MIN_KIDEM_AY(6) aydan az agent GECE (00:00/24:00) çalışamaz.
+                       Kaynak df_kidem.kidem_ay; kıdemi bilinmeyen KIDEMLİ sayılır.
+                       Takım bütünlüğü BU DURUMDA ihlal edilebilir: yasak (agent,tip)
+                       olarak `tip_yasak`e yazılır, H19 o üyeye ayrılma hakkı verir
+                       (W_TAKIM cezası yerinde → gece önce junior'sız takıma gider).
     H15 11s dinlenme : ardışık iki gün arası <11s bırakan vardiya çifti yasak.
     H16 mesaiye_kalamaz: resmi tatilde çalışamaz.
     H16B arife atama : arife → süt/hamile/mesai SADECE 09:00-13:00 ek yarım vardiya (coverage'a girmez, 9-18 talebini düşürmez); normal agent tam gün. Mesai HAFTA SONU arifede off.
@@ -137,6 +142,13 @@ ARIFE_SON_BASLANGIC = "09:00"  # arife günü flag'liler (süt/hamile/mesai) bu 
 SERBEST_COVERAGE = 10          # serbest bölge: talep ± SERBEST bedava (ceza yok) — HAFTA İÇİ
 AGIR_ESIK        = 25          # bunu aşan sapma AĞIR cezalı (konveks → sapma yayılır) — HAFTA İÇİ
 GECE_BASLANGIC   = ("00:00", "24:00")   # gece vardiyası başlangıçları
+MIN_KIDEM_AY     = 6           # H14B: kıdemi bu AYDAN AZ olan agent GECE (00:00) çalışamaz.
+                               # Kaynak df_kidem.kidem_ay (ondalıklı ay, ör. 9.83).
+                               # df_kidem yoksa kural KURULMAZ (geriye uyumlu).
+                               # 0 → kural kapalı.
+                               # Kıdemi bilinmeyen agent KIDEMLİ sayılır (yasaklamak
+                               # gece kovalarını dolduramaz hale getirip INFEASIBLE
+                               # yapabilir); sayısı H14B'de uyarı olarak basılır.
 GECE_BUFFER      = 3           # hafta içi gece kovaları SERT band: talep ± 3 (fazlalık gündüzde kalır)
 HS_TOL           = 2           # HAFTA SONU kovaları SERT band: talep ± 2 (coverage'a tam otursun; takım bütünlüğü yok → boşaltılmasın)
 CIFT_HS_OFF      = True        # H18 aç/kapa: True → her agent ayda EN AZ 1 tam Cmt+Pzr off (SERT)
@@ -433,6 +445,30 @@ if df_gecmis is not None:
     print(df_gecmis.head())
 else:
     print("df_gecmis yok (geç-vardiya geçmiş adaleti devre dışı kalacak — H19B)")
+
+# df_kidem: agent kıdemi — H14B "6 aydan az kıdemli GECE (00:00) çalışamaz" kuralı.
+# Kolonlar: agent_user_code | agent_name | title | working_area_group |
+#           job_start_date | kidem_yil | kidem_ay
+# KULLANILAN: agent_user_code + kidem_ay (ondalıklı AY, ör. 9.83).
+# kidem_yil ve job_start_date OKUNMUYOR — tek ölçü kidem_ay (çift kaynak = çelişki riski).
+df_kidem = globals().get("df_kidem")
+if df_kidem is not None:
+    df_kidem = df_kidem.copy()
+    df_kidem.columns = [str(c).strip().lower() for c in df_kidem.columns]
+    df_kidem["agent_user_code"] = df_kidem["agent_user_code"].astype(str).str.strip()
+    df_kidem["kidem_ay"] = pd.to_numeric(df_kidem["kidem_ay"], errors="coerce")
+    _kd_bos = int(df_kidem["kidem_ay"].isna().sum())        # okunamayan kıdem → bilinmeyen sayılır
+    _kd_junior = int((df_kidem["kidem_ay"] < MIN_KIDEM_AY).sum())
+    print(f"\ndf_kidem: {df_kidem.shape[0]} satır × {df_kidem.shape[1]} kolon  |  "
+          f"{df_kidem['agent_user_code'].nunique()} agent  |  "
+          f"kıdem < {MIN_KIDEM_AY} ay: {_kd_junior} kişi"
+          + (f"  ⚠ {_kd_bos} satırda kidem_ay okunamadı" if _kd_bos else ""))
+    print(f"kidem_ay dağılımı: min {df_kidem['kidem_ay'].min():.2f}  "
+          f"medyan {df_kidem['kidem_ay'].median():.2f}  "
+          f"maks {df_kidem['kidem_ay'].max():.2f}")
+    print(df_kidem.head())
+else:
+    print(f"df_kidem yok (kıdem/gece kuralı devre dışı kalacak — H14B)")
 
 
 # %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
@@ -1027,6 +1063,94 @@ print(f"hafta sonu yasaklı agent (hamile/süt): {len(hafta_sonu_yasak)}  |  "
       f"yasaklanan (agent,gün,vardiya): {n}")
 
 
+# %% [HÜCRE 14B] — KIDEM: MIN_KIDEM_AY'DAN AZ → GECE (00:00) YASAK ─────
+# Kıdemi MIN_KIDEM_AY(6) aydan az olan agent, başlangıcı GECE_BASLANGIC
+# ("00:00"/"24:00") olan hiçbir kovada çalışamaz — hafta içi ve hafta sonu.
+# Kaynak: df_kidem.kidem_ay (ondalıklı ay). Kıdemi BİLİNMEYEN → kıdemli sayılır.
+#
+# TAKIM BÜTÜNLÜĞÜ KAPISI (kritik) — `tip_yasak`:
+# H19 üyeyi takımının haftalık tipine SERT bağlıyor; tek istisna "fiziksel
+# imkânsızlık" ve bunu şöyle tespit ediyordu:  (a, wk, tip) not in agent_tip
+# yani "o tipte DEĞİŞKENİ YOK". Burada değişken VAR, sadece 0'a çivileniyor →
+# tespit çalışmaz, `sapan` 0'da kalır, takım geceye giderse junior üye hiçbir
+# vardiyada çalışamaz ve kota SERT olduğu için model INFEASIBLE olur.
+# Çözüm: yasağı ayrıca (agent, tip) kümesi olarak da yayınlıyoruz; H19 bunu
+# okuyup o üyeye ayrılma HAKKI veriyor. Ceza (W_TAKIM=10) yerinde kalıyor →
+# model geceyi önce junior'ı OLMAYAN takımlara verir, mecbur kalırsa böler.
+# NOT: aynı boşluk sabahçı agentlar (H13) için de var — orada da değişken 0'a
+# çivileniyor. tip_yasak mekanizması onu da taşıyabilir; şimdilik SADECE kıdem
+# kuralı dolduruluyor (tek seferde tek değişiklik).
+GECE_TIPLERI = set(GECE_BASLANGIC)                 # {"00:00", "24:00"}
+junior_agents = set()                              # kıdemi yetersiz agentlar
+tip_yasak = set()                                  # (agent, vardiya başlangıcı) → o tip YASAK
+
+if df_kidem is not None and MIN_KIDEM_AY:
+    _kidem_map = dict(zip(df_kidem["agent_user_code"],
+                          df_kidem["kidem_ay"]))   # agent → ondalıklı ay
+    _bilinmeyen = [a for a in AGENTS
+                   if a not in _kidem_map or pd.isna(_kidem_map.get(a))]
+    junior_agents = {a for a in AGENTS
+                     if a in _kidem_map and pd.notna(_kidem_map[a])
+                     and _kidem_map[a] < MIN_KIDEM_AY}
+    nk = 0
+    for a in junior_agents:
+        for ds in PLAN_GUNLER:
+            for v in gun_vardiyalari[ds]:
+                if (a, ds, v) in x and saat[(ds, v)][0] in GECE_TIPLERI:
+                    model.Add(x[(a, ds, v)] == 0)
+                    nk += 1
+        for _t in GECE_TIPLERI:
+            tip_yasak.add((a, _t))                 # H19 ayrılma kapısı bunu okur
+    # takım kırılımı: hangi takımda kaç junior var → gece o takıma verilirse
+    # kaç kişi ayrılmak zorunda kalır (W_TAKIM cezası buradan gelir)
+    _a_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
+                        df_tam["takim"]))
+    _tk_junior = {}
+    for a in junior_agents:
+        _T = _a_takim.get(a)
+        _tk_junior[_T] = _tk_junior.get(_T, 0) + 1
+    print(f"kıdem/gece kuralı: kıdem < {MIN_KIDEM_AY} ay olan {len(junior_agents)} agent → "
+          f"{nk} (agent,gün,vardiya) gece yasağı  |  {len(tip_yasak)} (agent,tip) "
+          f"takım ayrılma hakkı")
+    if _bilinmeyen:
+        print(f"  ⚠ {len(_bilinmeyen)} agentın kıdemi df_kidem'de YOK/okunamadı → "
+              f"KIDEMLİ sayıldı (gece yazılabilir): "
+              f"{_bilinmeyen[:10]}{' ...' if len(_bilinmeyen) > 10 else ''}")
+    if _tk_junior:
+        print(f"  junior'ı olan takım sayısı: {len(_tk_junior)}/{df_tam['takim'].nunique()}"
+              f"  |  en çok junior'lı 5 takım: "
+              f"{sorted(_tk_junior.items(), key=lambda kv: -kv[1])[:5]}")
+
+    # ── FİZİBİLİTE ÖN KONTROLÜ: gece kovaları kıdemlilerle dolabiliyor mu? ──
+    # Gece kovalarında SERT band var (hafta içi ±GECE_BUFFER, hafta sonu ±HS_TOL)
+    # → alt sınırı dolduracak KIDEMLİ agent yoksa model INFEASIBLE olur.
+    # 45 dakikalık çözümün sonunda öğrenmek yerine burada listeliyoruz.
+    _gece_sorun = []
+    for (ds, v), kisi in talep.items():
+        if saat[(ds, v)][0] not in GECE_TIPLERI:
+            continue
+        _hs = dt.date.fromisoformat(ds).weekday() >= 5
+        _alt = kisi - (HS_TOL if _hs else GECE_BUFFER)
+        _mus = sum(1 for a in AGENTS
+                   if (a, ds, v) in x and a not in junior_agents
+                   and not (a in hafta_sonu_yasak and _hs)
+                   and a not in sabah_agents)      # sabahçı geceye giremez (H13)
+        if _mus < _alt:
+            _gece_sorun.append((ds, v, kisi, _alt, _mus))
+    if _gece_sorun:
+        print(f"  ⚠ {len(_gece_sorun)} gece kovasında KIDEMLİ müsait agent, sert band "
+              f"alt sınırının ALTINDA → model INFEASIBLE olabilir:")
+        for ds, v, kisi, alt, mus in _gece_sorun[:10]:
+            print(f"       {ds} {saat[(ds, v)][0]}-{saat[(ds, v)][1]}: talep {kisi} "
+                  f"(alt sınır {alt}) ama kıdemli müsait {mus}")
+        print(f"     → MIN_KIDEM_AY'ı düşür ya da gece talebini Stage-1'de azalt.")
+    else:
+        print(f"  ✓ tüm gece kovaları kıdemli agentlarla sert band içinde dolabiliyor")
+else:
+    print(f"kıdem/gece kuralı: KAPALI "
+          f"({'df_kidem yok' if df_kidem is None else 'MIN_KIDEM_AY=0'})")
+
+
 # %% [HÜCRE 15] — 11 SAAT DİNLENME (vardiyalar arası) ─────────────────
 # Ardışık iki gün arasında ≥11 saat dinlenme:
 #   önceki bitiş + 11 saat ≤ sonraki başlangıç.
@@ -1443,7 +1567,13 @@ for T, uyeler in takimlar.items():
             # o üye hiçbir vardiyada çalışamaz ve kota (sert) tutmaz → INFEASIBLE.
             # Eskiden sapan HER ZAMAN açıktı ve ceza ödenerek bölünme satın
             # alınabiliyordu; artık ancak yapamadığı tip seçilirse 1 olabilir.
-            yapamaz = [yv[bas] for bas in secenek if (a, wk, bas) not in agent_tip]
+            # "yapamaz" iki kaynaktan gelir:
+            #   (a) o tipte hiç DEĞİŞKENİ yok (izin/off_t2 vb. ile hafta kapanmış)
+            #   (b) tip_yasak: değişken VAR ama sert kuralla 0'a çivili (H14B kıdem/gece).
+            # (b) olmadan junior üye takımı geceye giderse hiçbir vardiyada çalışamaz
+            # ve kota SERT olduğu için model INFEASIBLE olur.
+            yapamaz = [yv[bas] for bas in secenek
+                       if (a, wk, bas) not in agent_tip or (a, bas) in tip_yasak]
             sv = model.NewBoolVar(f"sap_{a}_{wk[0]}{wk[1]}")
             takim_sapan[(a, wk)] = sv
             if yapamaz:
@@ -2004,6 +2134,8 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return "H13_sabah"
         if a in hafta_sonu_yasak and d.weekday() >= 5:
             return "H14_hamile_sut"
+        if a in junior_agents and bas in GECE_TIPLERI:            # H14B kıdem/gece
+            return "H14B_kidem_gece"
         if a in mesai_yok and d in TATIL:
             return "H16_tatil"
         if d in ARIFE:                                            # H16B arife atama kuralı
