@@ -3128,6 +3128,12 @@ LEJANT = [
     ("H.İZİN",            "onc_hizin",  "FCE4D6", "Önceki ay haftalık izin günü (süt izni düzeni), off DEĞİL"),
     ("OFF",               "onc_off",    "F2F2F2", "Önceki ayda off"),
     ("boş",               "onc_bos",    None,     "Önceki ayda o güne ait kayıt yok"),
+    ("--- KOLONLAR ---",  None, None, ""),
+    ("kidem_ay",          None, None,
+     "Agentın kıdemi (ay, ondalıklı). Kaynak df_kidem; boş = veri yok (KIDEMLİ sayıldı)"),
+    ("gece_yasak",        None, None,
+     "1 → kıdem MIN_KIDEM_AY'dan az, 00:00 vardiyası YAZILAMAZ (H14B). "
+     "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -3189,6 +3195,13 @@ _ad = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
 _agents_sirali = list(roster_2.index)                   # satır sırası = agent kodu
 _ozet_kol = [c for c in roster_2.columns if c not in _gun and c != "takim"]
 
+# KIDEM (H14B): kidem_ay + gece yasağı → çizelgeyi okuyan kişi "bu agent neden
+# hiç gece yok" / "neden takımından ayrı" sorusunu tabloda görsün.
+# H14B'nin _kidem_map'ine bağlanmıyoruz (o hücre atlanmış olabilir) → df_kidem'den
+# yeniden kuruluyor; df_kidem yoksa kolonlar hiç eklenmiyor.
+_kidem_xl = (dict(zip(df_kidem["agent_user_code"], df_kidem["kidem_ay"]))
+             if df_kidem is not None else {})
+
 _ONC_KOL = [d for d in TASIMA_GUNLER] if (ONCEKI_GOSTER and onceki_gunluk) else []
 _satirlar, _kat = [], {}                                # _kat[(agent, kolon adı)] = kategori
 for _a in _agents_sirali:
@@ -3196,6 +3209,10 @@ for _a in _agents_sirali:
     # tekrar edebilir, kod tekildir; başka tabloyla eşleştirme kodla yapılır.
     _r = {"agent_name": _ad.get(_a, _a), "agent_kod": _a,
           "takim": roster_2.at[_a, "takim"]}
+    if _kidem_xl:                                       # kıdem verisi varsa 2 kolon
+        _kd = _kidem_xl.get(_a)
+        _r["kidem_ay"] = (round(float(_kd), 2) if pd.notna(_kd) else None)   # bilinmiyorsa BOŞ
+        _r["gece_yasak"] = int(_a in junior_agents)     # 1 → 00:00 vardiyası yazılamaz (H14B)
     for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
         _r[_k] = roster_2.at[_a, _k]
     for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
