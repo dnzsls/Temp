@@ -3006,6 +3006,18 @@ def _yapabilir(a, ds, tip):
     return False
 
 
+def _tip_musait(ds, tip, wk):
+    """o gün, o tipe atanmış takımların o TİPTE FİİLEN çalışabilen üye sayısı.
+    (izin/off_t2 → değişken yok; sabahçı/kıdem/hamile → yapamaz)
+    NEDEN 'atanan' DEĞİL: H17 kotayı SERT tutuyor → herkes bir yerde çalışmak
+    ZORUNDA. Bir tipe ihtiyaçtan fazla takım atandıysa model o fazla insanları
+    o tipin kovalarına PARK ediyor ve 'atanan' talebin üstüne çıkıyor
+    (ör. 15:00: 96 üye, talep 56, atanan 66). 'atanan − talep' bunu 10 kişilik
+    pay gibi gösteriyordu; oysa gerçek pay 96 − 56 = 40. Doğru ölçü MÜSAİT ÜYE."""
+    return sum(1 for _T, _u in takimlar.items() if _secim_d.get((_T, wk)) == tip
+               for a in _u if _yapabilir(a, ds, tip))
+
+
 for _ds, _tip in _hedefler:
     _d = dt.date.fromisoformat(_ds)
     _wk = _d.isocalendar()[:2]
@@ -3049,14 +3061,26 @@ for _ds, _tip in _hedefler:
         _tip_takim.setdefault(_s, []).append((_T, len(_uyeler)))
     print(f"\n[2] O HAFTANIN TİP TAHSİSİ  (H19: takım hafta boyu tek tipte)")
     print(f"    {'tip':>7} {'takım':>6} {'üye':>5} {'o gün talep':>12} "
-          f"{'o gün atanan':>13} {'hafta zirve talep':>18}")
+          f"{'o gün atanan':>13} {'hafta zirve':>12} {'PAY':>6}")
+    _pay_arti = _pay_eksi = 0
     for _t in sorted(set(_tip_uye) | {_tip}):
         _tt, _ta = _gun_tip_sayi(_ds, _t)
         _zirve = max((_gun_tip_sayi(g, _t)[0] for g in _hafta_gun
                       if dt.date.fromisoformat(g).weekday() < 5), default=0)
+        _pay = _tip_uye.get(_t, 0) - _zirve        # KAPASİTE payı (üye − zirve talep)
+        _pay_arti += max(0, _pay)
+        _pay_eksi += max(0, -_pay)
         _im = "  ← İNCELENEN" if _t == _tip else ""
         print(f"    {_t:>7} {len(_tip_takim.get(_t, [])):>6} {_tip_uye.get(_t, 0):>5} "
-              f"{_tt:>12} {_ta:>13} {_zirve:>18}{_im}")
+              f"{_tt:>12} {_ta:>13} {_zirve:>12} {_pay:>+6}{_im}")
+    print(f"    PAY = üye − hafta zirve talebi (KAPASİTE payı).  "
+          f"Σ fazla +{_pay_arti} / Σ açık −{_pay_eksi}")
+    if _pay_arti >= _pay_eksi:
+        print(f"    → Tipler arası TOPLAM kapasite yeterli ({_pay_arti} ≥ {_pay_eksi}):")
+        print(f"      daha iyi bir takım→tip tahsisi MATEMATİKSEL OLARAK VAR.")
+    print(f"    NOT: 'o gün atanan' talebi AŞABİLİR — kota SERT olduğu için fazla")
+    print(f"         üyeler o tipin kovalarına PARK edilir. Bolluğun ölçüsü PAY'dır,")
+    print(f"         'atanan − talep' DEĞİL.")
     _kap = _tip_uye.get(_tip, 0)
     if _kap < _t_tip:
         print(f"    ⚠ Bu tipe atanan TOPLAM üye {_kap} < talep {_t_tip} → kova")
@@ -3099,12 +3123,14 @@ for _ds, _tip in _hedefler:
 
     # ── [4] TAŞIMA ADAYLARI — hangi takım gelebilirdi, bedeli ne? ────
     # Takım tipi HAFTALIK → taşınırsa verici tip TÜM HAFTA o üyeleri kaybeder.
-    # Gerçek bedel = vericinin o haftadaki EN DAR günü (min: atanan − talep).
+    # Gerçek bedel = vericinin o haftadaki EN DAR günü, ölçü MÜSAİT ÜYE − TALEP.
+    # (Eskiden 'atanan − talep' idi → park edilmiş fazlalığı pay sanıyordu, bkz.
+    #  _tip_musait açıklaması. 15:00 için +10 gösteriyordu, gerçeği +40'tı.)
     print(f"\n[4] TAŞIMA ADAYLARI  (başka tipteki takımlar — {_tip}'e çekilebilir mi?)")
     _hi_gun = [g for g in _hafta_gun if dt.date.fromisoformat(g).weekday() < 5]
     _verici_pay = {}                               # tip → o haftadaki EN DAR gün payı
     for _t in set(_tip_uye):
-        _verici_pay[_t] = min((_gun_tip_sayi(g, _t)[1] - _gun_tip_sayi(g, _t)[0]
+        _verici_pay[_t] = min((_tip_musait(g, _t, _wk) - _gun_tip_sayi(g, _t)[0]
                                for g in _hi_gun), default=0)
     _aday = []
     for _T, _uyeler2 in takimlar.items():
@@ -3117,14 +3143,21 @@ for _ds, _tip in _hedefler:
         _aday.append((_T, len(_uyeler2), _uygun, _s, _verici_pay.get(_s, 0)))
     _aday.sort(key=lambda r: (-r[4], -r[2]))       # önce payı bol verici, sonra büyük takım
     print(f"    {'takım':<38} {'üye':>4} {'uygun':>6} {'verici tip':>11} "
-          f"{'vericinin EN DAR gün payı':>26}")
+          f"{'verici EN DAR gün payı':>23}")
     for _T, _b, _u, _s, _p in _aday[:10]:
         _not = ("taşınabilir" if _p >= _u else
                 f"⚠ verici {_u - _p} açığa düşer")
-        print(f"    {_T[:38]:<38} {_b:>4} {_u:>6} {_s:>11} {_p:>+26}   {_not}")
-    _serbest = sum(_u for _, _, _u, _, _p in _aday if _p >= _u)
+        print(f"    {_T[:38]:<38} {_b:>4} {_u:>6} {_s:>11} {_p:>+23}   {_not}")
+    # BEDELSİZ toplam: aynı vericiden birden çok takım alınırsa pay TÜKENİR →
+    # verici bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
+    _butce = dict(_verici_pay)
+    _serbest = 0
+    for _T, _b, _u, _s, _p in _aday:
+        if _butce.get(_s, 0) >= _u:
+            _butce[_s] -= _u
+            _serbest += _u
     print(f"    → BEDELSİZ taşınabilecek toplam kişi: {_serbest}  "
-          f"(eksik {_t_tip - _a_tip})")
+          f"(eksik {_t_tip - _a_tip})   [verici payları TÜKETİLEREK hesaplandı]")
     if _serbest >= _t_tip - _a_tip:
         print(f"      Eksiği kapatmaya YETERDİ → çözücü daha iyi bir tahsis bulamamış")
         print(f"      (takım×hafta×tip knapsack'i). H19C ipucunu güçlendirmek gerekir.")
