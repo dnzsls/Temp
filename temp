@@ -2939,3 +2939,4 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
 print(f"  Sheet4 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
+ 
