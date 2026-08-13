@@ -43,6 +43,18 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
     H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu + resmi tatil haftası serbest).
                        Gösterge (agent_tip) H19'da kurulur, bu hücre onu kullanır.
+    H20E mesai adaleti: ORANSAL TAVAN — N × mesai_a ≤ M + N × MESAI_TOL(1), yani
+                       mesai_a ≤ (FİİLİ ortalama) + 1. M = Σ mesai_a bir DEĞİŞKEN →
+                       eşik önceden hesaplanmaz, modelin seçtiği toplama göre kendini
+                       ayarlar. H17'nin MAX_MESAI tavanıyla ÜST ÜSTE çalışır (sadece
+                       daraltır) → fiili tavan = min(MAX_MESAI, ortalama+TOL).
+                       Eskiden CEZAYDI (W_ADALET_MESAI_AY) ve satın alınabiliyordu:
+                       4. günün maliyeti 16, coverage kazancı 25 → 99 agent 4 mesai
+                       yaparken 130 agent ≤2'de kalıyordu. Kısıt ödeyerek geçilemez.
+                       Ölçüm (H25C): TOL=1 → 99 gün taşınır, emilim 142 → toplam korunur.
+                       AYNI KISIT HAFTA SONUNA KURULMADI: orada sert band var, TOL=1
+                       ile 22 kişi-gün açık kalıyor → INFEASIBLE. Hafta sonu (norm+mesai)
+                       hâlâ ağırlıkla yönetiliyor (H20C, W_ADALET_HS 12/24).
 
   YUMUŞAK CEZALAR (amaç fonksiyonu — minimize):
     H10 coverage sapma: serbest ±SERBEST(5); W_COVERAGE(1) 5–15; W_COVERAGE2(20) 15+.
@@ -68,11 +80,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H20E haftalık yığılma: W_ADALET_MESAI(6) × (HAFTALIK BRÜT 5-üstü − FAIR_MESAI)+ → 6,6,6,4,0 gibi
                         yığılmayı engeller. Norm'a dokunmaz. FAIR_MESAI artık MAX_MESAI'den
                         TÜRETİLİR (eskiden sabit 2 → sert tavanı 4 yapsan da mesai 2'de takılıyordu).
-    H20E ay bazlı mesai adaleti: W_ADALET_MESAI_AY(4) × (mesai_gun − FAIR_MESAI_AY)+.
-                        FAIR_MESAI_AY = min(talepten hesaplanan, MAX_MESAI−1) — TAVAN KORUMASI.
-                        Hesap tavana dayanırsa terim ölü doğuyordu ve mesaiyi kişiler arasında
-                        yayan HİÇBİR ŞEY kalmıyordu (99 agent 4, 130 agent ≤2 çıktı).
-                        FAIR_HS bunu yapamaz: norm ile mesaiyi ayırt etmiyor.
+    (H20E ay bazlı mesai adaleti ARTIK CEZA DEĞİL → SERT KISITLAR listesine taşındı.)
 
   HENÜZ YOK (sonraki adımlar): gece/uydu rotasyonu (2 ayda 1, 2 hafta — bu ay yok),
     mesai/swap mekanizması, resmi tatil takvimi (hamile/süt yasağı).
@@ -218,19 +226,30 @@ FAIR_HS     = None             # agent başına adil HAFTA SONU günü (norm + m
                                # hafta içi gün) → bu eşik mesaiyi de bağlar. MAX_MESAI'yi
                                # yükseltsen bile fiilen sınırlayan kural budur.
 W_ADALET_MESAI = 6             # HAFTALIK yığılma ağırlığı (H20E 1. kısım): FAIR_MESAI üstü brüt
-W_ADALET_MESAI_AY = 4          # AY BAZLI mesai adaleti ağırlığı (H20E 2. kısım) — AYRI tutuldu.
-                               # Önce 6 → 2 (aynı hafta sonu günü FAIR_HS'te de vergilenip
-                               # 4. mesaiyi bloke ediyordu), sonra 2 → 4: terim eşik
-                               # düzeltmesiyle (aşağı bak) canlandı, mesaiyi kişiler arasında
-                               # YAYMASI için 2 fazla zayıftı.
-                               # Marj: 4. mesai gününün maliyeti = 12 (FAIR_HS) + 4 (bu terim)
-                               # = 16;  kazancı 25 (W_EKSIK_HS). 16 < 25 → coverage gerçekten
-                               # gerektirdiğinde model yine tavana çıkar, gerekmediğinde 3'te
-                               # kalıp yükü az mesai yapana kaydırır. Kapasite kaybı yok.
-                               # NEDEN GEREKLİ: FAIR_HS bu işi göremez — norm ile mesaiyi
-                               # AYIRT ETMİYOR. 21 hafta içi + 4 hafta sonu çalışan (mesai 4)
-                               # ile 18 hafta içi + 3 hafta sonu çalışan (mesai 0, norm 3)
-                               # onun gözünde neredeyse eşit; ücretli mesai farkı 4-0.
+# AY BAZLI MESAİ ADALETİ — artık AĞIRLIK DEĞİL, SERT KISIT (H20E 2. kısım).
+#   N × mesai_a  ≤  M + N × MESAI_TOL        (M = Σ mesai_a, N = mesai yapabilen agent)
+#   sadeleşmiş:  mesai_a ≤ (fiili ortalama) + MESAI_TOL
+# NEDEN AĞIRLIKTAN VAZGEÇİLDİ: ceza satın alınabiliyordu. W_ADALET_MESAI_AY=4 iken
+# 4. mesai gününün maliyeti 12(FAIR_HS)+4 = 16, coverage kazancı 25 → model ödeyip
+# yine veriyordu: 99 agent 4 mesai, 130 agent ≤2. Ayrıca eşiği (FAIR_MESAI_AY)
+# ÖNCEDEN hesaplamak gerekiyordu, oysa doğru eşik ancak fiili toplam bilinince
+# çıkıyor → tavan koruması gibi yamalar gerekti. Kısıtta M bir DEĞİŞKEN, eşik
+# kendini ayarlıyor; hiçbir katsayı kalibrasyonu kalmıyor.
+# İKİ TAVAN BİRLİKTE ÇALIŞIR: fiili tavan = min(MAX_MESAI, ortalama + MESAI_TOL).
+#   Oransal kısıt sadece DARALTABİLİR — MAX_MESAI'yi asla gevşetmez.
+#   4'e çıkabilmek için toplamın 411×3 = 1233'e ulaşması gerekir, yani ancak
+#   "herkes 3'e yaklaştıysa" biri 4 yapabilir → hak edilerek açılan kapı.
+# ÖLÇÜM (H25C, bu ayın çözümü): M=1171, N=411, ortalama 2.85 → tavan 3
+#   TOL=0 (tavan 2) → 377 gün taşınır, emilim 24  → 353 gün KAYBOLUR ✗
+#   TOL=1 (tavan 3) →  99 gün taşınır, emilim 142 → toplam korunur ✓
+#   TOL=2 (tavan 4) → kimseye dokunmaz (MAX_MESAI ile aynı) → ölü ✗
+#   emilim KİŞİSEL müsaitlikle sınırlı (izinli agentın boş kapasitesi hayali):
+#   tavan 3'ün altında kalan 15 agent → 22 günlük kapasite ulaşılamaz, düşüldü.
+# RİSK: bu kısıt bağlarsa kayıp HAFTA İÇİ kovalara gider (yumuşak ceza).
+#   Hafta sonu sert bandını KIRMAZ — agent hafta içi off alıp hafta sonu çalışırsa
+#   o gün NORM olur, mesai sayacına girmez → hafta sonu kapasitesi azalmaz.
+MESAI_TOL   = 1                # kimse fiili mesai ortalamasının bu kadar üstüne çıkamaz (SERT)
+                               # 0 → aşırı sıkı (toplam mesai düşer), 2 → MAX_MESAI ile aynı (ölü)
 FAIR_MESAI  = None             # HAFTALIK yığılma eşiği (H20E): kaç hafta 5 günü aşabilir
                                # → None ise MAX_MESAI'den türetilir (H20E).
                                # Eskiden SABİT 2'ydi: MAX_MESAI'yi 4 yapsan bile 3. ve 4.
@@ -240,24 +259,8 @@ FAIR_MESAI  = None             # HAFTALIK yığılma eşiği (H20E): kaç hafta 
                                # 5 günü aşar → doğru eşik MAX_MESAI. Ölü terim DEĞİL: haftalık
                                # brüt (Σ max(0,·)) aylık mesaiden büyük olabilir → 6,6,6,4,0
                                # gibi yığılma aylık mesai 1 iken bile cezalı kalır.
-FAIR_MESAI_AY = None           # AY BAZLI adil mesai günü (H20E ikinci kısım) — HESAPLANIR
-                               # → min( ceil((Σtalep − Σkota) ÷ mesai yapabilen), MAX_MESAI−1 )
-                               # Hesap dinamik; min(...) sadece TAVAN KORUMASI.
-                               # NEDEN koruma gerekli (ölçüldü):
-                               #   ham hesap = ceil((10150−8598) ÷ 430) = 4 = MAX_MESAI
-                               #   → `if FAIR_MESAI_AY < MAX_MESAI` koşulu terimi ATLIYOR
-                               #   → mesaiyi kişiler arasında yayan TEK terim yok oluyor
-                               #   → sonuç: 99 agent 4 mesai, 130 agent ≤2 iken kimse cezalı değil
-                               # Ham hesap "talebin TAMAMI karşılansaydı" gereken ortalamayı verir;
-                               # talep karşılanamadığı için ulaşılabilir ortalamanın ÜSTÜNDE kalır.
-                               # Fiilen dağıtılan mesai 1171 ÷ 408 uygun agent = 2.87 → doğru eşik 3.
-                               # (Fiili toplam ancak ÇÖZDÜKTEN sonra bilinir → önceden hesaplanamaz;
-                               #  tavan koruması bunun pratik karşılığı.)
-                               # Eşik 3 matematiksel olarak da kritik nokta:
-                               #   408 × 3 = 1224 ≥ 1171 → herkesin ≤3'te oturması MÜMKÜN
-                               #   408 × 2 =  816 < 1171 → çoğunluk eşiği aşar, aralarında
-                               #     gradyan kalmaz (birinden alıp ötekine vermek cezayı değiştirmez)
 MAX_MESAI   = 2                # SERT tavan: agent ay içinde EN FAZLA bu kadar mesai (ust=kota+MAX_MESAI). Ekip 3-4 yapabilir
+                               # MESAI_TOL kısıtı bunun İÇİNDE çalışır; ikisi üst üste geçerli.
 W_ADALET_AKSAM = 3             # akşam+gece adaleti: adil pay üstü her akşam/gece HAFTASINA ceza
 AKSAM_BASLANGIC = "17:00"      # başlangıcı bundan SONRA = "akşam"; gece (00:00→1440) otomatik dahil
 FAIR_AKSAM_HAFTA = None        # agent başına adil akşam/gece HAFTA sayısı (H20 haftalık tiple uyumlu)
@@ -1831,9 +1834,10 @@ print(f"vardiya-saati adaleti (HAFTA): {na} agent, adil pay={FAIR_AKSAM_HAFTA} h
 #   H17 buna karışmaz (aylık nete bakar) → zamansal yığılmayı sadece bu hücre engeller.
 # Norm haftası (4 hafta içi + 1 hafta sonu = 5 gün) → max(0,5−5)=0 → cezasız.
 #
-# AY BAZLI mesai adaleti bu hücrenin SONUNDA ayrı bir terim (FAIR_MESAI_AY).
-# Hafta sonu YÜKÜ (norm+mesai birlikte) H20C'nin işi — mesai günü zorunlu olarak
-# hafta sonu günüdür, o yüzden fiilen mesaiyi sınırlayan eşik FAIR_HS'tir.
+# AY BAZLI mesai adaleti bu hücrenin SONUNDA ayrı bir bölüm — artık CEZA değil,
+# ORANSAL SERT KISIT (MESAI_TOL). Hafta sonu YÜKÜ (norm+mesai birlikte) H20C'nin
+# işi ve orası hâlâ ağırlıkla yönetiliyor: hafta sonunda sert band var, oransal
+# tavan orada INFEASIBLE riski taşıyor (H25C [3] ile ölçüldü: TOL=1'de 22 kişi-gün açık).
 
 # ADİL PAY OTOMATİK (FAIR_MESAI is None): eşik = MAX_MESAI.
 # Gerekçe: MAX_MESAI mesai günü yapan bir agent en fazla MAX_MESAI HAFTADA 5 günü
@@ -1887,57 +1891,64 @@ print(f"haftalık yığılma (6-günlük hafta): {nmes} agent, adil pay={FAIR_ME
       + (f"  |  sınır haftası taşıması: {nmes_tas} agent" if nmes_tas else ""))
 
 
-# ── AY BAZLI MESAİ ADALETİ (koşullu; H22'nin mesai_gun'ü ile AYNI ölçü) ────
-# ölçü: mesai_gun = (çalışma − resmi tatilde çalışma) − kota − sınır haftası alacağı
-# adil pay: (Σ talep − Σ kota) ÷ mesai YAPABİLEN agent  → talepten türetilir.
-# Terim SADECE FAIR_MESAI_AY < MAX_MESAI ise kurulur. Eşitse H17'nin sert tavanı
-# zaten aynı sınırı koyuyor → ceza hiç devreye girmez, boşuna ~1 değişken/agent
-# eklemenin anlamı yok (model zaten yakınsamakta zorlanıyor).
-# MAX_MESAI 3-4'e çıkarıldığında adil pay yerinde kalır, tavan yükselir → aradaki
-# fark cezalı olur ve mesai kişiler arasında yayılır. Manuel müdahale gerekmez.
-if FAIR_MESAI_AY is None:
-    _mesai_ihtiyac = max(0, sum(talep.values()) - sum(kota_map.values()))
-    _mesai_uygun = len([a for a in kota_map if a not in ozel_agents])   # özel flag mesai yapamaz
-    _ham = (-(-_mesai_ihtiyac // _mesai_uygun) if _mesai_uygun else MAX_MESAI)   # ceil
-    # TAVAN KORUMASI: ham hesap MAX_MESAI'ye dayanırsa terim ölü doğar
-    # (max(0, mesai − MAX_MESAI) ancak tavan aşılırsa tetiklenir, H17 zaten yasak)
-    # → mesaiyi yayan hiçbir şey kalmaz. Tavanın bir altına çekiyoruz:
-    # "tavana çıkmak DAİMA bir bedel taşır" → gradyan garanti.
-    FAIR_MESAI_AY = max(0, min(_ham, MAX_MESAI - 1))
-    print(f"FAIR_MESAI_AY otomatik: (Σtalep {sum(talep.values())} − Σkota "
-          f"{sum(kota_map.values())}) = {_mesai_ihtiyac} mesai-günü ÷ {_mesai_uygun} "
-          f"uygun agent = {_mesai_ihtiyac / max(1, _mesai_uygun):.2f} → ham {_ham}"
-          + (f" → TAVAN KORUMASI (MAX_MESAI−1) → {FAIR_MESAI_AY}"
-             if FAIR_MESAI_AY != _ham else f" → FAIR_MESAI_AY = {FAIR_MESAI_AY}"))
+# ── AY BAZLI MESAİ ADALETİ — ORANSAL SERT TAVAN (AĞIRLIK YOK) ─────────
+# ölçü: mesai_a = max(0, (çalışma − resmi tatilde çalışma) − kota − sınır alacağı)
+#       → H22'nin mesai_gun'ü ve H17'nin sert tavanı ile AYNI ölçü.
+# kısıt: N × mesai_a ≤ M + N × MESAI_TOL      (M = Σ mesai_a, N = uygun agent)
+#        ⇔ mesai_a ≤ M/N + MESAI_TOL = "fiili ortalama + tolerans"
+# M bir DEĞİŞKEN → eşik önceden hesaplanmıyor, modelin seçtiği toplama göre
+# kendini ayarlıyor. Eskiden bu bir CEZAYDI (W_ADALET_MESAI_AY) ve satın
+# alınabiliyordu: 4. günün maliyeti 16, coverage kazancı 25 → model ödeyip
+# yine veriyordu (99 agent 4 mesai, 130 agent ≤2). Artık ödeyerek geçilemez.
+#
+# İKİ TAVAN ÜST ÜSTE: H17 zaten mesai_a ≤ MAX_MESAI diyor (mv'nin üst sınırı).
+# Oransal kısıt sadece DARALTIR → fiili tavan = min(MAX_MESAI, ortalama+TOL).
+# 4'e çıkmak için toplamın N×3'ü aşması gerekir = "önce herkes 3'e gelsin".
+# Kilitlenme yok: ortalamayı yükseltmek için kimsenin tavanı aşması gerekmiyor
+# (2 yapan 3'e çıkınca M artar, duvara değmeden) → 4'ün kapısı kendiliğinden açılır.
+# Ters oyun da yok: M'yi küçültmek tavanı DARALTIR.
+#
+# EŞİTLİK ŞART (AddMaxEquality): sadece "mv ≥ net" deseydik, model az mesai
+# yapan birinin mv'sini ŞİŞİRİP M'yi büyütür ve üsttekilerin tavanını gevşetirdi.
+# Eşitlikle mv gerçek değere çivili → M manipüle edilemez.
+#
+# Sınır haftası alacağı için SABİT onceki_eksik kullanılıyor (H17'deki `kredi`
+# değişkeninin tavanı) → ölçü bilerek MÜSAMAHALI, kimseyi haksız bağlamaz.
+mesai_ay = {}                                          # agent → mesai günü (IntVar)
+_gun_ub = len(PLAN_GUNLER)
+for a in AGENTS:
+    if a not in kota_map or a in ozel_agents:
+        continue                                       # özel flag: H17'de pay 0 → mesai zaten yok
+    tum = [x[(a, ds, v)] for ds in PLAN_GUNLER
+           for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+    tat_v = [x[(a, ds, v)] for ds in PLAN_GUNLER
+             if dt.date.fromisoformat(ds) in TATIL
+             for v in gun_vardiyalari[ds] if (a, ds, v) in x]
+    if not tum:
+        continue
+    _net = model.NewIntVar(-_gun_ub, _gun_ub, f"mesainet_{a}")
+    model.Add(_net == sum(tum) - sum(tat_v) - kota_map[a] - onceki_eksik.get(a, 0))
+    mv = model.NewIntVar(0, MAX_MESAI, f"mesaiay_{a}")  # üst sınır = H17'nin sert tavanı
+    model.AddMaxEquality(mv, [_net, 0])                 # mv = max(0, net) — EŞİTLİK
+    mesai_ay[a] = mv
 
-nma = 0
-if FAIR_MESAI_AY < MAX_MESAI:
-    for a in AGENTS:
-        if a not in kota_map or a in ozel_agents:
-            continue                                   # özel flag: H17'de pay 0 → mesai zaten yok
-        tum = [x[(a, ds, v)] for ds in PLAN_GUNLER
-               for v in gun_vardiyalari[ds] if (a, ds, v) in x]
-        tat_v = [x[(a, ds, v)] for ds in PLAN_GUNLER
-                 if dt.date.fromisoformat(ds) in TATIL
-                 for v in gun_vardiyalari[ds] if (a, ds, v) in x]
-        if not tum:
-            continue
-        # eşik: kota + adil pay + sınır haftası alacağı. Alacak için ÜST SINIR
-        # (onceki_eksik) kullanılıyor — H17'deki `kredi` değişkeninin tavanı;
-        # yani ceza tarafı bilerek MÜSAMAHALI, kimseyi haksız cezalandırmaz.
-        fz = model.NewIntVar(0, MAX_MESAI, f"aymesai_{a}")
-        model.Add(fz >= sum(tum) - sum(tat_v) - kota_map[a]
-                  - FAIR_MESAI_AY - onceki_eksik.get(a, 0))
-        amac.append(W_ADALET_MESAI_AY * fz)         # AYRI ağırlık (haftalık terimden düşük)
-        nma += 1
-    print(f"ay bazlı mesai adaleti: {nma} agent, adil pay={FAIR_MESAI_AY} "
-          f"(tavan MAX_MESAI={MAX_MESAI}, ağ. {W_ADALET_MESAI_AY}) — "
-          f"{MAX_MESAI}. mesai gününün maliyeti: {W_ADALET_HS} (FAIR_HS) + "
-          f"{W_ADALET_MESAI_AY * max(0, MAX_MESAI - FAIR_MESAI_AY)} (bu terim) "
-          f"vs kazanç {W_EKSIK_HS} (W_EKSIK_HS)")
+N_mesai = len(mesai_ay)
+if N_mesai and MESAI_TOL < MAX_MESAI:
+    M_mesai = model.NewIntVar(0, N_mesai * MAX_MESAI, "mesai_toplam")
+    model.Add(M_mesai == sum(mesai_ay.values()))
+    for a, mv in mesai_ay.items():
+        model.Add(N_mesai * mv <= M_mesai + N_mesai * MESAI_TOL)
+    print(f"ay bazlı mesai adaleti [SERT ORANSAL]: {N_mesai} agent, "
+          f"mesai_a ≤ ortalama + {MESAI_TOL}  (ağırlık YOK; ikinci tavan "
+          f"MAX_MESAI={MAX_MESAI} → fiili tavan = min(ikisi))")
+    print(f"  4 gibi bir değere çıkabilmek için toplam mesainin "
+          f"{N_mesai * (MAX_MESAI - MESAI_TOL)} günü geçmesi gerekir "
+          f"→ 'önce herkes {max(0, MAX_MESAI - MESAI_TOL)}'e gelsin' kuralı")
+elif N_mesai:
+    print(f"ay bazlı mesai adaleti: KURULMADI — MESAI_TOL({MESAI_TOL}) ≥ "
+          f"MAX_MESAI({MAX_MESAI}) → oransal tavan H17'nin üstünde kalır, ölü kısıt")
 else:
-    print(f"ay bazlı mesai adaleti: KURULMADI — adil pay {FAIR_MESAI_AY} = "
-          f"MAX_MESAI {MAX_MESAI}, sert tavan (H17) zaten aynı sınırı koyuyor")
+    print("ay bazlı mesai adaleti: KURULMADI — mesai yapabilen agent yok")
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
