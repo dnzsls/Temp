@@ -2698,27 +2698,53 @@ def _oransal(baslik, deger, uygun, tavan_map=None, birim="kişi-gün"):
     print(f"         'emilim kapasitesi' üst sınırdır: o agent o GÜN müsait mi ayrı mesele.")
 
 
-# ── 1) MESAİ (ay bazlı, H22'nin mesai_gun'ü ile AYNI ölçü) ────────────
-_m_uygun = [a for a in roster_2.index if a in kota_map and a not in ozel_agents]
-_m_deger = {a: int(roster_2.at[a, "mesai_gun"]) for a in _m_uygun}
-_oransal(f"[1] MESAİ  (uygun = kota_map'te olan ve özel flag'siz; MAX_MESAI={MAX_MESAI})",
-         _m_deger, _m_uygun, {a: MAX_MESAI for a in _m_uygun}, "mesai-günü")
-print(f"    → bu taraf bağlarsa kayıp HAFTA İÇİ kovalara gider (yumuşak ceza), "
-      f"INFEASIBLE riski YOK.")
-
-# ── 2) HAFTA SONU GÜNÜ (norm + mesai BİRLİKTE — H20C'nin ölçüsü) ──────
+# ── 0) KİŞİSEL HAFTA SONU MÜSAİTLİĞİ (emilim hesabının tabanı) ────────
+# "Duvarın üstündekilerden alınan günü kim alacak?" sorusunun cevabı, o kişilerin
+# FİİLEN müsait olmasına bağlı. İzni çok olan agent 3'e çıkamaz → onun boş görünen
+# kapasitesi HAYALİDİR. Bu yüzden emilim, MAX_MESAI ile değil KİŞİSEL tavanla sınırlanır.
+#   müsait hafta sonu günü = o gün değişkeni olan hafta sonu günü sayısı
+#     (izin / off_t2 → değişken yok; hamile/süt zaten uygun kümesinin dışında)
+#   H18 açıksa 1 tam Cmt+Pzr off ZORUNLU → −2
+# Mesai günü zorunlu olarak hafta sonu günüdür (kota = tüm müsait hafta içi gün)
+# → kişisel mesai tavanı = min(MAX_MESAI, müsait hafta sonu günü).
+# NOT: bu hâlâ ÜST sınır — o günlerin bir kısmı norm olarak kullanılıyor olabilir.
 _hs_kol = [c for c in _gun if dt.date.fromisoformat(c).weekday() >= 5
            and dt.date.fromisoformat(c) not in TATIL]
 _hs_uygun = [a for a in roster.index if a not in hafta_sonu_yasak]
-_hs_deger = {a: sum(1 for c in _hs_kol if roster.at[a, c] not in _OFF_LIKE)
-             for a in _hs_uygun}
-# her agentın FİİLEN çıkabileceği tavan: o hafta sonu günlerinde değişkeni var mı
-# (izin/off_t2 → değişken yok). H18 açıksa 1 tam Cmt+Pzr off ZORUNLU → −2.
 _hs_musait = {}
 for a in _hs_uygun:
     _m = sum(1 for c in _hs_kol
              if any((a, c, v) in x for v in gun_vardiyalari.get(c, [])))
     _hs_musait[a] = max(0, _m - (2 if CIFT_HS_OFF else 0))
+_mus_dag = Counter(_hs_musait.values())
+print(f"\n[0] KİŞİSEL HAFTA SONU MÜSAİTLİĞİ  ({len(_hs_kol)} hafta sonu günü"
+      + (f", H18 zorunlu çift off düşülmüş" if CIFT_HS_OFF else "") + ")")
+print(f"    müsait gün → agent: {dict(sorted(_mus_dag.items()))}")
+print(f"    → emilim kapasitesi bu tavanla sınırlanıyor; 'boş ama ulaşılamaz' "
+      f"kapasite sayılmıyor.")
+
+# ── 1) MESAİ (ay bazlı, H22'nin mesai_gun'ü ile AYNI ölçü) ────────────
+_m_uygun = [a for a in roster_2.index if a in kota_map and a not in ozel_agents]
+_m_deger = {a: int(roster_2.at[a, "mesai_gun"]) for a in _m_uygun}
+_m_tavan = {a: min(MAX_MESAI, _hs_musait.get(a, MAX_MESAI)) for a in _m_uygun}
+_oransal(f"[1] MESAİ  (uygun = kota_map'te olan ve özel flag'siz; MAX_MESAI={MAX_MESAI})",
+         _m_deger, _m_uygun, _m_tavan, "mesai-günü")
+# kaç agentın KİŞİSEL tavanı duvarın altında kalıyor → duvar onlara zaten dokunmuyor,
+# ama emilim kapasitesine de katkı veremiyorlar
+_M_m, _N_m = sum(_m_deger.values()), len(_m_uygun)
+for _tol in _TOL_LISTE:
+    _cap = _M_m // _N_m + _tol
+    _kisitli = [a for a in _m_uygun if _m_tavan[a] < _cap]
+    _hayali = sum(_cap - _m_tavan[a] for a in _kisitli)
+    print(f"    TOL={_tol} (tavan {_cap}): kişisel tavanı duvarın ALTINDA olan "
+          f"{len(_kisitli)} agent → {_hayali} günlük kapasite ULAŞILAMAZ "
+          f"(MAX_MESAI varsayılsaydı emilime sayılırdı)")
+print(f"    → bu taraf bağlarsa kayıp HAFTA İÇİ kovalara gider (yumuşak ceza), "
+      f"INFEASIBLE riski YOK.")
+
+# ── 2) HAFTA SONU GÜNÜ (norm + mesai BİRLİKTE — H20C'nin ölçüsü) ──────
+_hs_deger = {a: sum(1 for c in _hs_kol if roster.at[a, c] not in _OFF_LIKE)
+             for a in _hs_uygun}
 _oransal("[2] HAFTA SONU GÜNÜ  (norm + mesai birlikte; uygun = hamile/süt HARİÇ)",
          _hs_deger, _hs_uygun, _hs_musait, "hafta sonu günü")
 
