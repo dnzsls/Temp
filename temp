@@ -1704,6 +1704,95 @@ else:
           f"({'TAKIM_HINT=False' if not TAKIM_HINT else 'takim_tip boş'})")
 
 
+# %% [HÜCRE 19D] — TİP KAPASİTE KISITI (önce zirve talebi karşıla) ─────
+# SORUN (H25D ile ölçüldü): 3 Ağustos 08:00'da talep 59, atanan 26. O tipe
+# sadece 2 takım (30 üye) atanmış; 15:00'te ise 96 üye var, zirve talep 56 →
+# 40 kişilik pay. Merve Muştu'nun takımı (13 uygun) taşınsaydı kazanç
+# 13 × W_EKSIK_HI(25) × 5 gün = 1625, bedeli ~0. Model bu 1625'i masada
+# bırakmış → TERCİH değil, BULAMAMA.
+#
+# NEDEN BULAMIYOR: eksik cezası `x` üzerinde (118 bin değişken), asıl karar ise
+# `y[takım,hafta,tip]` üzerinde (~1160 ikili). LP gevşemesinde y KESİRLİ olabildiği
+# için "takımın yarısı 08:00'de" gibi bir çözüm eksiği sıfır gösteriyor → alt sınır
+# hiçbir zaman "bu tahsis kötü" demiyor, gap kapanmıyor (2700 sn'de %72).
+# H19C ipucu doğru noktayı gösteriyor ama KISIT DEĞİL; arama uzaklaşıp dönemiyor.
+#
+# ÇÖZÜM: kısıtı doğrudan y üzerine koy.
+#   kapasite(hafta,tip) = Σ_takım  üye × y[takım,hafta,tip]
+#   kapasite + açık ≥ ZİRVE TALEP            (her tip için)
+#   Σ_tip açık(hafta) ≤ BÜTÇE(hafta)         (haftalık toplam)
+# "Açık kalabilir mi?" → EVET, ama sadece KAÇINILMAZ olduğu kadar. Bütçe:
+#   BÜTÇE = max( yapısal açık , açgözlü tahsisin bıraktığı açık ) + TOLERANS
+#     yapısal açık = max(0, Σ zirve − o hafta tip seçebilen toplam üye)
+#         → kapasite gerçekten yetmiyorsa fark buradan gelir, model o kadar
+#           eksik bırakabilir (mecburiyet ölçülüp tam o kadarına izin veriliyor).
+#     açgözlü açık = H19C'nin LPT tahsisinin bıraktığı (varsa) → FİZİBİLİTE TANIĞI:
+#         o çözüm bu bütçeyi sağladığı için kısıt ASLA INFEASIBLE yapmaz.
+#         Takımlar bölünemez olduğu için tam paketleme her zaman mümkün değil;
+#         bu terim o yuvarlama payını ölçüp bütçeye ekliyor (tahmin değil, tanık).
+# AĞIRLIK YOK — sert kısıt. Eksik cezası (W_EKSIK_HI) zaten x tarafında duruyor,
+# bu kısıt onu ARAMA için görünür kılıyor; amaç fonksiyonuna terim EKLENMİYOR.
+TIP_KAPASITE_SERT = True     # False → kısıt kurulmaz (eski davranış)
+TIP_ACIK_TOLERANS = 0        # bütçeye eklenen ek pay (hafta başına).
+                             # 0 güvenli: bütçe zaten açgözlü tanığı içeriyor.
+                             # INFEASIBLE gelirse 1-2 artır (yuvarlama payı).
+
+tip_acik = {}                                      # (hafta, tip) → açık IntVar
+_19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
+if TIP_KAPASITE_SERT and takim_tip:
+    _boyut19d = {T: len(u) for T, u in takimlar.items()}
+    _greedy = {w: a for w, _, a in _hint_ozet}     # H19C açgözlü artığı (yoksa boş)
+    for _wk in sorted(haftalar):
+        if _wk in tatil_haftalari:
+            continue
+        _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
+        if not _hi:
+            continue
+        # o hafta tip SEÇEBİLEN takımlar (y değişkeni olanlar) ve toplam üyesi
+        _sec_takim = {T for (T, w, _t) in takim_tip if w == _wk}
+        _uye_top = sum(_boyut19d[T] for T in _sec_takim)
+        # tip → ZİRVE hafta içi talep (H19: takım hafta boyu o tipte → zirveyi karşılamalı)
+        _zirve19d = {}
+        for _t in hafta_tipler.get(_wk, []):
+            _zirve19d[_t] = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                                     if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                                 for ds in _hi), default=0)
+        if not _zirve19d:
+            continue
+        _yapisal = max(0, sum(_zirve19d.values()) - _uye_top)
+        _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
+        _acik_var = []
+        for _t, _z in _zirve19d.items():
+            _kap = sum(_boyut19d[T] * takim_tip[(T, _wk, _t)]
+                       for T in _sec_takim if (T, _wk, _t) in takim_tip)
+            _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
+            model.Add(_kap + _av >= _z)            # zirve talebi karşıla (ya da açık yaz)
+            tip_acik[(_wk, _t)] = _av
+            _acik_var.append(_av)
+        model.Add(sum(_acik_var) <= _butce)        # açık SADECE kaçınılmaz kadar
+        _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
+                          _yapisal, _greedy.get(_wk, 0), _butce))
+
+if _19d_ozet:
+    print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
+          f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
+    print(f"    {'hafta':>10} {'Σzirve':>7} {'üye':>6} {'yapısal':>8} "
+          f"{'açgözlü':>8} {'BÜTÇE':>6}")
+    for _wk, _z, _u, _y, _g, _b in _19d_ozet:
+        _im = "  ← tip açığı YASAK" if _b == 0 else ""
+        print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>6} {_y:>8} "
+              f"{_g:>8} {_b:>6}{_im}")
+    print(f"  BÜTÇE = max(yapısal, açgözlü) + TOLERANS({TIP_ACIK_TOLERANS}); açgözlü")
+    print(f"  H19C'nin bulduğu ÇÖZÜM → o çözüm bütçeyi sağlar, kısıt INFEASIBLE yapmaz.")
+    if not _greedy:
+        print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
+        print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
+        print(f"    yap ya da TIP_ACIK_TOLERANS'ı artır.")
+else:
+    print(f"tip kapasite kısıtı: KAPALI "
+          f"({'TIP_KAPASITE_SERT=False' if not TIP_KAPASITE_SERT else 'takim_tip boş'})")
+
+
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
 # Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
 # (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
