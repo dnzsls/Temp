@@ -1768,7 +1768,16 @@ TAKIM_HINT = True                                  # False → hiç ipucu verme 
 # aradaki 15 doğrudan coverage eksiğine dönüştü. Ham boyut izinliyi de sayıyor.
 # EN DAR gün alınıyor çünkü takım hafta boyu o tipte kalıyor (H19) → kapasitenin
 # haftanın her gününü taşıması gerekir.
-takim_etkin = {}                                   # (takım, hafta) → etkin üye sayısı
+takim_etkin = {}                                   # (takım, hafta) → etkin üye (tipten bağımsız)
+takim_etkin_tip = {}                               # (takım, hafta, TİP) → o tipte çalışabilen üye
+# TİPE DUYARLI SAYIM ŞART — yoksa model INFEASIBLE oluyordu (ölçüldü):
+#   H19D geceye 12 kişilik takım atayıp "kapasite 12 ≥ talep 11, tamam" diyordu.
+#   Ama o takımın 5'i kıdemsiz (H14B gece yasağı) + 2'si sabahçı (H13) →
+#   gerçekte gece çalışabilen 5 kişi. Gece kovasının SERT bandı 8 istiyor → çözümsüz.
+#   H19D'den önce model geceyi serbestçe kıdemsizsiz takıma veriyordu; "zirveyi
+#   karşıla" zorunluluğu onu yanlış takıma yönlendirdi.
+# _kova_calisabilir (H14B) tüm sert çivilemeleri biliyor: izin/off_t2 (değişken yok),
+# H13 sabahçı, H14B kıdem-gece, H14 hamile/süt.
 for _T, _uy in takimlar.items():
     for _wk2, _gnl in haftalar.items():
         _hi2 = [ds for ds in _gnl if dt.date.fromisoformat(ds).weekday() < 5]
@@ -1778,6 +1787,13 @@ for _T, _uy in takimlar.items():
             sum(1 for a in _uy
                 if any((a, ds, v) in x for v in gun_vardiyalari[ds]))
             for ds in _hi2)
+        for _t2 in hafta_tipler.get(_wk2, []):
+            takim_etkin_tip[(_T, _wk2, _t2)] = min(
+                sum(1 for a in _uy
+                    if any(_kova_calisabilir(a, ds, v)
+                           for v in gun_vardiyalari[ds]
+                           if (ds, v) in talep and saat[(ds, v)][0] == _t2))
+                for ds in _hi2)
 
 _hint = {}                                         # y değişkeni → 0/1
 _hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
@@ -1800,15 +1816,19 @@ if TAKIM_HINT and takim_tip:
         _acik_once = sum(_ihtiyac.values())        # hiç takım atanmamış hâl
         _kalan = dict(_ihtiyac)
         # (2) açgözlü: büyük takım → en büyük açık
-        #     boyut ETKİN (izin düşülmüş) — H19D kısıtı da aynı ölçüyü kullanıyor,
+        #     boyut TİPE DUYARLI ETKİN — H19D kısıtı da aynı ölçüyü kullanıyor,
         #     yoksa "tanık" bütçesi kısıtla aynı dili konuşmazdı.
-        _bw = {T: takim_etkin.get((T, _wk), _boyut[T]) for T in takimlar}
-        for T in sorted(takimlar, key=lambda t: -_bw[t]):
+        def _kap_tip(T, t):                        # takımın o tipteki gerçek katkısı
+            return takim_etkin_tip.get((T, _wk, t), takim_etkin.get((T, _wk), _boyut[T]))
+
+        for T in sorted(takimlar,
+                        key=lambda t: -max((_kap_tip(t, _x) for _x in _ihtiyac),
+                                           default=0)):
             _uygun = [_t for _t in _ihtiyac if (T, _wk, _t) in takim_tip]
             if not _uygun:
                 continue                           # takımın o hafta seçeneği yok
             _sec = max(_uygun, key=lambda t: _kalan.get(t, 0))
-            _kalan[_sec] = _kalan.get(_sec, 0) - _bw[T]
+            _kalan[_sec] = _kalan.get(_sec, 0) - _kap_tip(T, _sec)
             for _t in _uygun:                      # (3) hint: seçilen 1, diğerleri 0
                 _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
         _hint_ozet.append((_wk, _acik_once,
@@ -1892,7 +1912,9 @@ if TIP_KAPASITE_SERT and takim_tip:
         _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
         _acik_var, _kt19 = [], []
         for _t, _z in _zirve19d.items():
-            _kap = sum(_etk[T] * takim_tip[(T, _wk, _t)]
+            # TİPE DUYARLI kapasite: takımın o tipte FİİLEN çalışabilen üyesi
+            # (kıdemsiz gece yapamaz, sabahçı geç tip yapamaz → 0 sayılır)
+            _kap = sum(takim_etkin_tip.get((T, _wk, _t), _etk[T]) * takim_tip[(T, _wk, _t)]
                        for T in _sec_takim if (T, _wk, _t) in takim_tip)
             _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
@@ -1907,7 +1929,9 @@ if _19d_ozet:
     print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
           f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
     print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} "
-          f"{'açgözlü':>8} {'BÜTÇE':>6}   (etkin = izin/off_t2 DÜŞÜLMÜŞ)")
+          f"{'açgözlü':>8} {'BÜTÇE':>6}")
+    print(f"    (etkin üye = izin/off_t2 düşülmüş; KAPASİTE ayrıca TİPE DUYARLI: "
+          f"kıdemsiz geceye, sabahçı geç tipe 0 sayılır)")
     for _wk, _z, _u, _y, _g, _b in _19d_ozet:
         _im = "  ← tip açığı YASAK" if _b == 0 else ""
         print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} "
