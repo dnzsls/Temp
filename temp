@@ -3528,15 +3528,18 @@ df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
-# Sheet5: TAKIM × VARDİYA — GEÇMİŞ + BU AY = TOPLAM
+# Sheet5: TAKIM × VARDİYA — GEÇMİŞ | BU AY | TOPLAM (blok blok)
 # "Bu takım 00:00'ı bugüne kadar kaç kez yapmış?" sorusunun tek tabloda cevabı.
-# Satır = takım, sütun = vardiya; her vardiya için ÜÇ sütun:
-#   geçmiş : df_gecmis.total_gun_sayisi (H19B'nin adalet cezasını besleyen aynı veri)
-#   bu ay  : bu ayın çizelgesinden (agent,gün) atama sayısı — ARIFE_YARIM hariç
-#   TOPLAM : ikisinin toplamı → yıl bazında biriken yük
-# NOT: iki kaynağın BİRİMİ aynı varsayılıyor (kişi-gün). Aşağıdaki özet satırı
-# iki toplamı yan yana basıyor — mertebeler çok farklıysa df_gecmis başka bir
-# birimdedir (ör. takım-günü) ve TOPLAM sütunu anlamsız olur, oradan anlarsın.
+# Satır = takım. Sütunlar ÜÇ BLOK hâlinde (aynı vardiya yan yana DEĞİL):
+#   1) GEÇMİŞ <vardiya>  : df_gecmis.total_gun_sayisi (H19B'yi besleyen aynı veri)
+#   2) BU AY  <vardiya>  : bu ayın çizelgesinden (agent,gün) atama — ARIFE_YARIM hariç
+#   3) TOPLAM <vardiya>  : geçmiş + bu ay → yıl bazında biriken yük
+# Blok düzeni bilerek: önce geçmişin tamamı okunur, sonra bu ayın tamamı; aynı
+# vardiyayı üç kez üst üste görmek yerine iki resmi ayrı ayrı karşılaştırırsın.
+# TOPLAM bloğunda BU AY'da artmış hücreler YEŞİL boyanıyor (aşağıda, ExcelWriter).
+# NOT: iki kaynağın BİRİMİ aynı varsayılıyor (kişi-gün). Özet satırı iki toplamı
+# yan yana basıyor — mertebeler çok farklıysa df_gecmis başka birimdedir
+# (ör. takım-günü) ve TOPLAM bloğu anlamsız olur, oradan anlarsın.
 _bu_ay_tv = (df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
              .groupby(["takim", "saat"]).size())
 _gec_tv = (df_gecmis.groupby(["takim", "shifts_adj"])["total_gun_sayisi"].sum()
@@ -3546,17 +3549,19 @@ _vardiya_kol = sorted(set(_bu_ay_tv.index.get_level_values("saat"))
                          else set()))
 _tv_satir = []
 for _T in sorted(takimlar):
+    _gm = {_v: (int(_gec_tv.get((_T, _v), 0)) if _gec_tv is not None else 0)
+           for _v in _vardiya_kol}
+    _bm = {_v: int(_bu_ay_tv.get((_T, _v), 0)) for _v in _vardiya_kol}
     _r = {"takim": _T, "uye": len(takimlar[_T])}
-    _gt = _bt = 0
-    for _v in _vardiya_kol:
-        _g = int(_gec_tv.get((_T, _v), 0)) if _gec_tv is not None else 0
-        _b = int(_bu_ay_tv.get((_T, _v), 0))
-        _r[f"{_v} geçmiş"] = _g
-        _r[f"{_v} bu ay"] = _b
-        _r[f"{_v} TOPLAM"] = _g + _b
-        _gt += _g
-        _bt += _b
-    _r["geçmiş TOPLAM"], _r["bu ay TOPLAM"], _r["GENEL TOPLAM"] = _gt, _bt, _gt + _bt
+    for _v in _vardiya_kol:                        # 1. blok — GEÇMİŞ
+        _r[f"GEÇMİŞ {_v}"] = _gm[_v]
+    for _v in _vardiya_kol:                        # 2. blok — BU AY
+        _r[f"BU AY {_v}"] = _bm[_v]
+    for _v in _vardiya_kol:                        # 3. blok — TOPLAM
+        _r[f"TOPLAM {_v}"] = _gm[_v] + _bm[_v]
+    _r["GEÇMİŞ Σ"] = sum(_gm.values())
+    _r["BU AY Σ"] = sum(_bm.values())
+    _r["GENEL Σ"] = _r["GEÇMİŞ Σ"] + _r["BU AY Σ"]
     _tv_satir.append(_r)
 df_takim_vardiya = pd.DataFrame(_tv_satir)
 if len(df_takim_vardiya):                          # en alta TOPLAM satırı
@@ -3606,6 +3611,9 @@ LEJANT = [
     ("gece_yasak",        None, None,
      "1 → kıdem MIN_KIDEM_AY'dan az, 00:00 vardiyası YAZILAMAZ (H14B). "
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
+    ("--- takim_vardiya SAYFASI ---", None, None, ""),
+    ("yeşil hücre",       "norm",       "C6EFCE",
+     "TOPLAM bloğunda BU AY ARTMIŞ hücre — o takım bu ay o vardiyadan atama aldı"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -3731,6 +3739,23 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
             if _FILL.get(_kt):
                 _cell.fill = _FILL[_kt]
 
+    # takim_vardiya: TOPLAM bloğunda BU AY'da ARTMIŞ hücreleri YEŞİL boya
+    # (bu ay o vardiyadan atama almış takımlar tek bakışta görünsün)
+    _wtv = _xl.sheets["takim_vardiya"]
+    _tv_bas = [_c.value for _c in _wtv[1]]
+    _YESIL = PatternFill("solid", fgColor="C6EFCE")
+    for _v in list(_vardiya_kol) + ["Σ"]:          # her vardiya + genel toplam
+        _ad_t = f"TOPLAM {_v}" if _v != "Σ" else "GENEL Σ"
+        _ad_b = f"BU AY {_v}" if _v != "Σ" else "BU AY Σ"
+        if _ad_t not in _tv_bas or _ad_b not in _tv_bas:
+            continue
+        _ct, _cb = _tv_bas.index(_ad_t) + 1, _tv_bas.index(_ad_b) + 1
+        for _r2 in range(2, _wtv.max_row + 1):
+            if (_wtv.cell(row=_r2, column=_cb).value or 0) > 0:
+                _wtv.cell(row=_r2, column=_ct).fill = _YESIL
+    _wtv.column_dimensions["A"].width = 38         # takım adı sığsın
+    _wtv.freeze_panes = "C2"                       # takım + üye sabit kalsın
+
     # LEJANT: gösterim hücresini kendi rengiyle boya (örnek kutucuk gibi)
     _wl = _xl.sheets["LEJANT"]
     for _i, (_g, _k, _c, _d) in enumerate(LEJANT, start=2):
@@ -3747,9 +3772,11 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
-print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya "
-      f"(geçmiş/bu ay/TOPLAM)  |  Σgeçmiş {int(df_takim_vardiya['geçmiş TOPLAM'].iloc[-1])}"
-      f"  Σbu ay {int(df_takim_vardiya['bu ay TOPLAM'].iloc[-1])}"
-      + ("   ⚠ df_gecmis yok → geçmiş sütunları 0" if df_gecmis is None else ""))
+print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya, "
+      f"3 blok (GEÇMİŞ | BU AY | TOPLAM)  |  Σgeçmiş "
+      f"{int(df_takim_vardiya['GEÇMİŞ Σ'].iloc[-1])}"
+      f"  Σbu ay {int(df_takim_vardiya['BU AY Σ'].iloc[-1])}"
+      f"  → birimler uyumluysa TOPLAM anlamlı"
+      + ("   ⚠ df_gecmis yok → GEÇMİŞ bloğu 0" if df_gecmis is None else ""))
 print(f"  Sheet5 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
