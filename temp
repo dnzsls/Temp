@@ -1368,6 +1368,8 @@ ozel_agents = hafta_sonu_yasak | mesai_yok       # hamile/süt + mesaiye_kalamaz
 tatil_gun = len(TATIL)                            # resmi tatil günü sayısı (H16'dan)
 kota_map, ust_map = {}, {}                        # H23 raporu GERÇEK değerleri okusun (sapma olmasın)
 n_kredi = 0                                       # sınır haftası alacağı verilen agent sayısı
+kredi_map = {}                                    # agent → kredi (IntVar ya da 0) — H20E AYNI
+                                                  # ifadeyi kullansın diye saklanıyor (aşağıda)
 
 for a in AGENTS:
     tum = []
@@ -1401,6 +1403,8 @@ for a in AGENTS:
             kredi = model.NewIntVar(0, _ek, f"kredi_{a}")
             model.Add(kredi <= sum(sinir_var))
             n_kredi += 1
+    kredi_map[a] = kredi                                  # H20E oransal mesai tavanı AYNI
+                                                          # ifadeyi kullanacak (rapor=kısıt)
     ust = kota + _pay + tatil_gun + _ek                   # TOPLAM tavan (tatil + alacak dahil)
     kota_map[a], ust_map[a] = kota, ust                  # H23 raporu için gerçek değerler
     model.Add(calisma >= kota)                            # SERT taban: kotayı doldur
@@ -1657,10 +1661,29 @@ else:
 # (H25B [3]) karşılaştırınca ipucunun ne kadar iyi olduğu görünür.
 TAKIM_HINT = True                                  # False → hiç ipucu verme (eski davranış)
 
+# TAKIMIN O HAFTADAKİ ETKİN BOYUTU — hem bu hücre hem H19D bunu kullanır.
+#   etkin = o haftanın EN DAR hafta içi gününde kaç üyesinin değişkeni var
+#           (izin / off_t2 → değişken yok → sahada yok)
+# NEDEN ham `len(uyeler)` DEĞİL (H25D [3] ile ölçüldü): bir tipe 183 üyelik takım
+# atanmıştı, zirve talebi karşılıyordu; ama o gün 15'i izinliydi → sahada 168 kişi,
+# aradaki 15 doğrudan coverage eksiğine dönüştü. Ham boyut izinliyi de sayıyor.
+# EN DAR gün alınıyor çünkü takım hafta boyu o tipte kalıyor (H19) → kapasitenin
+# haftanın her gününü taşıması gerekir.
+takim_etkin = {}                                   # (takım, hafta) → etkin üye sayısı
+for _T, _uy in takimlar.items():
+    for _wk2, _gnl in haftalar.items():
+        _hi2 = [ds for ds in _gnl if dt.date.fromisoformat(ds).weekday() < 5]
+        if not _hi2:
+            continue
+        takim_etkin[(_T, _wk2)] = min(
+            sum(1 for a in _uy
+                if any((a, ds, v) in x for v in gun_vardiyalari[ds]))
+            for ds in _hi2)
+
 _hint = {}                                         # y değişkeni → 0/1
 _hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
 if TAKIM_HINT and takim_tip:
-    _boyut = {T: len(u) for T, u in takimlar.items()}
+    _boyut = {T: len(u) for T, u in takimlar.items()}   # ham boyut (yedek)
     for _wk in sorted(haftalar):
         if _wk in tatil_haftalari:
             continue
@@ -1678,12 +1701,15 @@ if TAKIM_HINT and takim_tip:
         _acik_once = sum(_ihtiyac.values())        # hiç takım atanmamış hâl
         _kalan = dict(_ihtiyac)
         # (2) açgözlü: büyük takım → en büyük açık
-        for T in sorted(takimlar, key=lambda t: -_boyut[t]):
+        #     boyut ETKİN (izin düşülmüş) — H19D kısıtı da aynı ölçüyü kullanıyor,
+        #     yoksa "tanık" bütçesi kısıtla aynı dili konuşmazdı.
+        _bw = {T: takim_etkin.get((T, _wk), _boyut[T]) for T in takimlar}
+        for T in sorted(takimlar, key=lambda t: -_bw[t]):
             _uygun = [_t for _t in _ihtiyac if (T, _wk, _t) in takim_tip]
             if not _uygun:
                 continue                           # takımın o hafta seçeneği yok
             _sec = max(_uygun, key=lambda t: _kalan.get(t, 0))
-            _kalan[_sec] = _kalan.get(_sec, 0) - _boyut[T]
+            _kalan[_sec] = _kalan.get(_sec, 0) - _bw[T]
             for _t in _uygun:                      # (3) hint: seçilen 1, diğerleri 0
                 _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
         _hint_ozet.append((_wk, _acik_once,
@@ -1740,7 +1766,10 @@ TIP_ACIK_TOLERANS = 0        # bütçeye eklenen ek pay (hafta başına).
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
 _19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
 if TIP_KAPASITE_SERT and takim_tip:
-    _boyut19d = {T: len(u) for T, u in takimlar.items()}
+    # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
+    # Ham `len(uyeler)` izinlileri de sayıyordu → tipe yeterli takım atansa bile
+    # o gün sahada daha az kişi oluyordu (H25D [3]: 183 atanmış, 15 izinli, 168 sahada).
+    _boyut19d = {T: len(u) for T, u in takimlar.items()}   # ham (yedek)
     _greedy = {w: a for w, _, a in _hint_ozet}     # H19C açgözlü artığı (yoksa boş)
     for _wk in sorted(haftalar):
         if _wk in tatil_haftalari:
@@ -1748,9 +1777,10 @@ if TIP_KAPASITE_SERT and takim_tip:
         _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
         if not _hi:
             continue
-        # o hafta tip SEÇEBİLEN takımlar (y değişkeni olanlar) ve toplam üyesi
+        # o hafta tip SEÇEBİLEN takımlar (y değişkeni olanlar) ve ETKİN toplam üyesi
         _sec_takim = {T for (T, w, _t) in takim_tip if w == _wk}
-        _uye_top = sum(_boyut19d[T] for T in _sec_takim)
+        _etk = {T: takim_etkin.get((T, _wk), _boyut19d[T]) for T in _sec_takim}
+        _uye_top = sum(_etk.values())
         # tip → ZİRVE hafta içi talep (H19: takım hafta boyu o tipte → zirveyi karşılamalı)
         _zirve19d = {}
         for _t in hafta_tipler.get(_wk, []):
@@ -1763,7 +1793,7 @@ if TIP_KAPASITE_SERT and takim_tip:
         _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
         _acik_var = []
         for _t, _z in _zirve19d.items():
-            _kap = sum(_boyut19d[T] * takim_tip[(T, _wk, _t)]
+            _kap = sum(_etk[T] * takim_tip[(T, _wk, _t)]
                        for T in _sec_takim if (T, _wk, _t) in takim_tip)
             _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
             model.Add(_kap + _av >= _z)            # zirve talebi karşıla (ya da açık yaz)
@@ -1776,11 +1806,11 @@ if TIP_KAPASITE_SERT and takim_tip:
 if _19d_ozet:
     print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
           f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
-    print(f"    {'hafta':>10} {'Σzirve':>7} {'üye':>6} {'yapısal':>8} "
-          f"{'açgözlü':>8} {'BÜTÇE':>6}")
+    print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} "
+          f"{'açgözlü':>8} {'BÜTÇE':>6}   (etkin = izin/off_t2 DÜŞÜLMÜŞ)")
     for _wk, _z, _u, _y, _g, _b in _19d_ozet:
         _im = "  ← tip açığı YASAK" if _b == 0 else ""
-        print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>6} {_y:>8} "
+        print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} "
               f"{_g:>8} {_b:>6}{_im}")
     print(f"  BÜTÇE = max(yapısal, açgözlü) + TOLERANS({TIP_ACIK_TOLERANS}); açgözlü")
     print(f"  H19C'nin bulduğu ÇÖZÜM → o çözüm bütçeyi sağlar, kısıt INFEASIBLE yapmaz.")
@@ -2131,8 +2161,14 @@ print(f"haftalık yığılma (6-günlük hafta): {nmes} agent, adil pay={FAIR_ME
 # yapan birinin mv'sini ŞİŞİRİP M'yi büyütür ve üsttekilerin tavanını gevşetirdi.
 # Eşitlikle mv gerçek değere çivili → M manipüle edilemez.
 #
-# Sınır haftası alacağı için SABİT onceki_eksik kullanılıyor (H17'deki `kredi`
-# değişkeninin tavanı) → ölçü bilerek MÜSAMAHALI, kimseyi haksız bağlamaz.
+# Sınır haftası alacağı için H17'nin `kredi` DEĞİŞKENİ (kredi_map) kullanılıyor →
+# ölçü H22'nin mesai_gun'ü ile BİREBİR aynı.
+# ÖNCEDEN sabit `onceki_eksik` (kredinin ÜST sınırı) kullanılıyordu ve rapor ile
+# kısıt AYRIŞIYORDU: alacağı olan ama sınır hafta sonunu OFF geçiren agentta
+# kredi 0 kalıyor, H22 mesai_gun'ü 1 fazla yazıyordu. Ölçüldü: oransal tavan 3
+# iken Excel'de 3 agent 4 gösteriyordu (1-2 Ağustos'ta off + off_t'leri var,
+# alacağı hiç kullanmamışlar). Aynı tutarsızlığı MAX_MESAI için H17'de daha önce
+# kapatmıştık; burada geri gelmişti.
 mesai_ay = {}                                          # agent → mesai günü (IntVar)
 _gun_ub = len(PLAN_GUNLER)
 for a in AGENTS:
@@ -2146,7 +2182,7 @@ for a in AGENTS:
     if not tum:
         continue
     _net = model.NewIntVar(-_gun_ub, _gun_ub, f"mesainet_{a}")
-    model.Add(_net == sum(tum) - sum(tat_v) - kota_map[a] - onceki_eksik.get(a, 0))
+    model.Add(_net == sum(tum) - sum(tat_v) - kota_map[a] - kredi_map.get(a, 0))
     mv = model.NewIntVar(0, MAX_MESAI, f"mesaiay_{a}")  # üst sınır = H17'nin sert tavanı
     model.AddMaxEquality(mv, [_net, 0])                 # mv = max(0, net) — EŞİTLİK
     mesai_ay[a] = mv
