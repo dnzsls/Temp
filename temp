@@ -281,6 +281,20 @@ MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar 
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
+TESHIS_MODU = False            # INFEASIBLE TEŞHİSİ — normalde KAPALI.
+                               # True yapınca "gevşetilebilir" sert kural grupları
+                               # (H16D akşam tavanı, H18 çift hafta sonu off,
+                               #  H19D tip kapasitesi, H20B haftalık off tavanı,
+                               #  H20E oransal mesai tavanı) birer VARSAYIM
+                               # literaline bağlanır. Model çözümsüz çıkarsa CP-SAT
+                               # "şu grupları birlikte sağlamak imkânsız" diye
+                               # DOĞRUDAN söyler (H21) — tek tek kapatıp 3-4 kez
+                               # koşmaya gerek kalmaz.
+                               # INFEASIBLE ispatı hızlıdır (presolve'da çıkar),
+                               # bu koşu için COZUM_SURE_SN'i 300'e çekebilirsin.
+                               # Teşhis bitince tekrar False yap: varsayım literalleri
+                               # arama uzayını gereksiz büyütür.
+
 ONCEKI_GOSTER = True           # Excel roster'ına ÖNCEKİ AY günlerini de bas (salt okunur, H29).
                                # Aralık = TASIMA_GUNLER (sınır ISO haftasının önceki aya düşen
                                # günleri, ör. 27-31 Tem). df_onceki yoksa kendiliğinden atlanır.
@@ -885,6 +899,22 @@ ust_sinir = len(AGENTS) * len(talep)
 print(f"karar değişkeni: {len(x)}  (izinsiz üst sınır {ust_sinir}; "
       f"blok (izin+off_t2) günleri düşüldü → {ust_sinir - len(x)} adet açılmadı)")
 
+# ── TEŞHİS ALTYAPISI (TESHIS_MODU) ────────────────────────────────────
+# Gevşetilebilir sert kural grupları birer "varsayım" literaline bağlanır.
+# INFEASIBLE olursa CP-SAT hangi varsayım kümesinin yettiğini söyler (H21) →
+# suçlu kural tek koşuda çıkar. TESHIS_MODU=False iken hiçbir şey değişmez.
+_teshis = []                                       # (ad, literal)
+
+
+def _tes_ekle(ad, *ktlar):
+    """TESHIS_MODU açıksa verilen kısıtları tek bir varsayım literaline bağlar."""
+    if not TESHIS_MODU or not ktlar:
+        return
+    _b = model.NewBoolVar(f"AS_{ad}")
+    for _kt in ktlar:
+        _kt.OnlyEnforceIf(_b)
+    _teshis.append((ad, _b))
+
 
 # %% [HÜCRE 10] — COVERAGE (serbest bölge ±SERBEST, SERT BAND YOK) ─────
 # Sert üst/alt sınır YOK → kova talebi aşılabilir veya eksik bırakılabilir.
@@ -1391,6 +1421,7 @@ print(f"mesaiye kalamaz haftada ≤müsait hafta içi gün: {len(mesai_yok)} age
 _aksam_dk = dakika(AKSAM_BASLANGIC)
 gece_gv_set = {(ds, v) for (ds, v) in talep if dakika(saat[(ds, v)][0]) >= _aksam_dk}
 ng = 0
+_kt_aksam = []                                       # TESHIS_MODU: akşam tavanı kısıtları
 for a in AGENTS:
     hafta_ind = []                                   # her hafta: agent o hafta akşam/gece mi (0/1)
     for wk, gunler in haftalar.items():
@@ -1402,8 +1433,9 @@ for a in AGENTS:
                 model.Add(ind >= xv)                 # o hafta akşam/gece varsa gösterge 1
             hafta_ind.append(ind)
     if hafta_ind:
-        model.Add(sum(hafta_ind) <= MAX_AKSAM_HAFTA)  # ayda ≤ MAX akşam/gece haftası
+        _kt_aksam.append(model.Add(sum(hafta_ind) <= MAX_AKSAM_HAFTA))  # ayda ≤ MAX
         ng += 1
+_tes_ekle("H16D_aksam_hafta_tavani", *_kt_aksam)
 
 print(f"akşam/gece ayda ≤{MAX_AKSAM_HAFTA} hafta (sert): {ng} agent, "
       f"{len(gece_gv_set)} akşam/gece kovası")
@@ -1513,6 +1545,7 @@ for ds in PLAN_GUNLER:
             hs_ciftleri.append((ds, pzr))
 
 n = 0
+_kt_cift = []                                    # TESHIS_MODU: çift hafta sonu off kısıtları
 if CIFT_HS_OFF:
     for a in AGENTS:
         cift_off = []
@@ -1524,8 +1557,9 @@ if CIFT_HS_OFF:
                 model.Add(co + xv <= 1)          # o hafta sonu çalışıyorsa co=0
             cift_off.append(co)
         if cift_off:
-            model.Add(sum(cift_off) >= 1)        # en az bir tam hafta sonu off
+            _kt_cift.append(model.Add(sum(cift_off) >= 1))   # ≥1 tam hafta sonu off
             n += 1
+    _tes_ekle("H18_cift_hafta_sonu_off", *_kt_cift)
     print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), "
           f"{len(hs_ciftleri)} hafta sonu")
 else:
@@ -1844,15 +1878,16 @@ if TIP_KAPASITE_SERT and takim_tip:
             continue
         _yapisal = max(0, sum(_zirve19d.values()) - _uye_top)
         _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
-        _acik_var = []
+        _acik_var, _kt19 = [], []
         for _t, _z in _zirve19d.items():
             _kap = sum(_etk[T] * takim_tip[(T, _wk, _t)]
                        for T in _sec_takim if (T, _wk, _t) in takim_tip)
             _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
-            model.Add(_kap + _av >= _z)            # zirve talebi karşıla (ya da açık yaz)
+            _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
             _acik_var.append(_av)
-        model.Add(sum(_acik_var) <= _butce)        # açık SADECE kaçınılmaz kadar
+        _kt19.append(model.Add(sum(_acik_var) <= _butce))   # açık SADECE kaçınılmaz kadar
+        _tes_ekle(f"H19D_tip_kapasite_{_wk[0]}W{_wk[1]}", *_kt19)
         _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
                           _yapisal, _greedy.get(_wk, 0), _butce))
 
@@ -1936,6 +1971,7 @@ MAX_HAFTA_OFF  = 2                 # bir ISO haftada en fazla kaç OFF (off_t ha
 n1, n1_tas, n1_sert = 0, 0, 0
 _off_kapasite = {}                 # agent → Σ haftalık off tavanı (fizibilite kontrolü)
 _off_zorunlu  = {}                 # agent → off_t dışı müsait gün sayısı
+_kt_off = []                       # TESHIS_MODU: sert off kısıtları
 for a in AGENTS:
     _soft_a = off_soft_map.get(a, set())      # off_t günleri → tavanın DIŞINDA
     _kap = _mus = 0
@@ -1957,7 +1993,7 @@ for a in AGENTS:
         avail = len(izinsiz_gun)
         # ── SERT: o haftada off_t dışı günlerin en fazla MAX_HAFTA_OFF'u off olabilir
         if HAFTA_OFF_SERT and sert_gun > MAX_HAFTA_OFF:
-            model.Add(sum(sert_var) >= sert_gun - MAX_HAFTA_OFF)
+            _kt_off.append(model.Add(sum(sert_var) >= sert_gun - MAX_HAFTA_OFF))
             n1_sert += 1
         _mus += sert_gun
         _kap += min(MAX_HAFTA_OFF, sert_gun)
@@ -1973,6 +2009,7 @@ for a in AGENTS:
         amac.append(W_HAFTA_OFF * fazla_off)
         n1 += 1
     _off_zorunlu[a], _off_kapasite[a] = _mus, _kap
+_tes_ekle("H20B_haftalik_off_tavani", *_kt_off)
 
 # ── FİZİBİLİTE ÖN KONTROLÜ (sert kural için) ──────────────────────────
 # Sert kuralı haftalar üzerinden toplarsak:  Σ çalışma(off_t dışı) ≥ müsait − tavan
@@ -2244,8 +2281,9 @@ N_mesai = len(mesai_ay)
 if N_mesai and MESAI_TOL < MAX_MESAI:
     M_mesai = model.NewIntVar(0, N_mesai * MAX_MESAI, "mesai_toplam")
     model.Add(M_mesai == sum(mesai_ay.values()))
-    for a, mv in mesai_ay.items():
-        model.Add(N_mesai * mv <= M_mesai + N_mesai * MESAI_TOL)
+    _tes_ekle("H20E_oransal_mesai",
+              *[model.Add(N_mesai * mv <= M_mesai + N_mesai * MESAI_TOL)
+                for a, mv in mesai_ay.items()])
     print(f"ay bazlı mesai adaleti [SERT ORANSAL]: {N_mesai} agent, "
           f"mesai_a ≤ ortalama + {MESAI_TOL}  (ağırlık YOK; ikinci tavan "
           f"MAX_MESAI={MAX_MESAI} → fiili tavan = min(ikisi))")
@@ -2267,6 +2305,10 @@ COZUM_SURE_SN = 2700               # süre sınırı (sn) — fiilen kullanılan
                                    # Yani ek süre çözüm değil → H19C ipucu / sabitleme.
 
 model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
+if TESHIS_MODU and _teshis:                        # varsayımlar → INFEASIBLE'da suçlu grup
+    model.AddAssumptions([_b for _ad, _b in _teshis])
+    print(f"TEŞHİS MODU AÇIK: {len(_teshis)} kural grubu varsayıma bağlandı → "
+          f"{[_ad for _ad, _ in _teshis][:6]}{' ...' if len(_teshis) > 6 else ''}")
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
 solver.parameters.max_time_in_seconds = COZUM_SURE_SN   # en iyi BULUNAN'ı al (optimal şart değil)
@@ -2275,6 +2317,31 @@ status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
 
 if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    # ── 0) VARSAYIM TEŞHİSİ (TESHIS_MODU) — suçlu kural grubu ─────────
+    # CP-SAT, çözümsüzlüğü açıklamaya YETEN varsayım alt kümesini döndürür.
+    # Yani "şu grupları birlikte sağlamak imkânsız" → tek tek kapatıp
+    # defalarca koşmaya gerek kalmaz.
+    if TESHIS_MODU and _teshis:
+        _ad_map = {_b.Index(): _ad for _ad, _b in _teshis}
+        _suclu = [_ad_map.get(i, f"?{i}")
+                  for i in solver.SufficientAssumptionsForInfeasibility()]
+        print("\n★ VARSAYIM TEŞHİSİ — çözümsüzlüğü açıklayan kural grupları:")
+        if _suclu:
+            for _s in _suclu:
+                print(f"     • {_s}")
+            print(f"   → Bu grupların HEPSİ birden sağlanamıyor. Birini gevşet:")
+            print(f"     H19D → TIP_ACIK_TOLERANS artır / TIP_KAPASITE_SERT=False")
+            print(f"     H20E → MESAI_TOL artır (2 = kısıt ölü)")
+            print(f"     H20B → MAX_HAFTA_OFF artır / HAFTA_OFF_SERT=False")
+            print(f"     H18  → CIFT_HS_OFF=False   |   H16D → MAX_AKSAM_HAFTA artır")
+        else:
+            print("     (boş) → çözümsüzlük varsayıma bağlı OLMAYAN kurallardan")
+            print("     geliyor: kota (H17), coverage sert bandı (H10), 11 saat (H15),")
+            print("     kayan pencere (H12), takım tek tip (H19). Aşağıdaki taramaya bak.")
+    elif not TESHIS_MODU:
+        print("\n💡 İPUCU: TESHIS_MODU=True yapıp tekrar koş → CP-SAT hangi kural")
+        print("   grubunun çözümsüzlüğe yol açtığını DOĞRUDAN söyler (hızlıdır,")
+        print("   COZUM_SURE_SN'i 300'e çekebilirsin).")
     # ── INFEASIBLE TEŞHİS: en olası iki sebebi tara ────────────────────
     print("\n⚠ INFEASIBLE — olası sebepler taranıyor:")
     # 1) agent kotayı dolduramıyor mu? (off_t artık kotayı DÜŞÜRMÜYOR → kota
