@@ -281,6 +281,18 @@ MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar 
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
+FIZIBILITE_MODU = False        # "ÇÖZÜM VAR MI?" modu — normalde KAPALI.
+                               # True → amaç fonksiyonu HİÇ KURULMAZ; çözücü sadece
+                               # tüm sert kuralları sağlayan BİR çözüm arar.
+                               # NE ZAMAN: durum UNKNOWN geldiğinde. UNKNOWN "çözüm
+                               # yok" DEMEK DEĞİL — "süre içinde bulamadım" demek.
+                               # Amaç fonksiyonu aramanın çoğunu yiyor; kapatınca
+                               # çözücü genelde saniyeler içinde bir çözüm bulur.
+                               #   çözüm bulunur → model FİZİBİL, sorun ARAMA/süre
+                               #   yine UNKNOWN  → kural yığını gerçekten çok sıkı
+                               # Bu moddaki çıktı PLAN OLARAK KULLANILMAZ (coverage
+                               # optimize edilmemiştir) — sadece teşhis içindir.
+
 TESHIS_MODU = False            # INFEASIBLE TEŞHİSİ — normalde KAPALI.
                                # True yapınca "gevşetilebilir" sert kural grupları
                                # (H16D akşam tavanı, H18 çift hafta sonu off,
@@ -2304,7 +2316,12 @@ COZUM_SURE_SN = 2700               # süre sınırı (sn) — fiilen kullanılan
                                    # 10 (hafta,tip) kombinasyonu açık kalıyor).
                                    # Yani ek süre çözüm değil → H19C ipucu / sabitleme.
 
-model.Minimize(sum(amac))                          # amaç: toplam cezayı (coverage sapma + off + adalet) küçült
+if FIZIBILITE_MODU:                                # amaç YOK → sadece "çözüm var mı"
+    print("⚑ FİZİBİLİTE MODU: amaç fonksiyonu KURULMADI — sadece bir çözüm aranıyor.")
+    print("   Çözüm bulunursa model FİZİBİL demektir (sorun arama/süre), ama çıktı")
+    print("   PLAN OLARAK KULLANILAMAZ: coverage/adalet optimize edilmemiştir.")
+else:
+    model.Minimize(sum(amac))                      # amaç: toplam cezayı küçült
 if TESHIS_MODU and _teshis:                        # varsayımlar → INFEASIBLE'da suçlu grup
     model.AddAssumptions([_b for _ad, _b in _teshis])
     print(f"TEŞHİS MODU AÇIK: {len(_teshis)} kural grubu varsayıma bağlandı → "
@@ -2317,33 +2334,51 @@ status = solver.Solve(model)
 print(f"durum: {solver.StatusName(status)}  (süre: {solver.WallTime():.2f} sn)")
 
 if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    # ── 0) VARSAYIM TEŞHİSİ (TESHIS_MODU) — suçlu kural grubu ─────────
-    # CP-SAT, çözümsüzlüğü açıklamaya YETEN varsayım alt kümesini döndürür.
-    # Yani "şu grupları birlikte sağlamak imkânsız" → tek tek kapatıp
-    # defalarca koşmaya gerek kalmaz.
-    if TESHIS_MODU and _teshis:
-        _ad_map = {_b.Index(): _ad for _ad, _b in _teshis}
-        _suclu = [_ad_map.get(i, f"?{i}")
-                  for i in solver.SufficientAssumptionsForInfeasibility()]
-        print("\n★ VARSAYIM TEŞHİSİ — çözümsüzlüğü açıklayan kural grupları:")
-        if _suclu:
-            for _s in _suclu:
-                print(f"     • {_s}")
-            print(f"   → Bu grupların HEPSİ birden sağlanamıyor. Birini gevşet:")
-            print(f"     H19D → TIP_ACIK_TOLERANS artır / TIP_KAPASITE_SERT=False")
-            print(f"     H20E → MESAI_TOL artır (2 = kısıt ölü)")
-            print(f"     H20B → MAX_HAFTA_OFF artır / HAFTA_OFF_SERT=False")
-            print(f"     H18  → CIFT_HS_OFF=False   |   H16D → MAX_AKSAM_HAFTA artır")
+    # ── 0) DURUM AYRIMI: UNKNOWN ≠ INFEASIBLE ─────────────────────────
+    # UNKNOWN  = süre doldu, çözücü ne çözüm buldu ne de yokluğunu kanıtladı.
+    #            Model FİZİBİL OLABİLİR — "çözüm yok" demek DEĞİLDİR.
+    # INFEASIBLE = çözüm olmadığı KANITLANDI.
+    # Aşağıdaki taramalar ve varsayım teşhisi SADECE INFEASIBLE'da anlamlı;
+    # UNKNOWN'da SufficientAssumptionsForInfeasibility() her zaman BOŞ döner
+    # ve "suçlu yok" gibi yanlış okunur.
+    _kanitli = (status == cp_model.INFEASIBLE)
+    if not _kanitli:
+        print(f"\n⚠ DURUM: {solver.StatusName(status)} — bu 'ÇÖZÜM YOK' DEMEK DEĞİL.")
+        print(f"   Çözücü {COZUM_SURE_SN} sn içinde ne bir çözüm bulabildi ne de")
+        print(f"   çözümsüzlüğü kanıtlayabildi. Sıradaki adımlar:")
+        print(f"   1) FIZIBILITE_MODU=True ile koş (amaç fonksiyonu kapanır) →")
+        print(f"      çözüm bulunursa model fizibil, sorun ARAMA; bulunmazsa kurallar sıkı.")
+        print(f"   2) Süreyi artır (COZUM_SURE_SN) — ilk çözümü bulmak zaman alıyor olabilir.")
+        print(f"   3) Yeni sert kuralları gevşet: TIP_ACIK_TOLERANS=2, MESAI_TOL=2.")
+        print(f"   NOT: TESHIS_MODU açıkken varsayım literalleri aramayı YAVAŞLATIR →")
+        print(f"        UNKNOWN alıyorsan teşhis modunu KAPAT.")
+        print(f"   Aşağıdaki tarama yine de basılıyor ama UNKNOWN'da BAĞLAYICI DEĞİL.")
+    else:
+        # ── VARSAYIM TEŞHİSİ (TESHIS_MODU) — suçlu kural grubu ────────
+        # CP-SAT, çözümsüzlüğü açıklamaya YETEN varsayım alt kümesini döndürür.
+        if TESHIS_MODU and _teshis:
+            _ad_map = {_b.Index(): _ad for _ad, _b in _teshis}
+            _suclu = [_ad_map.get(i, f"?{i}")
+                      for i in solver.SufficientAssumptionsForInfeasibility()]
+            print("\n★ VARSAYIM TEŞHİSİ — çözümsüzlüğü açıklayan kural grupları:")
+            if _suclu:
+                for _s in _suclu:
+                    print(f"     • {_s}")
+                print(f"   → Bu grupların HEPSİ birden sağlanamıyor. Birini gevşet:")
+                print(f"     H19D → TIP_ACIK_TOLERANS artır / TIP_KAPASITE_SERT=False")
+                print(f"     H20E → MESAI_TOL artır (2 = kısıt ölü)")
+                print(f"     H20B → MAX_HAFTA_OFF artır / HAFTA_OFF_SERT=False")
+                print(f"     H18  → CIFT_HS_OFF=False   |   H16D → MAX_AKSAM_HAFTA artır")
+            else:
+                print("     (boş) → çözümsüzlük varsayıma bağlı OLMAYAN kurallardan")
+                print("     geliyor: kota (H17), coverage sert bandı (H10), 11 saat (H15),")
+                print("     kayan pencere (H12), takım tek tip (H19).")
         else:
-            print("     (boş) → çözümsüzlük varsayıma bağlı OLMAYAN kurallardan")
-            print("     geliyor: kota (H17), coverage sert bandı (H10), 11 saat (H15),")
-            print("     kayan pencere (H12), takım tek tip (H19). Aşağıdaki taramaya bak.")
-    elif not TESHIS_MODU:
-        print("\n💡 İPUCU: TESHIS_MODU=True yapıp tekrar koş → CP-SAT hangi kural")
-        print("   grubunun çözümsüzlüğe yol açtığını DOĞRUDAN söyler (hızlıdır,")
-        print("   COZUM_SURE_SN'i 300'e çekebilirsin).")
-    # ── INFEASIBLE TEŞHİS: en olası iki sebebi tara ────────────────────
-    print("\n⚠ INFEASIBLE — olası sebepler taranıyor:")
+            print("\n💡 İPUCU: TESHIS_MODU=True yapıp tekrar koş → CP-SAT hangi kural")
+            print("   grubunun çözümsüzlüğe yol açtığını DOĞRUDAN söyler.")
+    # ── SEBEP TARAMASI ────────────────────────────────────────────────
+    print(f"\n⚠ {'INFEASIBLE' if _kanitli else solver.StatusName(status)} "
+          f"— olası sebepler taranıyor:")
     # 1) agent kotayı dolduramıyor mu? (off_t artık kotayı DÜŞÜRMÜYOR → kota
     #    yükseldi; ama off_t günleri bloklu → kapasite yetmeyebilir.)
     #    kapasite = Σ min(o hafta müsait gün, haftalık tavan)  [tavan: 6, mesai_yok→5]
@@ -2486,9 +2521,15 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         else:
             print("     ✓ taşıma tek başına sert-bandı kırmıyor "
                   "(sebep başka kısıtların birleşimi olabilir)")
-    raise SystemExit("çözüm yok (INFEASIBLE) — yukarıdaki teşhise bak "
-                     "(kota-kapasite, coverage sert-band, önceki ay taşıması).")
-print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
+    raise SystemExit(
+        ("çözüm YOK — INFEASIBLE (kanıtlandı). Yukarıdaki teşhise bak."
+         if _kanitli else
+         f"çözüm BULUNAMADI — durum {solver.StatusName(status)}. Bu 'çözüm yok' "
+         f"DEĞİL: süre yetmedi. FIZIBILITE_MODU=True ile teyit et."))
+if FIZIBILITE_MODU:
+    print("amaç: — (FİZİBİLİTE MODU: optimize EDİLMEDİ, çıktı plan değildir)")
+else:
+    print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
 
 # coverage: band içinde plana ne kadar yakın? (toplam sapma)
 sapan, toplam_sapma = 0, 0
@@ -3016,9 +3057,11 @@ for _, _r in _kot.iterrows():
 # Eksik cezası toplam amacın küçük bir kısmıysa, model onu "ucuz" buluyordur.
 _eksik_ceza = (_hi_e * W_EKSIK_HI) + (_hs_e * W_EKSIK_HS)
 _offt_ceza  = len(offt_karsilanmadi) * W_OFF_T
-print(f"\n[5] AMAÇ FONKSİYONU PAYLARI  (toplam = {solver.ObjectiveValue():.0f})")
+_amac_deg = 0.0 if FIZIBILITE_MODU else solver.ObjectiveValue()   # fizibilite modunda amaç yok
+print(f"\n[5] AMAÇ FONKSİYONU PAYLARI  (toplam = {_amac_deg:.0f}"
+      + ("  — FİZİBİLİTE MODU: amaç kurulmadı, paylar anlamsız)" if FIZIBILITE_MODU else ")"))
 print(f"    eksik coverage cezası : {_eksik_ceza:>10}  "
-      f"(%{100 * _eksik_ceza / max(1, solver.ObjectiveValue()):.1f})")
+      f"(%{100 * _eksik_ceza / max(1, _amac_deg):.1f})")
 print(f"    off_t karşılanmayan   : {_offt_ceza:>10}  "
       f"({len(offt_karsilanmadi)} kişi-gün × {W_OFF_T})")
 print(f"    → eksik payı düşükse model eksiği ucuz buluyor; ama önce [1] ve [3]'e bak,")
