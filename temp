@@ -3475,6 +3475,44 @@ df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
+# Sheet5: TAKIM × VARDİYA — GEÇMİŞ + BU AY = TOPLAM
+# "Bu takım 00:00'ı bugüne kadar kaç kez yapmış?" sorusunun tek tabloda cevabı.
+# Satır = takım, sütun = vardiya; her vardiya için ÜÇ sütun:
+#   geçmiş : df_gecmis.total_gun_sayisi (H19B'nin adalet cezasını besleyen aynı veri)
+#   bu ay  : bu ayın çizelgesinden (agent,gün) atama sayısı — ARIFE_YARIM hariç
+#   TOPLAM : ikisinin toplamı → yıl bazında biriken yük
+# NOT: iki kaynağın BİRİMİ aynı varsayılıyor (kişi-gün). Aşağıdaki özet satırı
+# iki toplamı yan yana basıyor — mertebeler çok farklıysa df_gecmis başka bir
+# birimdedir (ör. takım-günü) ve TOPLAM sütunu anlamsız olur, oradan anlarsın.
+_bu_ay_tv = (df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
+             .groupby(["takim", "saat"]).size())
+_gec_tv = (df_gecmis.groupby(["takim", "shifts_adj"])["total_gun_sayisi"].sum()
+           if df_gecmis is not None else None)
+_vardiya_kol = sorted(set(_bu_ay_tv.index.get_level_values("saat"))
+                      | (set(_gec_tv.index.get_level_values(1)) if _gec_tv is not None
+                         else set()))
+_tv_satir = []
+for _T in sorted(takimlar):
+    _r = {"takim": _T, "uye": len(takimlar[_T])}
+    _gt = _bt = 0
+    for _v in _vardiya_kol:
+        _g = int(_gec_tv.get((_T, _v), 0)) if _gec_tv is not None else 0
+        _b = int(_bu_ay_tv.get((_T, _v), 0))
+        _r[f"{_v} geçmiş"] = _g
+        _r[f"{_v} bu ay"] = _b
+        _r[f"{_v} TOPLAM"] = _g + _b
+        _gt += _g
+        _bt += _b
+    _r["geçmiş TOPLAM"], _r["bu ay TOPLAM"], _r["GENEL TOPLAM"] = _gt, _bt, _gt + _bt
+    _tv_satir.append(_r)
+df_takim_vardiya = pd.DataFrame(_tv_satir)
+if len(df_takim_vardiya):                          # en alta TOPLAM satırı
+    _top = df_takim_vardiya.drop(columns=["takim"]).sum()
+    _top["takim"] = "— TOPLAM —"
+    df_takim_vardiya = pd.concat(
+        [df_takim_vardiya, pd.DataFrame([_top])[df_takim_vardiya.columns]],
+        ignore_index=True)
+
 
 # ── GÖRÜNÜM: hücre metni + kategori (renk anahtarı) ────────────────────
 # Roster'ın İÇ değerleri sade kalır ("off", "izin", "09:00-18:00" ...) çünkü H22'nin
@@ -3615,6 +3653,7 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     roster_xl.to_excel(_xl, sheet_name="roster")
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
+    df_takim_vardiya.to_excel(_xl, sheet_name="takim_vardiya", index=False)
     pd.DataFrame([{"gösterim": g, "anlam": d} for g, _k, _c, d in LEJANT]) \
         .to_excel(_xl, sheet_name="LEJANT", index=False)
 
@@ -3655,5 +3694,9 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
-print(f"  Sheet4 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
+print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya "
+      f"(geçmiş/bu ay/TOPLAM)  |  Σgeçmiş {int(df_takim_vardiya['geçmiş TOPLAM'].iloc[-1])}"
+      f"  Σbu ay {int(df_takim_vardiya['bu ay TOPLAM'].iloc[-1])}"
+      + ("   ⚠ df_gecmis yok → geçmiş sütunları 0" if df_gecmis is None else ""))
+print(f"  Sheet5 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
