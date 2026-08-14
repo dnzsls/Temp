@@ -1150,6 +1150,59 @@ else:
     print(f"kıdem/gece kuralı: KAPALI "
           f"({'df_kidem yok' if df_kidem is None else 'MIN_KIDEM_AY=0'})")
 
+# ── GENEL TİP YASAĞI: agent o TİPTE hiç çalışamıyorsa H19 kapısını aç ──
+# Yukarıdaki kıdem kuralı tip_yasak'a SADECE gece tiplerini yazıyordu. Aynı boşluk
+# SABAHÇI (H13) agentlar için de vardı ve daha tehlikeliydi:
+#   H13 bitişi >20:00 olan vardiyaları x==0'a ÇİVİLİYOR ama değişkeni SİLMİYOR
+#   → H19'un "fiziksel imkânsızlık" tespiti ((a,wk,tip) not in agent_tip) çalışmıyor
+#   → sapan 0'da kalıyor → takım 15:00'e giderse sabahçı üye HİÇBİR vardiyada
+#     çalışamıyor, kotası SERT → model INFEASIBLE.
+# Eskiden görünmüyordu çünkü model o takımları geç tipe hiç göndermiyordu (kaçış
+# yolu vardı). H19D "zirve talebi karşıla" diye zorlayınca kaçış kapandı ve
+# INFEASIBLE ortaya çıktı — hamile/süt agentların takımlarının hep sabah tipine
+# yazılması da bu kilidin belirtisiydi.
+# Burada GENEL kural: agent o tipte hafta içi ÇALIŞABİLECEĞİ tek bir kova bile
+# bulamıyorsa (H13 sabahçı / H14B kıdem-gece / H14 hamile), o tip ona YASAK →
+# H19 ayrılma hakkı verir, takım geç tipe gidebilir, üye gündüz kalır (W_TAKIM=10).
+_tip_kova = {}                                     # tip → [(gün, vardiya)] hafta içi
+for (_ds, _v) in talep:
+    if dt.date.fromisoformat(_ds).weekday() < 5:
+        _tip_kova.setdefault(saat[(_ds, _v)][0], []).append((_ds, _v))
+
+
+def _kova_calisabilir(a, ds, v):
+    """agent bu kovada FİİLEN çalışabilir mi (sert 0'a çivilemeler dahil)?"""
+    if (a, ds, v) not in x:
+        return False                               # izin / off_t2 → değişken yok
+    bas, bit = saat[(ds, v)]
+    if a in sabah_agents and not (dakika(bas) < dakika(bit) and dakika(bit) <= LIMIT):
+        return False                               # H13
+    if a in junior_agents and bas in GECE_TIPLERI:
+        return False                               # H14B
+    if a in hafta_sonu_yasak and dt.date.fromisoformat(ds).weekday() >= 5:
+        return False                               # H14 (hafta içi döngüde tetiklenmez)
+    return True
+
+
+_gen_yasak, _gen_agent = 0, set()
+for a in AGENTS:
+    for _t, _kovalar in _tip_kova.items():
+        if (a, _t) in tip_yasak:
+            continue                               # kıdem kuralı zaten yazmış
+        if not any(_kova_calisabilir(a, _ds, _v) for _ds, _v in _kovalar):
+            tip_yasak.add((a, _t))
+            _gen_yasak += 1
+            _gen_agent.add(a)
+
+print(f"genel tip yasağı: {_gen_yasak} (agent,tip) — {len(_gen_agent)} agent o tipte "
+      f"hafta içi hiç çalışamıyor (sabahçı/kıdem) → H19 ayrılma hakkı açıldı")
+if _gen_agent:
+    _yd = {}
+    for a, _t in tip_yasak:
+        _yd[_t] = _yd.get(_t, 0) + 1
+    print(f"  tip → yasaklı agent sayısı: {dict(sorted(_yd.items()))}")
+print(f"  toplam tip_yasak: {len(tip_yasak)} (agent,tip)  [kıdem + genel]")
+
 
 # %% [HÜCRE 15] — 11 SAAT DİNLENME (vardiyalar arası) ─────────────────
 # Ardışık iki gün arasında ≥11 saat dinlenme:
