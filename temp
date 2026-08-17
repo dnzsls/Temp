@@ -3051,6 +3051,25 @@ roster_2["norm_gun"]        = [_mn[a][1] for a in roster_2.index]
 roster_2["resmi_tatil_gun"] = [_mn[a][2] for a in roster_2.index]     # resmi tatilde çalışma
 roster_2["off_gun"]         = [int(_off[a]) for a in roster_2.index]
 
+# OFF/İZİN KIRILIMI — "off_gun" tek sayı olarak neyin ne olduğunu göstermiyordu.
+#   off_gun          = model_off + off_t + off_t2   (İZİN buna DAHİL DEĞİL)
+#   izin_gun         = yıllık/idari izin (kotayı DÜŞÜRÜR, model değiştiremez)
+#   off_t2_gun       = SERT off talebi — bloklu, her zaman karşılanır
+#   off_t_gun        = YUMUŞAK off talebi, KARŞILANAN (o gün off verildi)
+#   off_t_verilemeyen= YUMUŞAK off talebi, KARŞILANMAYAN → agent o gün ÇALIŞTI
+#                      (Excel'de KIRMIZI hücre; W_OFF_T cezası ödendi)
+# Sağlama: off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi.
+# model_off (talep edilmemiş, modelin kendi verdiği off) = off_gun − off_t − off_t2.
+roster_2["izin_gun"]          = [int((roster.loc[a, _gun] == "izin").sum())
+                                 for a in roster_2.index]
+roster_2["off_t2_gun"]        = [int((roster.loc[a, _gun] == "off_t2").sum())
+                                 for a in roster_2.index]
+roster_2["off_t_gun"]         = [int((roster.loc[a, _gun] == "off_t").sum())
+                                 for a in roster_2.index]
+from collections import Counter as _Counter22             # hücre tek başına da koşsun
+_offt_yok = _Counter22(a for a, _ds in offt_karsilanmadi)  # agent → karşılanmayan off_t
+roster_2["off_t_verilemeyen"] = [_offt_yok.get(a, 0) for a in roster_2.index]
+
 # ÖNCEKİ AY (H8C) — sınır ISO haftasının ÖNCEKİ AYA düşen günleri (ör. 07-27..07-31):
 # o günlerde kaç gün çalışmış / off / izin / off_t. Haftalık kuralların (H20B off
 # dengesi, H20E mesai eşiği, H22 mesai/norm) gördüğü sayılar birebir bunlar →
@@ -4110,6 +4129,18 @@ LEJANT = [
     ("OFF",               "onc_off",    "F2F2F2", "Önceki ayda off"),
     ("boş",               "onc_bos",    None,     "Önceki ayda o güne ait kayıt yok"),
     ("--- KOLONLAR ---",  None, None, ""),
+    ("off_gun",           None, None,
+     "Toplam off = model_off + off_t + off_t2. İZİN buna DAHİL DEĞİL (ayrı kolon)"),
+    ("izin_gun",          None, None,
+     "Yıllık/idari izin günü — kotayı DÜŞÜRÜR, model değiştiremez"),
+    ("off_t2_gun",        None, None,
+     "SERT off talebi (off_t2) — bloklu, her zaman karşılanır"),
+    ("off_t_gun",         None, None,
+     "YUMUŞAK off talebi (off_t), KARŞILANAN — o gün off verildi"),
+    ("off_t_verilemeyen", None, None,
+     "YUMUŞAK off talebi, KARŞILANMAYAN — agent o gün ÇALIŞTI (hücre KIRMIZI). "
+     "off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi. "
+     "Modelin kendi verdiği off = off_gun − off_t_gun − off_t2_gun"),
     ("kidem_ay",          None, None,
      "Agentın kıdemi (ay, ondalıklı). Kaynak df_kidem; boş = veri yok (KIDEMLİ sayıldı)"),
     ("gece_yasak",        None, None,
