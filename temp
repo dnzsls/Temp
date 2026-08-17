@@ -2919,7 +2919,7 @@ roster_2.insert(3, "mesai_kalamaz", [int(a in mesai_yok)  for a in roster_2.inde
 #   norm_gun        = min(E, max(0, kota − W))      → hafta içi off yerine hafta sonu (takas)
 #   resmi_tatil_gun = resmi tatilde çalışılan gün (mesaiden AYRI)
 #   calisma_gun     = toplam − mesai − resmi_tatil (normal + arife + norm)
-#   off_gun         = off gün sayısı
+#   off_gun         = SADECE modelin verdiği off (izin/off_t/off_t2 ayrı kolonlarda)
 #   mesai_gun artık H17'nin MAX_MESAI'siyle AYNI ölçü → rapor ile kısıt çelişmez.
 _gun = [c for c in roster.columns if c != "takim"]                 # tarih kolonları
 _OFF_ONLY = ["off", "off_t", "off_t2"]                             # off türleri (model off + blok off_t/off_t2)
@@ -2984,7 +2984,12 @@ def _mesai_norm_say(a):
 
 
 _cal_top = (~roster[_gun].isin(_OFF_LIKE)).sum(axis=1)             # toplam çalışma
-_off     = (roster[_gun].isin(_OFF_ONLY)).sum(axis=1)             # off_gun = off + off_t + off_t2 (A)
+_off     = (roster[_gun] == "off").sum(axis=1)                    # off_gun = SADECE modelin verdiği off
+# off_t / off_t2 buraya GİRMEZ — onlar agentın TALEP ETTİĞİ off, modelin kararı değil;
+# kendi kolonlarında (off_t_gun / off_t2_gun) duruyorlar. Eskiden üçü toplanıyordu ve
+# "model bu kişiye kaç gün off vermiş" sorusu tablodan okunamıyordu.
+# NOT: H23'ün df_ozet["off"] kolonu DEĞİŞMEDİ — orada calisma+off+izin = gün sayısı
+# sağlaması var, off_t/off_t2 düşerse toplam tutmaz.
 _mn = {a: _mesai_norm_say(a) for a in roster_2.index}
 
 # ── GÜN BAZINDA ETİKET: hangi hafta sonu günü NORM (yeşil), hangisi MESAİ (sarı) ──
@@ -3051,15 +3056,17 @@ roster_2["norm_gun"]        = [_mn[a][1] for a in roster_2.index]
 roster_2["resmi_tatil_gun"] = [_mn[a][2] for a in roster_2.index]     # resmi tatilde çalışma
 roster_2["off_gun"]         = [int(_off[a]) for a in roster_2.index]
 
-# OFF/İZİN KIRILIMI — "off_gun" tek sayı olarak neyin ne olduğunu göstermiyordu.
-#   off_gun          = model_off + off_t + off_t2   (İZİN buna DAHİL DEĞİL)
+# OFF/İZİN KIRILIMI — dört kolon, HER BİRİ AYRIK (üst üste binmiyor):
+#   off_gun          = SADECE modelin verdiği off (talep edilmemiş)
 #   izin_gun         = yıllık/idari izin (kotayı DÜŞÜRÜR, model değiştiremez)
 #   off_t2_gun       = SERT off talebi — bloklu, her zaman karşılanır
 #   off_t_gun        = YUMUŞAK off talebi, KARŞILANAN (o gün off verildi)
 #   off_t_verilemeyen= YUMUŞAK off talebi, KARŞILANMAYAN → agent o gün ÇALIŞTI
 #                      (Excel'de KIRMIZI hücre; W_OFF_T cezası ödendi)
-# Sağlama: off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi.
-# model_off (talep edilmemiş, modelin kendi verdiği off) = off_gun − off_t − off_t2.
+# Sağlama-1: off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi.
+# Sağlama-2: off_gun + izin_gun + off_t2_gun + off_t_gun + calisma_gun + mesai_gun
+#            + resmi_tatil_gun = ayın gün sayısı  (verilemeyen off_t zaten çalışma
+#            günü olarak sayılıyor, iki kez toplanmasın).
 roster_2["izin_gun"]          = [int((roster.loc[a, _gun] == "izin").sum())
                                  for a in roster_2.index]
 roster_2["off_t2_gun"]        = [int((roster.loc[a, _gun] == "off_t2").sum())
@@ -4130,7 +4137,8 @@ LEJANT = [
     ("boş",               "onc_bos",    None,     "Önceki ayda o güne ait kayıt yok"),
     ("--- KOLONLAR ---",  None, None, ""),
     ("off_gun",           None, None,
-     "Toplam off = model_off + off_t + off_t2. İZİN buna DAHİL DEĞİL (ayrı kolon)"),
+     "SADECE modelin verdiği off (talep edilmemiş). izin / off_t / off_t2 DAHİL DEĞİL "
+     "— hepsi ayrı kolonda, kolonlar üst üste binmiyor"),
     ("izin_gun",          None, None,
      "Yıllık/idari izin günü — kotayı DÜŞÜRÜR, model değiştiremez"),
     ("off_t2_gun",        None, None,
@@ -4139,8 +4147,8 @@ LEJANT = [
      "YUMUŞAK off talebi (off_t), KARŞILANAN — o gün off verildi"),
     ("off_t_verilemeyen", None, None,
      "YUMUŞAK off talebi, KARŞILANMAYAN — agent o gün ÇALIŞTI (hücre KIRMIZI). "
-     "off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi. "
-     "Modelin kendi verdiği off = off_gun − off_t_gun − off_t2_gun"),
+     "off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi. Bu gün çalışma "
+     "olarak sayıldığı için off kolonlarına GİRMEZ"),
     ("kidem_ay",          None, None,
      "Agentın kıdemi (ay, ondalıklı). Kaynak df_kidem; boş = veri yok (KIDEMLİ sayıldı)"),
     ("gece_yasak",        None, None,
