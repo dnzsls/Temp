@@ -198,10 +198,20 @@ W_EKSIK_HI  = 25               # HAFTA İÇİ eksik kişi başına ceza (hafta s
 #   W_TAKIM ~ 10              → sapma AGIR_ESIK'e (15) kadar takımı bozmaz;
 #                               ötesinde W_COVERAGE2(20) devreye girince böler
 #   W_TAKIM > W_COVERAGE2(20) → coverage ne olursa olsun takım bütün kalır
-W_TAKIM      = 10              # takımdan ayrılan her (üye, hafta) için ceza (H19).
-                               # Ayrılma artık SERT olarak sınırlı (sadece fiziksel
-                               # imkânsızlık) → bu ceza "kimseyi mahsur bırakmayan tipi
-                               # seç" yönünde çalışıyor, bölünmeyi satın alma aracı değil.
+W_TAKIM      = 2               # takımdan ayrılan her (üye, hafta) için ceza (H19).
+                               # Ayrılma SERT olarak sınırlı (sadece fiziksel imkânsızlık:
+                               # hamile/süt → geç tip, kıdemsiz → gece) — bölünme satın
+                               # alınamıyor, sadece zorunlu hâlde oluyor.
+                               # 10 → 2 (ADALET DÜZELTMESİ, çıktıdan gözlendi):
+                               # 10 iken hamile/süt üyeli takımı geç tipe göndermek
+                               # üye başına haftada 10 puandı; 3 üyeli takım 30, temiz
+                               # takım 0 → model o takımları SÜREKLİ sabaha yazdı,
+                               # akşam/gece yükü hep aynı "temiz" takımlara kaldı.
+                               # Ceza aslında "kimseyi mahsur bırakmayan tipi seç"
+                               # baskısıydı; adaletsizliğin kaynağı da tam olarak buydu.
+                               # 2 = "eşit şartlarda bölme, ama gerekiyorsa çekinme".
+                               # 0 yapmak da mümkün; tek fren H19D'nin tipe duyarlı
+                               # kapasitesi olur (ayrılan üye takımın tipine 0 katkı).
 # GEÇMİŞ GEÇ-VARDİYA ADALETİ (H19B) — df_gecmis'ten
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
 W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
@@ -2890,6 +2900,81 @@ print("en çok bölünen 10 (takım,gün, hafta içi):")
 print(bolunme[bolunme > 1].sort_values(ascending=False).head(10))
 
 
+# %% [HÜCRE 24B] — TAKIM BÖLÜNME + GEÇ TİP ADALETİ (SALT OKUNUR) ───────
+# SORU (çıktıdan gözlendi): "hamile/süt üyeli takımlar hep sabaha yazılmış,
+# akşam/gece hep aynı takımlara kalıyor — talep mi böyle gerektiriyor yoksa
+# model bölünmekten mi kaçınıyor?"
+# MEKANİZMA: hamile/süt agentlar sabahçı → geç tip onlara YASAK (tip_yasak).
+# Takım geç tipe giderse o üyeler ayrılır ve her biri W_TAKIM ödetir. 3 üyeli
+# takım haftada 3×W_TAKIM, temiz takım 0 → model temiz takımı seçer.
+# Bu hücre iki şeyi ölçer:
+#   [1] BÖLÜNME YAPISI — (takım,hafta) kaç farklı tipe dağılmış?
+#       1 tip = bölünme yok, 2 tip = "tek takım 2 parça" (istenen yapı),
+#       3+ tip = dağılmış → ayrılanları tek tipe toplayan kısıt gerekebilir.
+#   [2] GEÇ TİP ADALETİ — takım bazında geç hafta sayısı vs hamile/süt üye.
+#       hamile/süt yüksek olanların geç haftası sistematik 0 ise mekanizma doğrulanır.
+from collections import Counter as _Counter24
+
+print("=" * 78)
+print("H24B — TAKIM BÖLÜNME YAPISI + GEÇ TİP ADALETİ")
+print("=" * 78)
+
+_gec_dk24 = dakika(GEC_BASLANGIC)                  # "15:00" ve sonrası = GEÇ (gece dahil)
+_tw_tip = {}                                       # (takım, hafta) → {tip: {agent}}
+for _, _r24 in df_sonuc.iterrows():
+    if _r24["vardiya"] == ARIFE_YARIM:
+        continue
+    _d24 = dt.date.fromisoformat(_r24["tarih"])
+    if _d24.weekday() >= 5:
+        continue                                   # takım kuralı sadece hafta içi
+    _tw_tip.setdefault((_r24["takim"], _d24.isocalendar()[:2]), {}) \
+           .setdefault(_r24["saat"].split("-")[0], set()).add(_r24["agent"])
+
+# ── [1] BÖLÜNME YAPISI ────────────────────────────────────────────────
+_bol_dag = _Counter24(len(_tipler24) for _tipler24 in _tw_tip.values())
+_ayrilan_toplam = sum(int(solver.Value(_sv24)) for _sv24 in takim_sapan.values())
+print(f"\n[1] BÖLÜNME YAPISI  ({len(_tw_tip)} takım-hafta, hafta içi)")
+for _k24 in sorted(_bol_dag):
+    _not24 = ("bölünme yok" if _k24 == 1 else
+              "tek takım 2 parça (istenen yapı)" if _k24 == 2 else
+              "⚠ DAĞILMIŞ — ayrılanları tek tipe toplamak gerekebilir")
+    print(f"    {_k24} tip: {_bol_dag[_k24]:4d} takım-hafta   {_not24}")
+print(f"    H19 sapan (ayrılan üye-hafta): {_ayrilan_toplam}  (ağırlık W_TAKIM={W_TAKIM})")
+
+# ── [2] GEÇ TİP ADALETİ ───────────────────────────────────────────────
+_sut_hamile24 = {T: sum(1 for a in u if a in hafta_sonu_yasak)
+                 for T, u in takimlar.items()}
+_junior24 = {T: sum(1 for a in u if a in junior_agents) for T, u in takimlar.items()}
+_gec_hafta24, _ayr24 = {}, {}
+for T in takimlar:
+    _gec_hafta24[T] = sum(1 for (T2, _wk24), _tipler24 in _tw_tip.items()
+                          if T2 == T and any(dakika(_t24) >= _gec_dk24
+                                             for _t24 in _tipler24))
+    _ayr24[T] = sum(int(solver.Value(_sv24)) for (a24, _w24), _sv24 in takim_sapan.items()
+                    if a24 in takimlar[T])
+print(f"\n[2] GEÇ TİP ADALETİ  (geç = başlangıç ≥ {GEC_BASLANGIC}, gece dahil)")
+print(f"    {'takım':<34} {'üye':>4} {'hamile/süt':>11} {'kıdemsiz':>9} "
+      f"{'geç hafta':>10} {'ayrılan':>8}")
+for T in sorted(takimlar, key=lambda t: (_gec_hafta24[t], -_sut_hamile24[t])):
+    print(f"    {T[:34]:<34} {len(takimlar[T]):>4} {_sut_hamile24[T]:>11} "
+          f"{_junior24[T]:>9} {_gec_hafta24[T]:>10} {_ayr24[T]:>8}")
+# korelasyon özeti: hamile/süt olan vs olmayan takımların ortalama geç haftası
+_ile = [_gec_hafta24[T] for T in takimlar if _sut_hamile24[T] > 0]
+_siz = [_gec_hafta24[T] for T in takimlar if _sut_hamile24[T] == 0]
+if _ile and _siz:
+    print(f"\n    hamile/süt ÜYESİ OLAN  {len(_ile):>3} takım → ortalama geç hafta "
+          f"{sum(_ile) / len(_ile):.2f}")
+    print(f"    hamile/süt üyesi OLMAYAN {len(_siz):>3} takım → ortalama geç hafta "
+          f"{sum(_siz) / len(_siz):.2f}")
+    if sum(_siz) / len(_siz) > 1.5 * max(0.01, sum(_ile) / len(_ile)):
+        print(f"    ⚠ BELİRGİN FARK: geç yük hamile/süt üyesi OLMAYAN takımlara yığılmış.")
+        print(f"      W_TAKIM'i düşür (şu an {W_TAKIM}) ya da takım başına geç hafta")
+        print(f"      sayısına oransal tavan koy (mesaide MESAI_TOL gibi).")
+    else:
+        print(f"    ✓ iki grup arasında belirgin fark yok — yük dengeli dağılmış.")
+print("=" * 78)
+
+
 # %% [HÜCRE 25] — COVERAGE RAPORU (talep / atanan / fazla / eksik) ─────
 # Sert band kaldırıldığı için her kova talebi aşabilir/eksik kalabilir.
 # Burada her (gün,vardiya) için talep vs atanan ve sapma görülür.
@@ -3662,47 +3747,71 @@ df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
-# Sheet5: TAKIM × VARDİYA — GEÇMİŞ | BU AY | TOPLAM (blok blok)
+# Sheet5: TAKIM × VARDİYA — vardiya başına TEK hücre: "geçmiş+bu ay"
 # "Bu takım 00:00'ı bugüne kadar kaç kez yapmış?" sorusunun tek tabloda cevabı.
-# Satır = takım. Sütunlar ÜÇ BLOK hâlinde (aynı vardiya yan yana DEĞİL):
-#   1) GEÇMİŞ <vardiya>  : df_gecmis.total_gun_sayisi (H19B'yi besleyen aynı veri)
-#   2) BU AY  <vardiya>  : bu ayın çizelgesinden (agent,gün) atama — ARIFE_YARIM hariç
-#   3) TOPLAM <vardiya>  : geçmiş + bu ay → yıl bazında biriken yük
-# Blok düzeni bilerek: önce geçmişin tamamı okunur, sonra bu ayın tamamı; aynı
-# vardiyayı üç kez üst üste görmek yerine iki resmi ayrı ayrı karşılaştırırsın.
-# TOPLAM bloğunda BU AY'da artmış hücreler YEŞİL boyanıyor (aşağıda, ExcelWriter).
-# NOT: iki kaynağın BİRİMİ aynı varsayılıyor (kişi-gün). Özet satırı iki toplamı
-# yan yana basıyor — mertebeler çok farklıysa df_gecmis başka birimdedir
-# (ör. takım-günü) ve TOPLAM bloğu anlamsız olur, oradan anlarsın.
-_bu_ay_tv = (df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
-             .groupby(["takim", "saat"]).size())
-_gec_tv = (df_gecmis.groupby(["takim", "shifts_adj"])["total_gun_sayisi"].sum()
-           if df_gecmis is not None else None)
-_vardiya_kol = sorted(set(_bu_ay_tv.index.get_level_values("saat"))
-                      | (set(_gec_tv.index.get_level_values(1)) if _gec_tv is not None
-                         else set()))
-_tv_satir = []
-for _T in sorted(takimlar):
-    _gm = {_v: (int(_gec_tv.get((_T, _v), 0)) if _gec_tv is not None else 0)
-           for _v in _vardiya_kol}
-    _bm = {_v: int(_bu_ay_tv.get((_T, _v), 0)) for _v in _vardiya_kol}
+# Satır = takım, sütun = vardiya, HÜCRE = "geçmiş+bu ay"  (ör. "70+1" → 71 oldu).
+#   geçmiş : df_gecmis.total_gun_sayisi (H19B'yi besleyen aynı veri)
+#   bu ay  : bu ayın çizelgesinden (agent,gün) atama — ARIFE_YARIM hariç
+# Bu ay atama YOKSA sadece geçmiş yazılır ("70"); ikisi de 0 ise hücre BOŞ bırakılır
+# (tablo seyrek, boşluk okumayı kolaylaştırıyor). "x+y" olan hücreler YEŞİL.
+# Sonda üç SAYISAL özet sütunu (sıralama/filtre için): GEÇMİŞ Σ | BU AY Σ | GENEL Σ.
+#
+# VARDİYA ADI NORMALİZE EDİLİYOR — yoksa aynı vardiya İKİ sütun oluyordu:
+# df_gecmis geceyi "00:00-08:00" yazıyor, model "24:00-08:00" kullanıyor (H15'in
+# gece-yarısı hesabı için). Saat 24 → 00'a çevrilip sıfır dolgulanıyor.
+def _vardiya_norm(s):
+    """'24:00-08:00' → '00:00-08:00';  ' 9:00-18:00 ' → '09:00-18:00'."""
+    _p = str(s).strip().split("-")
+    if len(_p) != 2:
+        return str(s).strip()
+    _o = []
+    for _t in _p:
+        try:
+            _h, _m = _t.strip().split(":")
+            _o.append(f"{int(_h) % 24:02d}:{int(_m):02d}")
+        except ValueError:
+            return str(s).strip()
+    return "-".join(_o)
+
+
+_bu_ay_tv, _gec_tv = {}, {}
+for (_T, _st), _n in (df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
+                      .groupby(["takim", "saat"]).size().items()):
+    _k = (_T, _vardiya_norm(_st))
+    _bu_ay_tv[_k] = _bu_ay_tv.get(_k, 0) + int(_n)
+if df_gecmis is not None:
+    for (_T, _st), _n in (df_gecmis.groupby(["takim", "shifts_adj"])
+                          ["total_gun_sayisi"].sum().items()):
+        _k = (_T, _vardiya_norm(_st))
+        _gec_tv[_k] = _gec_tv.get(_k, 0) + int(_n)
+_vardiya_kol = sorted({_v for _, _v in _bu_ay_tv} | {_v for _, _v in _gec_tv})
+
+_tv_satir, _tv_yesil = [], set()                   # _tv_yesil: (satır no, vardiya)
+for _i_t, _T in enumerate(sorted(takimlar)):
     _r = {"takim": _T, "uye": len(takimlar[_T])}
-    for _v in _vardiya_kol:                        # 1. blok — GEÇMİŞ
-        _r[f"GEÇMİŞ {_v}"] = _gm[_v]
-    for _v in _vardiya_kol:                        # 2. blok — BU AY
-        _r[f"BU AY {_v}"] = _bm[_v]
-    for _v in _vardiya_kol:                        # 3. blok — TOPLAM
-        _r[f"TOPLAM {_v}"] = _gm[_v] + _bm[_v]
-    _r["GEÇMİŞ Σ"] = sum(_gm.values())
-    _r["BU AY Σ"] = sum(_bm.values())
-    _r["GENEL Σ"] = _r["GEÇMİŞ Σ"] + _r["BU AY Σ"]
+    _gt = _bt = 0
+    for _v in _vardiya_kol:
+        _g, _b = _gec_tv.get((_T, _v), 0), _bu_ay_tv.get((_T, _v), 0)
+        _r[_v] = ("" if _g == 0 and _b == 0 else
+                  (f"{_g}" if _b == 0 else f"{_g}+{_b}"))
+        if _b:
+            _tv_yesil.add((_i_t, _v))              # bu ay artmış → yeşil
+        _gt += _g
+        _bt += _b
+    _r["GEÇMİŞ Σ"], _r["BU AY Σ"], _r["GENEL Σ"] = _gt, _bt, _gt + _bt
     _tv_satir.append(_r)
 df_takim_vardiya = pd.DataFrame(_tv_satir)
 if len(df_takim_vardiya):                          # en alta TOPLAM satırı
-    _top = df_takim_vardiya.drop(columns=["takim"]).sum()
-    _top["takim"] = "— TOPLAM —"
+    _tr = {"takim": "— TOPLAM —", "uye": int(df_takim_vardiya["uye"].sum())}
+    for _v in _vardiya_kol:
+        _g = sum(_n for (_T2, _v2), _n in _gec_tv.items() if _v2 == _v)
+        _b = sum(_n for (_T2, _v2), _n in _bu_ay_tv.items() if _v2 == _v)
+        _tr[_v] = ("" if _g == 0 and _b == 0 else
+                   (f"{_g}" if _b == 0 else f"{_g}+{_b}"))
+    for _k in ("GEÇMİŞ Σ", "BU AY Σ", "GENEL Σ"):
+        _tr[_k] = int(df_takim_vardiya[_k].sum())
     df_takim_vardiya = pd.concat(
-        [df_takim_vardiya, pd.DataFrame([_top])[df_takim_vardiya.columns]],
+        [df_takim_vardiya, pd.DataFrame([_tr])[df_takim_vardiya.columns]],
         ignore_index=True)
 
 
@@ -3746,8 +3855,11 @@ LEJANT = [
      "1 → kıdem MIN_KIDEM_AY'dan az, 00:00 vardiyası YAZILAMAZ (H14B). "
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
     ("--- takim_vardiya SAYFASI ---", None, None, ""),
+    ("70+1",              None, None,
+     "Hücre = geçmiş + bu ay. '70+1' → geçmişte 70, bu ay 1 daha → 71 oldu. "
+     "Sadece '70' → bu ay atama yok. Boş → hiç yapılmamış"),
     ("yeşil hücre",       "norm",       "C6EFCE",
-     "TOPLAM bloğunda BU AY ARTMIŞ hücre — o takım bu ay o vardiyadan atama aldı"),
+     "BU AY ARTMIŞ hücre — o takım bu ay o vardiyadan atama aldı"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -3786,7 +3898,7 @@ def _gorunum(a, c):
         kat = "offt_kars"                               # etiket kalır, renk KIRMIZI olur
     return metin, kat
 
-
+a
 def _onceki_gorunum(a, d):
     """ÖNCEKİ AY hücresi (salt okunur) → (metin, kategori). d = date."""
     v = onceki_gunluk.get(a, {}).get(d)
@@ -3873,20 +3985,19 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
             if _FILL.get(_kt):
                 _cell.fill = _FILL[_kt]
 
-    # takim_vardiya: TOPLAM bloğunda BU AY'da ARTMIŞ hücreleri YEŞİL boya
-    # (bu ay o vardiyadan atama almış takımlar tek bakışta görünsün)
+    # takim_vardiya: BU AY artmış ("x+y") hücreleri YEŞİL boya
     _wtv = _xl.sheets["takim_vardiya"]
     _tv_bas = [_c.value for _c in _wtv[1]]
     _YESIL = PatternFill("solid", fgColor="C6EFCE")
-    for _v in list(_vardiya_kol) + ["Σ"]:          # her vardiya + genel toplam
-        _ad_t = f"TOPLAM {_v}" if _v != "Σ" else "GENEL Σ"
-        _ad_b = f"BU AY {_v}" if _v != "Σ" else "BU AY Σ"
-        if _ad_t not in _tv_bas or _ad_b not in _tv_bas:
-            continue
-        _ct, _cb = _tv_bas.index(_ad_t) + 1, _tv_bas.index(_ad_b) + 1
-        for _r2 in range(2, _wtv.max_row + 1):
-            if (_wtv.cell(row=_r2, column=_cb).value or 0) > 0:
-                _wtv.cell(row=_r2, column=_ct).fill = _YESIL
+    for (_i_t, _v) in _tv_yesil:                   # (satır no, vardiya)
+        if _v in _tv_bas:
+            _wtv.cell(row=_i_t + 2, column=_tv_bas.index(_v) + 1).fill = _YESIL
+    for _r2 in range(2, _wtv.max_row + 1):         # TOPLAM satırındaki artışlar
+        if _wtv.cell(row=_r2, column=1).value == "— TOPLAM —":
+            for _v in _vardiya_kol:
+                _cv = _wtv.cell(row=_r2, column=_tv_bas.index(_v) + 1)
+                if isinstance(_cv.value, str) and "+" in _cv.value:
+                    _cv.fill = _YESIL
     _wtv.column_dimensions["A"].width = 38         # takım adı sığsın
     _wtv.freeze_panes = "C2"                       # takım + üye sabit kalsın
 
@@ -3906,11 +4017,10 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
-print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya, "
-      f"3 blok (GEÇMİŞ | BU AY | TOPLAM)  |  Σgeçmiş "
+print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya "
+      f"(hücre = 'geçmiş+bu ay', vardiya adları normalize edildi)  |  Σgeçmiş "
       f"{int(df_takim_vardiya['GEÇMİŞ Σ'].iloc[-1])}"
       f"  Σbu ay {int(df_takim_vardiya['BU AY Σ'].iloc[-1])}"
-      f"  → birimler uyumluysa TOPLAM anlamlı"
-      + ("   ⚠ df_gecmis yok → GEÇMİŞ bloğu 0" if df_gecmis is None else ""))
+      + ("   ⚠ df_gecmis yok → geçmiş 0" if df_gecmis is None else ""))
 print(f"  Sheet5 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
