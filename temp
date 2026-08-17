@@ -216,6 +216,34 @@ W_TAKIM      = 2               # takımdan ayrılan her (üye, hafta) için ceza
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
 W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
                                # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
+# SINIR HAFTASI TİP KİLİDİ (H19E) — önceki aydan vardiya devamlılığı.
+# SORUN: ay ortasında başlayan ISO hafta (ör. 1 Eylül Salı → aynı haftanın Pazartesi'si
+# 31 Ağustos) modelin GÖRMEDİĞİ bir çizelgeyle başlıyor. Kilit yokken agent
+# 31 Ağustos 15:00-24:00 çalışıp 1 Eylül 09:00-18:00'e yazılabiliyor — H20 (agent
+# haftada tek tip) sadece ayın KENDİ günlerini kapsıyor. Ağustos'ta görünmüyordu
+# çünkü ay Cumartesi başladı: sınır haftasının tüm hafta içi günleri Temmuz'daydı.
+# ÇÖZÜM: sınır haftasında agent, önceki ayda son çalıştığı tipte kalır. Kaynak
+# df_onceki (kişi × gün); df_gecmis TAKIM bazlı olduğu için burada kullanılmaz.
+# TAKIM BÜTÜNLÜĞÜ O HAFTA ARANMAZ (H19/H19C/H19D muaf) — önceki ay çizelgesi bu
+# modelden çıkmadığı için takımlar orada serbestçe bölünmüş olabilir. Bütünlüğü
+# zorlamak hem çözümsüzlük yapar (H19 tek tip seçer, sapan yalnız fiziksel
+# imkânsızlıkta açılır) hem de "31'i neyse öyle devam" sözünü bozar: birilerini
+# ayın ilk günü yerinden oynatmak gerekir. Bütünlük ertesi hafta geri gelir.
+SINIR_TIP_KILIT = True         # False → kilit kurulmaz, H19/H19C/H19D eskisi gibi
+W_SINIR_MOD     = 10           # önceki ayda İZİNLİ/OFF olan üyenin YUMUŞAK çekimi:
+                               # sırayla (a) kendi son çalıştığı gün (sınır haftasından
+                               # önceki günler), (b) takımının sınır haftasındaki en
+                               # sık tipi. O tipten sapma başına ceza.
+                               # NEDEN SERT DEĞİL: kilitli + moda çivili bir hafta, tip
+                               # dağılımını tamamen veriden alır. Eylül talebi Ağustos
+                               # dağılımıyla uyuşmazsa gece kovasının SERT bandı
+                               # (±GECE_BUFFER) tutmaz → model çözümsüz. Yumuşakta model
+                               # normalde takım moduna yazar, sadece bir sert band
+                               # patlayacaksa oynatır.
+                               # Kalibrasyon: bir agentı hafta içi 4 günde doğru tipe
+                               # almak coverage'da 4×W_EKSIK_HI(25)=100'e kadar kazandırır
+                               # → 10 "belirgin ama satın alınabilir".
+                               # 0 → izinliler serbest dağılır.
 # off_t YUMUŞAK oldu (off_t2 SERT kaldı): off_t günü artık bloklanmıyor, değişken
 # açılıyor ve model o gün ÇALIŞTIRIRSA ceza yiyor → "karşılayabildiğini karşıla".
 # Karşılanmayan talep Excel'de KIRMIZI hücre olarak görünür (H29 lejantı).
@@ -1618,6 +1646,16 @@ for ds in PLAN_GUNLER:
 tatil_haftalari = {dt.date.fromisoformat(t).isocalendar()[:2]
                    for t in RESMI_TATILLER if dt.date.fromisoformat(t).weekday() < 5}
 
+# SINIR HAFTASI (H19E): o haftada takım tek-tip kuralı ARANMAZ — hafta önceki ayın
+# çizelgesiyle başlıyor ve o çizelge bu modelden çıkmadığı için takımlar orada
+# bölünmüş olabilir. Herkesi kendi 31 Ağustos tipine kilitlerken takıma da "tek tip"
+# dersek ikisi çakışır ve model çözümsüz olur. Bütünlük ertesi hafta geri gelir.
+# NOT: bu muafiyet SADECE (3)'ü — takım seçimini — kapsar. (1)'deki agent_tip
+# göstergesi kurulmaya devam eder, yoksa H20 (agent haftada tek tip) ve H19E kilidi
+# o hafta dayanacak bir şey bulamaz.
+KILIT_HAFTA = (SINIR_HAFTA if (SINIR_TIP_KILIT and TASIMA_GUNLER
+                               and SINIR_HAFTA in haftalar) else None)
+
 # takım → üye agent kodları  +  tüm başlangıç-tipleri
 takimlar = {}
 for _, row in df_tam.iterrows():
@@ -1660,6 +1698,8 @@ for T, uyeler in takimlar.items():
     for wk in haftalar:
         if wk in tatil_haftalari:              # tatil haftası → kural gevşek
             continue
+        if wk == KILIT_HAFTA:                  # sınır haftası → H19E kilidi geçerli,
+            continue                           #   takım bütünlüğü aranmaz
         # takımın o hafta gerçekten girebileceği tipler (en az bir üyenin değişkeni var)
         secenek = [bas for bas in hafta_tipler.get(wk, [])
                    if any((a, wk, bas) in agent_tip for a in uyeler)]
@@ -1810,8 +1850,8 @@ _hint_ozet = []                                    # (hafta, açık_önce, açı
 if TAKIM_HINT and takim_tip:
     _boyut = {T: len(u) for T, u in takimlar.items()}   # ham boyut (yedek)
     for _wk in sorted(haftalar):
-        if _wk in tatil_haftalari:
-            continue
+        if _wk in tatil_haftalari or _wk == KILIT_HAFTA:   # sınır haftasında y yok
+            continue                                       #   (H19E kilidi belirliyor)
         _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
         if not _hi:
             continue
@@ -1901,7 +1941,12 @@ if TIP_KAPASITE_SERT and takim_tip:
     _boyut19d = {T: len(u) for T, u in takimlar.items()}   # ham (yedek)
     _greedy = {w: a for w, _, a in _hint_ozet}     # H19C açgözlü artığı (yoksa boş)
     for _wk in sorted(haftalar):
-        if _wk in tatil_haftalari:
+        # SINIR HAFTASI MUAF: o hafta tipler H19E ile önceki aydan geliyor, takım
+        # seçimi (y) yok → "zirveyi karşıla" kısıtının dayanacağı değişken de yok.
+        # Kurulsaydı kapasite 0 görünür ve bütçe şişerdi (kısıt işlevsiz + kafa karıştıran
+        # çıktı). Kilitli dağılımın talebi karşılayıp karşılamadığını H19E kendi
+        # ön kontrolünde ölçüp basıyor.
+        if _wk in tatil_haftalari or _wk == KILIT_HAFTA:
             continue
         _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
         if not _hi:
@@ -1955,6 +2000,204 @@ if _19d_ozet:
 else:
     print(f"tip kapasite kısıtı: KAPALI "
           f"({'TIP_KAPASITE_SERT=False' if not TIP_KAPASITE_SERT else 'takim_tip boş'})")
+
+
+# %% [HÜCRE 19E] — SINIR HAFTASI TİP KİLİDİ (önceki aydan devamlılık) ──
+# Ay ortasında başlayan ISO hafta, modelin GÖRMEDİĞİ bir çizelgeyle başlıyor:
+# 1 Eylül Salı ise o haftanın Pazartesi'si 31 Ağustos'ta, önceki ayda. H20 (agent
+# haftada tek tip) sadece ayın kendi günlerini kapsadığı için agent 31 Ağustos
+# 15:00-24:00 çalışıp 1 Eylül 09:00-18:00'e yazılabiliyordu. Bu hücre o boşluğu
+# kapatıyor: sınır haftasında agent önceki ayda SON çalıştığı tipte kalır.
+#
+# KAYNAK df_onceki (kişi × gün × vardiya). df_gecmis KULLANILMAZ: o takım bazlı
+# (teamleader × shifts_adj × gün) — kişinin kendi son vardiyasını veremez.
+#
+# ÜÇ KADEME (agent'ın kendi geçmişi > takımın geçmişi > serbest):
+#   1) SERT KİLİT   — agent sınır haftasının önceki aya düşen HAFTA İÇİ gününde
+#      (TASIMA_GUNLER) çalışmışsa: o tip dışındaki tipler kapatılır.
+#      "En son çalışılan gün" alınır; taşıma birden çok günse (ay Cuma başlarsa
+#      Pzt-Per) en yenisi geçerli. Eski `onceki_tip` çok tip görünce None dönüp
+#      pes ediyordu, bu kural her zaman tek cevap verir.
+#   2) YUMUŞAK ÇEKİM (W_SINIR_MOD) — 31'inde izinli/off ise: PENCERE_GUNLER'deki
+#      (bir önceki ISO hafta) son çalıştığı gün. Farklı hafta olduğu için sert
+#      değil — "geçen hafta böyleydi" bir devamlılık kanıtı, kural değil.
+#   3) YUMUŞAK ÇEKİM — o da yoksa: takımının sınır haftasındaki EN SIK tipi
+#      (kademe 1'de kilitlenen üyelerin modu). Takımın hiç kilitli üyesi yoksa
+#      devam ettirilecek bir şey de yok → agent serbest.
+#
+# NEDEN 2 ve 3 SERT DEĞİL: hepsi sert olsaydı sınır haftasının tip dağılımı
+# tamamen veriden gelirdi. Eylül talebi Ağustos dağılımıyla uyuşmazsa gece
+# kovasının SERT bandı (talep ± GECE_BUFFER) tutmaz ve model çözümsüz olur.
+# Yumuşakta model normalde geçmişe sadık kalır, sadece bir sert band patlayacaksa
+# oynatır — yani devamlılık coverage'ı kırmıyorsa bedava.
+#
+# ÜÇ EMNİYET VALFİ (kilit körü körüne uygulanmaz; atlananlar tek tek raporlanır):
+#   a) tip o hafta YOK      → 31 Ağustos'ta 11:00 çalışmış ama Eylül'de 11:00 kovası
+#      yoksa, diğer tipleri kapatmak agentı hiç çalışamaz hale getirir; kotası SERT
+#      → INFEASIBLE. Etiket normalize edilir (24:00 ↔ 00:00), yine tutmazsa atlanır.
+#   b) tip artık YASAK      → Eylül'de hamile olan biri 31 Ağustos'ta 15:00 çalışmış
+#      olabilir (tip_yasak). Kilitlersek çalışamaz.
+#   c) o tipte gösterge YOK → agent o hafta o tipte hiç değişkeni olmayacak şekilde
+#      izinliyse kilit anlamsız.
+from collections import Counter                    # H25B'den ÖNCE gerekiyor (hücre bağımsız)
+
+_kilit_sert, _kilit_yumusak, _kilit_atlanan = {}, {}, []
+if not (SINIR_TIP_KILIT and KILIT_HAFTA and onceki_gunluk):
+    print(f"sınır haftası tip kilidi: KAPALI ("
+          + ("SINIR_TIP_KILIT=False" if not SINIR_TIP_KILIT
+             else "df_onceki yok" if not onceki_gunluk
+             else "sınır haftası taşımıyor (ay Pazartesi başlıyor)") + ")")
+else:
+    _kw = KILIT_HAFTA
+    _hafta_tip = hafta_tipler.get(_kw, [])         # o haftanın hafta içi tipleri
+    # taşınan (önceki ay) hafta içi günler — en YENİDEN eskiye
+    _tas_hi = sorted((d for d in TASIMA_GUNLER if d.weekday() < 5), reverse=True)
+    # bir önceki ISO haftadan kalan hafta içi günler (kademe 2 kaynağı)
+    _pen_hi = sorted((d for d in PENCERE_GUNLER
+                      if d.weekday() < 5 and d not in set(TASIMA_GUNLER)), reverse=True)
+
+    def _tip_esle(bas):
+        """df_onceki'nin vardiya başlangıcını modelin TİP etiketine eşle.
+        Gece iki türlü yazılabiliyor (00:00 / 24:00) → ikisini de dene."""
+        if bas in _hafta_tip:
+            return bas
+        try:                                       # 24:00 ↔ 00:00 (aynı an, iki yazım)
+            _h, _m = bas.split(":")
+            _alt = f"{int(_h) % 24:02d}:{int(_m):02d}"
+            if _alt in _hafta_tip:
+                return _alt
+            _alt2 = f"{24 if int(_h) % 24 == 0 else int(_h):02d}:{int(_m):02d}"
+            if _alt2 in _hafta_tip:
+                return _alt2
+        except ValueError:
+            pass
+        return None
+
+    def _son_tip(a, gunler):
+        """agent'ın verilen günlerdeki (yeniden eskiye) son çalışılan vardiya tipi."""
+        for d in gunler:
+            _p = _vardiya_parse(onceki_gunluk.get(a, {}).get(d))
+            if _p:
+                return _p[0], d
+        return None, None
+
+    # ── kademe 1: SERT kilit adayları ────────────────────────────────
+    for a in AGENTS:
+        _ham, _d = _son_tip(a, _tas_hi)
+        if _ham is None:
+            continue
+        _t = _tip_esle(_ham)
+        if _t is None:
+            _kilit_atlanan.append((a, _ham, "tip bu hafta YOK (etiket eşleşmedi)"))
+        elif (a, _t) in tip_yasak:
+            _kilit_atlanan.append((a, _t, "tip artık YASAK (hamile/kıdem/sabahçı)"))
+        elif (a, _kw, _t) not in agent_tip:
+            _kilit_atlanan.append((a, _t, "o tipte gösterge yok (hafta boyu izinli)"))
+        else:
+            _kilit_sert[a] = _t
+
+    # ── takım modu: kilitlenen üyelerin en sık tipi (kademe 3 kaynağı) ─
+    _takim_mod = {}
+    for _T, _uy in takimlar.items():
+        _c = Counter(_kilit_sert[a] for a in _uy if a in _kilit_sert)
+        if _c:
+            _takim_mod[_T] = _c.most_common(1)[0][0]
+
+    # ── kademe 2 + 3: YUMUŞAK çekim ──────────────────────────────────
+    for a in AGENTS:
+        if a in _kilit_sert:
+            continue
+        _ham, _d = _son_tip(a, _pen_hi)                     # (2) kendi geçen haftası
+        _t = _tip_esle(_ham) if _ham else None
+        _kaynak = f"kendi son günü ({_d})" if _t else None
+        if _t is None:                                      # (3) takımının modu
+            _T = next((_T2 for _T2, _uy in takimlar.items() if a in _uy), None)
+            _t = _takim_mod.get(_T)
+            _kaynak = "takım modu" if _t else None
+        if _t is None or (a, _t) in tip_yasak or (a, _kw, _t) not in agent_tip:
+            continue                                        # çekilecek yer yok → serbest
+        _kilit_yumusak[a] = (_t, _kaynak)
+
+    # ── kısıtlar ─────────────────────────────────────────────────────
+    _kt19e, _n_sert, _n_soft = [], 0, 0
+    for a, _t in _kilit_sert.items():                       # SERT: diğer tipleri kapat
+        for _bas in TIP_SET:
+            if _bas != _t and (a, _kw, _bas) in agent_tip:
+                _kt19e.append(model.Add(agent_tip[(a, _kw, _bas)] == 0))
+                _n_sert += 1
+    _tes_ekle("H19E_sinir_tip_kilidi", *_kt19e)
+    for a, (_t, _src) in _kilit_yumusak.items():            # YUMUŞAK: sapmaya ceza
+        for _bas in TIP_SET:
+            if _bas != _t and (a, _kw, _bas) in agent_tip:
+                amac.append(W_SINIR_MOD * agent_tip[(a, _kw, _bas)])
+                _n_soft += 1
+
+    print(f"sınır haftası tip kilidi [{_kw[0]}-W{_kw[1]}]: "
+          f"{len(_kilit_sert)} agent SERT kilitli ({_n_sert} tip kapatma), "
+          f"{len(_kilit_yumusak)} agent yumuşak çekim (ağ. {W_SINIR_MOD}, {_n_soft} terim)")
+    print(f"  kaynak: {[d.isoformat() for d in _tas_hi]} (sert)  |  "
+          f"{[d.isoformat() for d in _pen_hi]} (yumuşak, kendi geçmişi)")
+    print(f"  takım bütünlüğü bu hafta ARANMIYOR (H19/H19C/H19D muaf) — "
+          f"H20 agent tek tip kuralı GEÇERLİ")
+    _sd = Counter(_kilit_sert.values())
+    print(f"  SERT kilit tip dağılımı : {dict(sorted(_sd.items()))}")
+    _yd = Counter(_t for _t, _ in _kilit_yumusak.values())
+    _kd = Counter(_s.split(" (")[0] for _, _s in _kilit_yumusak.values())
+    print(f"  yumuşak çekim dağılımı  : {dict(sorted(_yd.items()))}  |  "
+          f"kaynak: {dict(_kd)}")
+    _serbest = len(AGENTS) - len(_kilit_sert) - len(_kilit_yumusak)
+    print(f"  serbest kalan agent     : {_serbest} "
+          f"(devam ettirilecek geçmişi yok → coverage esnekliği bunlardan gelir)")
+    if _kilit_atlanan:
+        print(f"  ⚠ {len(_kilit_atlanan)} agentta kilit UYGULANAMADI (emniyet valfi):")
+        for a, _t, _sb in _kilit_atlanan[:15]:
+            print(f"       {a}: {_t} → {_sb}")
+        if any("etiket eşleşmedi" in _s for _, _, _s in _kilit_atlanan):
+            print(f"     → 'etiket eşleşmedi' çoksa df_onceki'nin vardiya yazımını kontrol et "
+                  f"(gece 00:00- mi 24:00- mi).")
+    else:
+        print(f"  ✓ kilit adaylarının hepsinde uygulandı (emniyet valfi tetiklenmedi)")
+
+    # ── FİZİBİLİTE ÖN KONTROLÜ: kilitli dağılım o haftanın talebini taşıyor mu? ──
+    # H19D bu haftada devre dışı → "zirveyi karşıla" kısıtı yok, eksik YUMUŞAK cezaya
+    # düşer (INFEASIBLE olmaz). TEK İSTİSNA gece kovaları: orada SERT band var
+    # (talep ± GECE_BUFFER) ve kilit yüzünden geceye yeterli kişi kalmazsa model
+    # çözümsüz olur. Aşağıdaki tablo bunu ÖNCEDEN gösterir.
+    _kw_hi = [ds for ds in haftalar[_kw] if dt.date.fromisoformat(ds).weekday() < 5]
+    print(f"\n  KİLİTLİ DAĞILIM vs TALEP ({_kw[0]}-W{_kw[1]}, {len(_kw_hi)} hafta içi gün)")
+    print(f"    {'tip':>7} {'sert':>6} {'yumuşak':>8} {'serbest*':>9} "
+          f"{'zirve talep':>12} {'PAY':>6}")
+    for _t in _hafta_tip:
+        _z = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                      if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                  for ds in _kw_hi), default=0)
+        _s1 = sum(1 for _v2 in _kilit_sert.values() if _v2 == _t)
+        _s2 = sum(1 for _v2, _ in _kilit_yumusak.values() if _v2 == _t)
+        _s3 = sum(1 for a in AGENTS if a not in _kilit_sert and a not in _kilit_yumusak
+                  and (a, _kw, _t) in agent_tip)
+        print(f"    {_t:>7} {_s1:>6} {_s2:>8} {_s3:>9} {_z:>12} {_s1 + _s2 - _z:>+6}")
+    print(f"    * serbest = o tipe GİREBİLİR (tek tipe sayılmaz, birden çok tipte görünür)")
+    # gece sert bandı — çözümsüzlük buradan gelir
+    _gece_risk = []
+    for ds in _kw_hi:
+        for v in gun_vardiyalari[ds]:
+            if (ds, v) not in talep or saat[(ds, v)][0] not in GECE_BASLANGIC:
+                continue
+            _alt = talep[(ds, v)] - GECE_BUFFER                # SERT alt sınır
+            _t = saat[(ds, v)][0]
+            _kap = sum(1 for a in AGENTS
+                       if _kilit_sert.get(a, _t) == _t and _kova_calisabilir(a, ds, v))
+            if _kap < _alt:
+                _gece_risk.append((ds, _t, talep[(ds, v)], _alt, _kap))
+    if _gece_risk:
+        print(f"    ⚠ GECE SERT BANDI RİSKİ — kilit sonrası {len(_gece_risk)} kovada "
+              f"müsait kişi alt sınırın altında (INFEASIBLE olur):")
+        for ds, _t, _k, _alt, _kap in _gece_risk[:10]:
+            print(f"       {ds} {_t}: talep {_k} (alt sınır {_alt}), kilit sonrası "
+                  f"müsait {_kap}")
+        print(f"      → SINIR_TIP_KILIT=False ya da o agentları kilitten çıkar.")
+    else:
+        print(f"    ✓ gece sert bandı kilit sonrası da dolabiliyor")
 
 
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
@@ -3099,6 +3342,10 @@ print(f"    {'hafta':>10} {'tip':>7} {'zirve talep':>12} {'tipe atanan kişi':>1
 _tip_sorun = 0
 for _wk in sorted(haftalar):
     if _wk in tatil_haftalari:
+        continue
+    if _wk == KILIT_HAFTA:                         # sınır haftasında takım seçimi yok
+        print(f"    {_wk[0]}-W{_wk[1]:>3} — SINIR HAFTASI: tipler H19E ile önceki aydan "
+              f"geldi, takım tahsisi yok (kapasite tablosu H19E'de)")
         continue
     _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
     _tipler = sorted({saat[(ds, v)][0] for ds in _hi
