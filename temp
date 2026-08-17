@@ -3995,10 +3995,11 @@ df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
 
 # Sheet5: TAKIM × VARDİYA — vardiya başına TEK hücre: "geçmiş+bu ay"
-# "Bu takım 00:00'ı bugüne kadar kaç kez yapmış?" sorusunun tek tabloda cevabı.
+# "Bu takım 00:00'ı bugüne kadar kaç GÜN yapmış?" sorusunun tek tabloda cevabı.
 # Satır = takım, sütun = vardiya, HÜCRE = "geçmiş+bu ay"  (ör. "70+1" → 71 oldu).
-#   geçmiş : df_gecmis.total_gun_sayisi (H19B'yi besleyen aynı veri)
-#   bu ay  : bu ayın çizelgesinden (agent,gün) atama — ARIFE_YARIM hariç
+#   geçmiş : df_gecmis.total_gun_sayisi (H19B'yi besleyen aynı veri) — GÜN
+#   bu ay  : bu ayın çizelgesinde o vardiyanın yapıldığı FARKLI HAFTA İÇİ GÜN
+#            (ARIFE_YARIM ve hafta sonu hariç) — aynı birim
 # Bu ay atama YOKSA sadece geçmiş yazılır ("70"); ikisi de 0 ise hücre BOŞ bırakılır
 # (tablo seyrek, boşluk okumayı kolaylaştırıyor). "x+y" olan hücreler YEŞİL.
 # Sonda üç SAYISAL özet sütunu (sıralama/filtre için): GEÇMİŞ Σ | BU AY Σ | GENEL Σ.
@@ -4021,11 +4022,24 @@ def _vardiya_norm(s):
     return "-".join(_o)
 
 
+# BİRİM: GÜN — kişi-gün DEĞİL. df_gecmis.total_gun_sayisi gün sayıyor; "bu ay" da
+# aynı birimde olmalı, yoksa "geçmiş+bu ay" elma ile armut toplar.
+#   .size()                → satır sayısı = (agent, gün) ataması → KİŞİ-GÜN
+#   ["tarih"].nunique()    → o takımın o vardiyayı yaptığı FARKLI GÜN sayısı ✓
+# Ölçüldü: 12 kişilik takım 7 gün 09:00 çalışınca 84 yazıyordu ("0+82" gibi hücreler);
+# TOPLAM satırında geçmiş 32'ye karşılık bu ay 1094 çıkıyordu — birim farkı.
+# Tavan artık ayın HAFTA İÇİ gün sayısı (Ağustos'ta 21).
+# HAFTA SONU HARİÇ: df_gecmis hafta içi düzeni yansıtıyor; hafta sonu atamaları
+# takımın "hangi vardiyayı yapıyor" sorusuna girmiyor (takım tipi zaten hafta içi
+# kuralı — H19). df_gecmis toplu geldiği için orada ayıklama YAPILAMAZ; hafta sonu
+# içeriyorsa geçmiş tarafı bir miktar yüksek kalır.
 _bu_ay_tv, _gec_tv = {}, {}
-for (_T, _st), _n in (df_sonuc[df_sonuc["vardiya"] != ARIFE_YARIM]
-                      .groupby(["takim", "saat"]).size().items()):
-    _k = (_T, _vardiya_norm(_st))
-    _bu_ay_tv[_k] = _bu_ay_tv.get(_k, 0) + int(_n)
+_tv_hi = df_sonuc[(df_sonuc["vardiya"] != ARIFE_YARIM)
+                  & df_sonuc["tarih"].map(
+                      lambda ds: dt.date.fromisoformat(ds).weekday() < 5)].copy()
+_tv_hi["_v"] = _tv_hi["saat"].map(_vardiya_norm)   # önce normalize → sonra say
+for (_T, _v), _n in _tv_hi.groupby(["takim", "_v"])["tarih"].nunique().items():
+    _bu_ay_tv[(_T, _v)] = int(_n)
 if df_gecmis is not None:
     for (_T, _st), _n in (df_gecmis.groupby(["takim", "shifts_adj"])
                           ["total_gun_sayisi"].sum().items()):
@@ -4103,8 +4117,9 @@ LEJANT = [
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
     ("--- takim_vardiya SAYFASI ---", None, None, ""),
     ("70+1",              None, None,
-     "Hücre = geçmiş + bu ay. '70+1' → geçmişte 70, bu ay 1 daha → 71 oldu. "
-     "Sadece '70' → bu ay atama yok. Boş → hiç yapılmamış"),
+     "Hücre = geçmiş + bu ay, birim GÜN (kişi-gün DEĞİL). '70+1' → geçmişte 70 gün, "
+     "bu ay 1 gün daha → 71. Sadece '70' → bu ay hiç yapılmadı. Boş → hiç yapılmamış. "
+     "Bu ay tarafı SADECE hafta içi; tavan ayın hafta içi gün sayısı"),
     ("yeşil hücre",       "norm",       "C6EFCE",
      "BU AY ARTMIŞ hücre — o takım bu ay o vardiyadan atama aldı"),
 ]
@@ -4265,7 +4280,9 @@ print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
 print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
 print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya "
-      f"(hücre = 'geçmiş+bu ay', vardiya adları normalize edildi)  |  Σgeçmiş "
+      f"(hücre = 'geçmiş+bu ay', birim GÜN, bu ay hafta içi; "
+      f"tavan {len({ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5})} gün)"
+      f"  |  Σgeçmiş "
       f"{int(df_takim_vardiya['GEÇMİŞ Σ'].iloc[-1])}"
       f"  Σbu ay {int(df_takim_vardiya['BU AY Σ'].iloc[-1])}"
       + ("   ⚠ df_gecmis yok → geçmiş 0" if df_gecmis is None else ""))
