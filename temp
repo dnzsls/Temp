@@ -1,12 +1,11 @@
-from forecast_vs_actual_karsilastirma import _to_date_series, _to_slot_30
+gcol = 'gold_total_call'          # forecast'teki gold kolonun
+print('dtype:', df_forecast[gcol].dtype, '| NULL:', df_forecast[gcol].isna().sum(), '/', len(df_forecast))
 
-print('satır sayısı:', len(df_actual), '| index unique mi:', df_actual.index.is_unique)
+from forecast_vs_actual_karsilastirma import _to_slot_30
+bos = df_forecast[df_forecast[gcol].isna()]
+if len(bos):
+    print('boş olan gün sayısı:', bos['truncddate'].nunique())
+    print(bos['model_data_date'].map(_to_slot_30).value_counts().sort_index())
 
-d = _to_date_series(df_actual['data_date']).dt.normalize()
-s = df_actual['min_time_period_value'].map(_to_slot_30)
-
-print('NaT tarih:', d.isna().sum(), '| NaN slot:', s.isna().sum())
-print('tarih min/max:', d.min(), '→', d.max(), '| unique gün:', d.nunique())
-print('unique slot:', s.nunique())
-print(df_actual['min_time_period_value'].value_counts().head(10))
-print(df_actual['data_date'].min(), '→', df_actual['data_date'].max())
+# karşılaştırma tablosunda saat bazında gold
+print(df_cmp.groupby('interval')[['forecast_gold','actual_gold']].sum().to_string())
