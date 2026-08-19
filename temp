@@ -1,11 +1,258 @@
-gcol = 'gold_total_call'          # forecast'teki gold kolonun
-print('dtype:', df_forecast[gcol].dtype, '| NULL:', df_forecast[gcol].isna().sum(), '/', len(df_forecast))
+# =============================================================================
+# FORECAST ↔ ACTUAL ÇAĞRI KARŞILAŞTIRMA (30 DK) — BAĞIMSIZ
+# =============================================================================
+# Bu dosya hiçbir pipeline/config dosyasına bağlı DEĞİLDİR. Sadece pandas
+# kullanır. Veri çekmez — df_actual ve df_forecast'i sen akışında hazırlarsın.
+#
+# ÇIKTI:
+#   data_date, interval,
+#   forecast_kitle, actual_kitle,
+#   forecast_kurumsal, actual_kurumsal,
+#   forecast_gold, actual_gold
+#   → ayın her günü × 48 slot (Ağustos için 31 × 48 = 1.488 satır)
+#
+# GİRDİ — ACTUAL (15 dk):
+#   data_date, weekday_flg, min_time_period_value ('10:30', '00:00' …),
+#   kitle_nof_call, kurumsal_nof_call, gold_nof_call
+#
+# GİRDİ — FORECAST (15 dk):
+#   model_data_date (tam timestamp), truncddate (tarih),
+#   kitle_nof_call, kurumsal_nof_call, gold_total_call
+#
+# Kolon adların farklıysa build_comparison'a actual_cols / forecast_cols ile
+# geç — tamamını değil, sadece değişenleri vermen yeterli.
+# =============================================================================
 
-from forecast_vs_actual_karsilastirma import _to_slot_30
-bos = df_forecast[df_forecast[gcol].isna()]
-if len(bos):
-    print('boş olan gün sayısı:', bos['truncddate'].nunique())
-    print(bos['model_data_date'].map(_to_slot_30).value_counts().sort_index())
+# %% [HÜCRE 1] — FONKSİYONLAR
 
-# karşılaştırma tablosunda saat bazında gold
-print(df_cmp.groupby('interval')[['forecast_gold','actual_gold']].sum().to_string())
+import re
+import datetime as dt
+
+import pandas as pd
+
+SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ('00', '30')]
+
+QUEUES = ('kitle', 'kurumsal', 'gold')
+
+# Kuyruk kolonları için birden fazla ad verilebilir: df'te bulunan ilk aday
+# kullanılır. Kaynaklar arasında adlandırma tutarsız olduğu için (gold_nof_col /
+# gold_total_call / gold_nof_call) tek ada bağlanmak sessiz sıfır üretiyordu.
+DEFAULT_ACTUAL_COLS = {
+    'date':     'data_date',
+    'time':     'min_time_period_value',
+    'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
+    'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col', 'kurumsal_total_call'],
+    'gold':     ['gold_nof_call', 'gold_nof_col', 'gold_total_call'],
+}
+
+DEFAULT_FORECAST_COLS = {
+    'date':     'truncddate',
+    'time':     'model_data_date',     # tam timestamp; saat kısmı kullanılır
+    'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
+    'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col', 'kurumsal_total_call'],
+    'gold':     ['gold_nof_col', 'gold_nof_call', 'gold_total_call'],
+}
+
+
+# ---------------------------------------------------------------------------
+# Yardımcılar — SQL sürücüsünün döndürebileceği tiplere karşı dayanıklı
+# ---------------------------------------------------------------------------
+
+def _to_slot_30(value):
+    """15dk zaman değerini 30dk slot etiketine indirger ('10:45' → '10:30').
+
+    Karşıladığı tipler:
+      '10:45' | '10:45:00' | '2026-08-03 10:45:00' | datetime.time(10, 45)
+      | datetime.datetime | pd.Timestamp | pd.Timedelta / datetime.timedelta
+    """
+    if isinstance(value, (pd.Timedelta, dt.timedelta)):
+        total_min = int(pd.Timedelta(value).total_seconds() // 60) % (24 * 60)
+        hour, minute = divmod(total_min, 60)
+        return f"{hour:02d}:{(minute // 30) * 30:02d}"
+    if isinstance(value, (dt.datetime, pd.Timestamp)):
+        return f"{value.hour:02d}:{(value.minute // 30) * 30:02d}"
+    if isinstance(value, dt.time):
+        return f"{value.hour:02d}:{(value.minute // 30) * 30:02d}"
+
+    s = str(value).strip()
+    m = re.search(r'(\d{1,2}):(\d{2})', s)          # ilk HH:MM örüntüsü
+    if not m:
+        raise ValueError(f"Saat değeri çözümlenemedi: {value!r}")
+    hour, minute = int(m.group(1)) % 24, int(m.group(2))
+    return f"{hour:02d}:{(minute // 30) * 30:02d}"
+
+
+def _to_date_series(s):
+    """Tarih kolonunu güvenli parse eder.
+
+    ISO ('2026-08-03') ise dayfirst KAPALI, aksi halde ('03.08.2026') AÇIK.
+    dayfirst=True'yu ISO string'e uygulamak pandas'ta ayın 13'ünden itibaren
+    'unconverted data remains' hatası veriyor — bu ayrım onu engelliyor.
+    """
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return pd.to_datetime(s)
+    sample = s.dropna().astype(str)
+    is_iso = bool(len(sample)) and sample.str.match(r'^\d{4}-\d{2}-\d{2}').all()
+    return pd.to_datetime(s, dayfirst=not is_iso)
+
+
+def _resolve_col(df, spec):
+    """Aday kolon adlarından df'te bulunan ilkini döndürür (yoksa None)."""
+    cands = [spec] if isinstance(spec, str) else list(spec)
+    for c in cands:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _aggregate_30(df, cols, prefix, source_label):
+    """15dk'lık geniş formatı 30dk'ya toplar.
+
+    Returns: data_date, slot_30, {prefix}_kitle, {prefix}_kurumsal, {prefix}_gold
+    """
+    resolved = {k: _resolve_col(df, cols[k]) for k in ('date', 'time')}
+    missing = [k for k, v in resolved.items() if v is None]
+    if missing:
+        raise KeyError(f"{source_label}: şu kolon(lar) yok: "
+                       f"{[cols[k] for k in missing]}  |  mevcut: {list(df.columns)}")
+    cols = {**cols, **resolved}
+
+    out = pd.DataFrame({
+        'data_date': _to_date_series(df[cols['date']]).dt.normalize(),
+        'slot_30': df[cols['time']].map(_to_slot_30),
+    })
+
+    for q in QUEUES:
+        col = _resolve_col(df, cols[q])
+        if col is None:
+            benzer = [c for c in df.columns if q in str(c).lower()]
+            print(f"  ⚠ {source_label}: {q} kolonu bulunamadı — {prefix}_{q} TÜM "
+                  f"GÜNLER İÇİN 0 olacak.\n"
+                  f"      arananlar: {cols[q]}\n"
+                  f"      df'te '{q}' geçen kolonlar: {benzer or 'yok'}")
+            out[f"{prefix}_{q}"] = 0
+            continue
+        if col != (cols[q] if isinstance(cols[q], str) else cols[q][0]):
+            print(f"  ℹ {source_label}: {q} ← '{col}'")
+        out[f"{prefix}_{q}"] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # Anahtar kaybı kontrolü — NaT tarih / NaN slot groupby'da sessizce düşer
+    bad = out['data_date'].isna() | out['slot_30'].isna()
+    if bad.any():
+        print(f"  ⚠ {source_label}: {int(bad.sum()):,} satırda tarih/saat "
+              f"çözümlenemedi, toplamdan düşüyor ({len(out):,} satırın "
+              f"%{bad.mean()*100:.1f}'i).")
+
+    return out.groupby(['data_date', 'slot_30'], as_index=False).sum()
+
+
+def prepare_actual_calls_30(df_actual, actual_cols=None):
+    """Gerçekleşen çağrıları 30dk'ya toplar."""
+    cols = {**DEFAULT_ACTUAL_COLS, **(actual_cols or {})}
+    return _aggregate_30(df_actual, cols, 'actual', 'ACTUAL')
+
+
+def prepare_forecast_calls_30(df_forecast, forecast_cols=None):
+    """Forecast çağrılarını 30dk'ya toplar."""
+    cols = {**DEFAULT_FORECAST_COLS, **(forecast_cols or {})}
+    return _aggregate_30(df_forecast, cols, 'forecast', 'FORECAST')
+
+
+# ---------------------------------------------------------------------------
+# Karşılaştırma
+# ---------------------------------------------------------------------------
+
+def build_comparison(df_actual, df_forecast, year=2026, month=8,
+                     actual_cols=None, forecast_cols=None,
+                     interval_style='start', verbose=True):
+    """Ayın tüm günleri × 48 slot için forecast/actual tablosu üretir.
+
+    interval_style: 'start' → '10:30'  |  'range' → '10:30-11:00'
+    Veride olmayan (gün, slot) kombinasyonları 0 ile doldurulur.
+    """
+    df_a = prepare_actual_calls_30(df_actual, actual_cols)
+    df_f = prepare_forecast_calls_30(df_forecast, forecast_cols)
+
+    # Ayın tam ızgarası — eksik gün/slot sessizce kaybolmasın
+    first = pd.Timestamp(year=year, month=month, day=1)
+    all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
+    grid = pd.MultiIndex.from_product(
+        [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
+
+    df = (grid
+          .merge(df_f, on=['data_date', 'slot_30'], how='left')
+          .merge(df_a, on=['data_date', 'slot_30'], how='left'))
+
+    value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
+    df[value_cols] = df[value_cols].fillna(0).round().astype(int)
+
+    if interval_style == 'range':
+        nxt = {s: SLOTS_30[(i + 1) % len(SLOTS_30)] for i, s in enumerate(SLOTS_30)}
+        df['interval'] = df['slot_30'] + '-' + df['slot_30'].map(nxt)
+    else:
+        df['interval'] = df['slot_30']
+
+    df = df.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+    df = df[['data_date', 'interval',
+             'forecast_kitle', 'actual_kitle',
+             'forecast_kurumsal', 'actual_kurumsal',
+             'forecast_gold', 'actual_gold']]
+
+    if verbose:
+        _print_summary(df, df_a, df_f, all_days, year, month)
+
+    return df
+
+
+def _print_summary(df, df_a, df_f, all_days, year, month):
+    """Eksik gün ve kuyruk bazlı sapma özeti — sessiz veri kaybını yakalamak için."""
+    print(f"\n{'='*70}")
+    print(f"FORECAST ↔ ACTUAL KARŞILAŞTIRMA — {year}/{month:02d}")
+    print(f"{'='*70}")
+    print(f"  Satır: {len(df):,}  ({len(all_days)} gün × {len(SLOTS_30)} slot)")
+
+    for label, src in (('ACTUAL', df_a), ('FORECAST', df_f)):
+        have = set(src['data_date'].unique())
+        miss = [d for d in all_days if d not in have]
+        if miss:
+            print(f"  ⚠ {label}'da veri olmayan {len(miss)} gün: "
+                  f"{', '.join(d.strftime('%d.%m') for d in miss)}")
+    if all(len(set(src['data_date'].unique())) >= len(all_days) for src in (df_a, df_f)):
+        print(f"  ✓ Her iki tarafta da ayın {len(all_days)} günü mevcut.")
+
+    print(f"\n  {'Kuyruk':<10} {'Forecast':>14} {'Actual':>14} {'Fark':>12} {'Sapma':>9}")
+    print(f"  {'-'*10} {'-'*14} {'-'*14} {'-'*12} {'-'*9}")
+    for q in QUEUES:
+        f_sum = int(df[f"forecast_{q}"].sum())
+        a_sum = int(df[f"actual_{q}"].sum())
+        diff = f_sum - a_sum
+        pct = (diff / a_sum * 100) if a_sum else 0.0
+        print(f"  {q:<10} {f_sum:>14,} {a_sum:>14,} {diff:>+12,} {pct:>8.1f}%")
+    print()
+
+
+def save_comparison(df, path=None, year=2026, month=8):
+    """Excel'e yazar."""
+    path = path or f"forecast_vs_actual_{year}_{month:02d}.xlsx"
+    out = df.copy()
+    out['data_date'] = pd.to_datetime(out['data_date']).dt.strftime('%Y-%m-%d')
+    out.to_excel(path, index=False)
+    print(f"✓ Kaydedildi: {path}")
+    return path
+
+
+# %% [HÜCRE 2] — KULLANIM
+# df_actual ve df_forecast akışta hazırsa bu hücre doğrudan çalışır.
+
+YEAR = 2026
+MONTH = 8
+
+if 'df_actual' in globals() and 'df_forecast' in globals():
+    df_cmp = build_comparison(df_actual, df_forecast, year=YEAR, month=MONTH)
+    print(df_cmp.head(10).to_string(index=False))
+else:
+    print("df_actual / df_forecast bulunamadı — önce tabloları getir, sonra bu hücreyi çalıştır.")
+
+
+# %% [HÜCRE 3] — EXCEL'E KAYDET (opsiyonel)
+# save_comparison(df_cmp, year=YEAR, month=MONTH)
