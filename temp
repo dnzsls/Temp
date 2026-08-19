@@ -1,61 +1,111 @@
-# ===== SUNUM SAYILARI — MODEL 1 (mevcut pickle'dan, re-run YOK) =====
+# ===== RR TABLOSU — 3 RR yan yana (mevcut pickle'dan) =====
 import pickle
+import pandas as pd
+
 QUEUE    = "kitle"
-PKL_PATH = "monthly_v9_forecast_2026_08.pkl"   # results bellekte yoksa buradan yükler
+GUN      = "2026-08-03"                          # slot tablosu bu gün için
+PKL_PATH = "monthly_v9_forecast_2026_08.pkl"
 
 try:
-    results                                      # monthly run notebook'unda zaten varsa kullan
+    results
 except NameError:
     with open(PKL_PATH, "rb") as f:
         results = pickle.load(f)
 
-# 0) YAPI KONTROLÜ — alan adları tutuyor mu?
-_g0 = next((g for g in sorted(results) if (results.get(g) or {}).get(QUEUE)), None)
-_mi0 = results[_g0][QUEUE].get("mip_info", {}) if _g0 else {}
-print("örnek gün:", _g0, "| mip_info anahtarları:", list(_mi0.keys()))
+# hourly_report config (kap_rr için) — notebook'ta CONFIG_WEEKDAY varsa oradan,
+# yoksa varsayılan (rapor_etkisi=0, kapasite_kaybi=0, cagri_adedi=15)
+def _hr_cfg(queue):
+    for nm in ("CONFIG_WEEKDAY", "CONFIG", "config"):
+        c = globals().get(nm)
+        if c:
+            hr = c.get("queue_configs", {}).get(queue, {}).get("hourly_report", {})
+            if hr:
+                return hr
+    return {}
 
-def _get(mi, *keys):
-    for k in keys:
-        if mi.get(k) is not None:
-            return mi[k]
-    return None
+def _rr_tablosu(gun, queue):
+    rq = (results.get(gun) or {}).get(queue)
+    if not rq:
+        print(f"{gun} {queue}: plan yok"); return None
+    mi = rq.get("mip_info", {})
+    erl_by  = mi.get("erlang_by_slot") or rq.get("erlang_by_slot") or {}
+    mip2_by = mi.get("mip_by_slot", {}) or {}
+    s1      = mi.get("mip_info_stage1") or rq.get("mip_info_stage1") or {}
+    mip1_by = s1.get("mip_by_slot", mip2_by) or mip2_by
+    calls_by = rq.get("calls_by_slot", {}) or {}
+    hr = _hr_cfg(queue)
+    re_cfg = hr.get("rapor_etkisi", {}); kk_cfg = hr.get("kapasite_kaybi", {})
+    ca_cfg = hr.get("cagri_adedi", {})
 
-# 1) AYLIK ÖZET
-gun_rr, W = [], 0
-top_short = top_surp = 0
-en_yogun = None                                  # (erlang, gün, slot, çağrı, atanan)
-plani = 0
+    rows = []
+    for slot in sorted(erl_by):
+        erl = erl_by[slot]
+        if erl <= 0:
+            continue
+        mip1, mip2 = mip1_by.get(slot, 0), mip2_by.get(slot, 0)
+        calls = int(calls_by.get(slot, 0))
+        h = int(slot[:2])
+        re_v = round(mip2 * re_cfg.get(h, re_cfg.get("default", 0)))
+        kk_v = round(mip2 * kk_cfg.get(h, kk_cfg.get("default", 0)))
+        nmt = mip2 - re_v - kk_v
+        ca  = ca_cfg.get(h, ca_cfg.get("default", 15))
+        ck  = nmt * (ca / 2)
+        rows.append({
+            "slot": slot, "çağrı": calls, "erlang_ihtiyaç": erl,
+            "atanan_S1": mip1, "atanan_S2": mip2,
+            "rr1 (S1 kişi)":  round(mip1 / erl * 100),
+            "rr2 (S2 kişi)":  round(mip2 / erl * 100),
+            "kap_rr (çağrı)": (round(ck / calls * 100) if calls > 0 else None),
+        })
+    df = pd.DataFrame(rows)
+    return df
+
+df_rr = _rr_tablosu(GUN, QUEUE)
+print(f"=== RR TABLOSU — {GUN}  {QUEUE}  (değerler %) ===")
+print("rr1 = Stage-1 kişi karşılama | rr2 = Stage-2 (nihai) kişi karşılama | "
+      "kap_rr = çağrı kapasitesi (agent=15 çağrı/saat varsayımı)")
+try:
+    display(df_rr)                    # Jupyter'da güzel tablo
+except NameError:
+    print(df_rr.to_string(index=False))
+
+# gün özeti (Erlang-ağırlıklı ortalama)
+if df_rr is not None and len(df_rr):
+    w = df_rr["erlang_ihtiyaç"]
+    for col in ["rr1 (S1 kişi)", "rr2 (S2 kişi)"]:
+        ort = (df_rr[col] * w).sum() / w.sum()
+        print(f"  {col}: ort %{ort:.0f}  | min %{df_rr[col].min()} | max %{df_rr[col].max()}")
+
+# ===== AYLIK TABLO — her gün: rr2 ort + açık + fazla =====
+ay_rows = []
 for g in sorted(results):
     rq = (results.get(g) or {}).get(QUEUE)
     if not rq:
         continue
     mi = rq.get("mip_info", {})
-    erl_by  = _get(mi, "erlang_by_slot") or rq.get("erlang_by_slot") or {}
-    mip_by  = mi.get("mip_by_slot", {}) or {}
-    calls_by = rq.get("calls_by_slot", {}) or {}
+    erl_by = mi.get("erlang_by_slot") or rq.get("erlang_by_slot") or {}
+    mip2_by = mi.get("mip_by_slot", {}) or {}
     if not erl_by:
         continue
-    plani += 1
-    top_short += int(_get(mi, "total_shortfall", "shortfall_total") or 0)
-    top_surp  += int(_get(mi, "surplus_total_added", "surplus_total") or 0)
-    rr_vals, wv = [], []
-    for slot, erl in erl_by.items():
-        if erl <= 0:
-            continue
-        mip = mip_by.get(slot, 0)
-        rr_vals.append(mip / erl); wv.append(erl)
-        if en_yogun is None or erl > en_yogun[0]:
-            en_yogun = (erl, g, slot, int(calls_by.get(slot, 0)), mip)
-    if wv:
-        gr = sum(r*x for r, x in zip(rr_vals, wv)) / sum(wv)
-        gun_rr.append(gr * sum(wv)); W += sum(wv)
-
-print(f"\n=== MODEL 1 — SUNUM SAYILARI ({QUEUE}) ===")
-print(f"planı olan gün         : {plani}")
-if W:
-    print(f"AYLIK ort karşılama RR : %{sum(gun_rr)/W*100:.0f}  (Erlang-ağırlıklı; %100=tam)")
-print(f"toplam AÇIK (shortfall): {top_short} kişi-gün")
-print(f"toplam FAZLA (surplus) : {top_surp} kişi-gün")
-if en_yogun:
-    e, g, sl, ca, mp = en_yogun
-    print(f"ayın en yoğun dilimi   : {g} {sl} → çağrı {ca}, Erlang {e}, atanan {mp}, rr %{mp/e*100:.0f}")
+    pairs = [(mip2_by.get(s, 0) / e, e) for s, e in erl_by.items() if e > 0]
+    if not pairs:
+        continue
+    W = sum(e for _, e in pairs)
+    ay_rows.append({
+        "gün": g,
+        "rr2_ort_%": round(sum(r * e for r, e in pairs) / W * 100),
+        "açık": int(mi.get("total_shortfall", 0) or 0),
+        "fazla": int(mi.get("surplus_total_added", 0) or 0),
+        "inhouse": int(mi.get("total_inhouse_kisi", 0) or 0),
+        "outsource": int(mi.get("total_outsource_kisi", 0) or 0),
+    })
+df_ay = pd.DataFrame(ay_rows)
+print(f"\n=== AYLIK ÖZET — {QUEUE} ===")
+try:
+    display(df_ay)
+except NameError:
+    print(df_ay.to_string(index=False))
+if len(df_ay):
+    wr = df_ay["rr2_ort_%"].mean()
+    print(f"AYLIK: ort rr2 %{wr:.0f} | toplam açık {df_ay['açık'].sum()} | "
+          f"toplam fazla {df_ay['fazla'].sum()} kişi-gün")
