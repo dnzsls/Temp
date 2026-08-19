@@ -1,14 +1,12 @@
-from forecast_vs_actual_karsilastirma import prepare_actual_calls_30
+from forecast_vs_actual_karsilastirma import _to_date_series, _to_slot_30
 
-# 1) ham veri: kolon adları ve tipler
-print(df_actual.dtypes)
-print(df_actual.head(3))
+print('satır sayısı:', len(df_actual), '| index unique mi:', df_actual.index.is_unique)
 
-# 2) ham toplam — burada 0 ise sorun kaynak veride/kolon adında
-print('ham toplam:', df_actual[['kitle_nof_call','kurumsal_nof_call','gold_nof_call']].sum().to_dict())
+d = _to_date_series(df_actual['data_date']).dt.normalize()
+s = df_actual['min_time_period_value'].map(_to_slot_30)
 
-# 3) 30dk'ya toplandıktan sonra
-a30 = prepare_actual_calls_30(df_actual)
-print(a30[['actual_kitle','actual_kurumsal','actual_gold']].sum().to_dict())
-print('tarih aralığı:', a30['data_date'].min(), '→', a30['data_date'].max())
-print('slot örnekleri:', sorted(a30['slot_30'].unique())[:6])
+print('NaT tarih:', d.isna().sum(), '| NaN slot:', s.isna().sum())
+print('tarih min/max:', d.min(), '→', d.max(), '| unique gün:', d.nunique())
+print('unique slot:', s.nunique())
+print(df_actual['min_time_period_value'].value_counts().head(10))
+print(df_actual['data_date'].min(), '→', df_actual['data_date'].max())
