@@ -185,11 +185,15 @@ def prepare_forecast_calls_30(df_forecast, forecast_cols=None):
 
 def build_comparison(df_actual, df_forecast, year=2026, month=8,
                      actual_cols=None, forecast_cols=None,
-                     interval_style='start', verbose=True):
-    """Ayın tüm günleri × 48 slot için forecast/actual tablosu üretir.
+                     interval_style='start', only_actual_days=True,
+                     verbose=True):
+    """Ayın günleri × 48 slot için forecast/actual tablosu üretir.
 
     interval_style: 'start' → '10:30'  |  'range' → '10:30-11:00'
-    Veride olmayan (gün, slot) kombinasyonları 0 ile doldurulur.
+    only_actual_days: True ise actual'ı hiç olmayan günler tablodan çıkarılır
+        (ay bitmeden koşulduğunda ilerideki günler sapmayı ve MAPE'yi bozmasın).
+        False dersen ay tam ızgara olarak gelir, eksik günler 0 ile dolar.
+    Gün içindeki eksik slotlar her hâlükârda 0 ile doldurulur.
     """
     df_a = prepare_actual_calls_30(df_actual, actual_cols)
     df_f = prepare_forecast_calls_30(df_forecast, forecast_cols)
@@ -206,6 +210,16 @@ def build_comparison(df_actual, df_forecast, year=2026, month=8,
 
     value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
     df[value_cols] = df[value_cols].fillna(0).round().astype(int)
+
+    # Actual'ı hiç olmayan günleri karşılaştırma dışında bırak
+    gunluk_actual = df.groupby('data_date')[[f"actual_{q}" for q in QUEUES]].sum().sum(axis=1)
+    bos_gunler = list(gunluk_actual[gunluk_actual == 0].index)
+    if only_actual_days and bos_gunler:
+        df = df[~df['data_date'].isin(bos_gunler)]
+        if verbose:
+            print(f"  ℹ actual'ı tamamen boş {len(bos_gunler)} gün "
+                  f"(karşılaştırmaya alınmadı): "
+                  f"{', '.join(d.strftime('%d.%m.%Y') for d in bos_gunler)}")
 
     # Sapma % — her kuyruğun forecast/actual çiftinin hemen ardına
     # (+ : forecast fazla tahmin etmiş | actual 0 ise 0.0)
@@ -232,16 +246,17 @@ def build_comparison(df_actual, df_forecast, year=2026, month=8,
 
 
 def _print_summary(df, df_a, df_f, all_days, year, month):
-    """Eksik gün uyarıları + kuyruk bazlı toplam sapma tablosu."""
+    """Kapsanan gün bilgisi + kuyruk bazlı toplam sapma tablosu."""
+    kapsanan = df['data_date'].nunique()
     print(f"FORECAST ↔ ACTUAL — {year}/{month:02d}  |  {len(df):,} satır "
-          f"({len(all_days)} gün × {len(SLOTS_30)} slot)")
+          f"({kapsanan}/{len(all_days)} gün × {len(SLOTS_30)} slot)")
 
-    for label, src in (('ACTUAL', df_a), ('FORECAST', df_f)):
-        have = set(src['data_date'].unique())
-        miss = [d for d in all_days if d not in have]
-        if miss:
-            print(f"  ⚠ {label}'da veri olmayan {len(miss)} gün: "
-                  f"{', '.join(d.strftime('%d.%m') for d in miss)}")
+    # Karşılaştırılan günlerde forecast tarafı eksikse bu ayrı bir sorun
+    kapsanan_gunler = set(df['data_date'].unique())
+    f_yok = sorted(kapsanan_gunler - set(df_f['data_date'].unique()))
+    if f_yok:
+        print(f"  ⚠ FORECAST'ta veri olmayan {len(f_yok)} gün (0 sayıldı): "
+              f"{', '.join(pd.Timestamp(d).strftime('%d.%m') for d in f_yok)}")
 
     ozet = pd.DataFrame([{
         'kuyruk': q,
@@ -315,12 +330,6 @@ def _print_daily_summary(d):
         gunler = ', '.join(pd.to_datetime(tam['data_date']).dt.strftime('%d.%m'))
         print(f"  ⚠ actual'ı tamamen boş {len(tam)} gün: {gunler}")
     return ozet
-
-    tam = d[(d[[f"actual_{q}" for q in QUEUES]].sum(axis=1) == 0)]
-    if len(tam):
-        gunler = ', '.join(pd.to_datetime(tam['data_date']).dt.strftime('%d.%m'))
-        print(f"  ⚠ actual'ı tamamen boş {len(tam)} gün: {gunler}")
-    print()
 
 
 def save_comparison(df, df_daily=None, path=None, year=2026, month=8):
