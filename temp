@@ -332,6 +332,20 @@ def _print_daily_summary(d):
     return ozet
 
 
+def gun_siralama(df_gunluk, queue='kitle', n=5, en_kotu=False):
+    """Bir kuyruk için sapması en küçük (veya en büyük) n günü döndürür.
+
+    queue    : 'kitle' | 'kurumsal' | 'gold'
+    en_kotu  : False → en isabetli günler | True → en çok sapan günler
+    """
+    d = df_gunluk.copy()
+    d['abs_sapma'] = d[f"sapma_{queue}"].abs()
+    d = d.sort_values('abs_sapma', ascending=not en_kotu)
+    cols = ['data_date', 'gun', f"forecast_{queue}", f"actual_{queue}",
+            f"fark_{queue}", f"sapma_{queue}"]
+    return d[cols].head(n).reset_index(drop=True)
+
+
 def save_comparison(df, df_daily=None, path=None, year=2026, month=8):
     """Excel'e yazar. df_daily verilirse ikinci sayfa olarak eklenir."""
     path = path or f"forecast_vs_actual_{year}_{month:02d}.xlsx"
@@ -373,5 +387,15 @@ else:
     print("df_cmp yok — önce HÜCRE 2'yi çalıştır.")
 
 
-# %% [HÜCRE 4] — EXCEL'E KAYDET (opsiyonel)
+# %% [HÜCRE 4] — EN İSABETLİ / EN ÇOK SAPAN GÜNLER
+
+if 'df_gunluk' in globals():
+    for q in QUEUES:
+        print(f"— {q}: en isabetli 5 gün")
+        show(gun_siralama(df_gunluk, queue=q, n=5))
+else:
+    print("df_gunluk yok — önce HÜCRE 3'ü çalıştır.")
+
+
+# %% [HÜCRE 5] — EXCEL'E KAYDET (opsiyonel)
 # save_comparison(df_cmp, df_gunluk, year=YEAR, month=MONTH)
