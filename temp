@@ -1,33 +1,27 @@
 # =============================================================================
-# FORECAST ↔ ACTUAL ÇAĞRI KARŞILAŞTIRMA (30 DK) — BAĞIMSIZ
+# VARDİYA PLANI → SLOT BAZLI KİŞİ SAYISI (30 DK)  —  BAĞIMSIZ
 # =============================================================================
-# Bu dosya hiçbir pipeline/config dosyasına bağlı DEĞİLDİR. Sadece pandas
-# kullanır. Veri çekmez — df_actual ve df_forecast'i sen akışında hazırlarsın.
+# Amaç: agent bazlı vardiya planını, modelin çıktısıyla aynı dilde konuşan bir
+# tabloya çevirmek: her (gün × 30dk slot × kuyruk) için sahada kaç kişi var.
+#
+# Bu dosya veri çekmez, pipeline'a bağlı değildir. Sadece pandas.
+#
+# GİRDİ — VARDİYA PLANI (agent × gün):
+#   agent_user_code, agent_name, date, vardiya ('08:00-17:00'),
+#   line_based_main_group ('kitle_cagrilar' | 'gold_cagrilar' | 'kurumsal_cagrilar'),
+#   mesai_mi_calisti, kismi_flg, hamile_flg, sut_izni_flg, kidem_1_ay_flg,
+#   egitim_flg, vob_flg
+#   → tamamı inhouse. Outsource ayrıca elle eklenir.
 #
 # ÇIKTI:
 #   data_date, interval,
-#   forecast_kitle, actual_kitle, sapma_kitle,
-#   forecast_kurumsal, actual_kurumsal, sapma_kurumsal,
-#   forecast_gold, actual_gold, sapma_gold
-#   → ayın her günü × 48 slot (Ağustos için 31 × 48 = 1.488 satır)
-#   sapma = (forecast - actual) / actual × 100  (+ : forecast fazla tahmin)
-#
-# GİRDİ — ACTUAL (15 dk):
-#   data_date, weekday_flg, min_time_period_value ('10:30', '00:00' …),
-#   kitle_nof_call, kurumsal_nof_call, gold_nof_call
-#
-# GİRDİ — FORECAST (15 dk):
-#   model_data_date (tam timestamp), truncddate (tarih),
-#   kitle_nof_call, kurumsal_nof_call, gold_total_call
-#
-# Kolon adların farklıysa build_comparison'a actual_cols / forecast_cols ile
-# geç — tamamını değil, sadece değişenleri vermen yeterli.
+#   plan_kitle, plan_kurumsal, plan_gold          (o slotta sahadaki kişi)
+#   mesai_kitle, mesai_kurumsal, mesai_gold       (bunun kaçı mesai kaydı)
 # =============================================================================
 
 # %% [HÜCRE 1] — FONKSİYONLAR
 
 import re
-import datetime as dt
 
 import pandas as pd
 
@@ -38,11 +32,7 @@ except ImportError:                     # pragma: no cover
 
 
 def show(df, n=None):
-    """DataFrame'i Jupyter tablosu olarak gösterir (terminalde metne düşer).
-
-    print(df.to_string()) satırları ekrana sığmayınca alta kaydığı için
-    tablolar hep bu fonksiyondan geçiriliyor.
-    """
+    """DataFrame'i Jupyter tablosu olarak gösterir (terminalde metne düşer)."""
     x = df.head(n) if n else df
     if _display is not None:
         _display(x)
@@ -52,69 +42,53 @@ def show(df, n=None):
 
 
 SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ('00', '30')]
+SLOT_IDX = {s: i for i, s in enumerate(SLOTS_30)}
 
 QUEUES = ('kitle', 'kurumsal', 'gold')
 
-# Kuyruk kolonları için birden fazla ad verilebilir: df'te bulunan ilk aday
-# kullanılır. Kaynaklar arasında adlandırma tutarsız olduğu için (gold_nof_col /
-# gold_total_call / gold_nof_call) tek ada bağlanmak sessiz sıfır üretiyordu.
-DEFAULT_ACTUAL_COLS = {
-    'date':     'data_date',
-    'time':     'min_time_period_value',
-    'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
-    'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col', 'kurumsal_total_call'],
-    'gold':     ['gold_nof_call', 'gold_nof_col', 'gold_total_call'],
+# line_based_main_group → kuyruk
+QUEUE_BY_GROUP = {
+    'kitle_cagrilar':    'kitle',
+    'kurumsal_cagrilar': 'kurumsal',
+    'gold_cagrilar':     'gold',
 }
 
-DEFAULT_FORECAST_COLS = {
-    'date':     'truncddate',
-    'time':     'model_data_date',     # tam timestamp; saat kısmı kullanılır
-    'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
-    'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col', 'kurumsal_total_call'],
-    'gold':     ['gold_nof_call', 'gold_nof_col', 'gold_total_call'],
+DEFAULT_MODEL_COLS = {
+    'date':    ['data_date', 'date', 'tarih'],
+    'queue':   ['kuyruk', 'queue', 'line_based_main_group'],
+    'shift':   ['vardiya', 'shift'],
+    'kisi':    ['kisi', 'kisi_sayisi', 'count', 'adet'],
+    'company': ['company', 'sirket'],
 }
 
+DEFAULT_PLAN_COLS = {
+    'agent': 'agent_user_code',
+    'date':  'date',
+    'shift': 'vardiya',
+    'group': 'line_based_main_group',
+    'mesai': 'mesai_mi_calisti',
+}
 
-# ---------------------------------------------------------------------------
-# Yardımcılar — SQL sürücüsünün döndürebileceği tiplere karşı dayanıklı
-# ---------------------------------------------------------------------------
+# Her flag için: 'exclude' → o gün sahada saymaz | 'include' → normal sayılır.
+# NOT: sut_izni_flg şimdilik 'include' — günün hangi saatinde ne kadar düşüleceği
+# kuralı netleşince kısmi düşüm olarak ayrıca ele alınacak.
+DEFAULT_FLAG_RULES = {
+    'egitim_flg':     'exclude',
+    'vob_flg':        'exclude',
+    'hamile_flg':     'include',
+    'sut_izni_flg':   'include',
+    'kismi_flg':      'include',   # vardiya kolonu zaten kısa saati yazıyor
+    'kidem_1_ay_flg': 'include',
+}
 
-def _to_slot_30(value):
-    """15dk zaman değerini 30dk slot etiketine indirger ('10:45' → '10:30').
-
-    Karşıladığı tipler:
-      '10:45' | '10:45:00' | '2026-08-03 10:45:00' | datetime.time(10, 45)
-      | datetime.datetime | pd.Timestamp | pd.Timedelta / datetime.timedelta
-    """
-    if isinstance(value, (pd.Timedelta, dt.timedelta)):
-        total_min = int(pd.Timedelta(value).total_seconds() // 60) % (24 * 60)
-        hour, minute = divmod(total_min, 60)
-        return f"{hour:02d}:{(minute // 30) * 30:02d}"
-    if isinstance(value, (dt.datetime, pd.Timestamp)):
-        return f"{value.hour:02d}:{(value.minute // 30) * 30:02d}"
-    if isinstance(value, dt.time):
-        return f"{value.hour:02d}:{(value.minute // 30) * 30:02d}"
-
-    s = str(value).strip()
-    m = re.search(r'(\d{1,2}):(\d{2})', s)          # ilk HH:MM örüntüsü
-    if not m:
-        raise ValueError(f"Saat değeri çözümlenemedi: {value!r}")
-    hour, minute = int(m.group(1)) % 24, int(m.group(2))
-    return f"{hour:02d}:{(minute // 30) * 30:02d}"
+TRUTHY = {1, '1', 1.0, True, 'e', 'evet', 'y', 'yes', 't', 'true', 'x', 'var'}
 
 
-def _to_date_series(s):
-    """Tarih kolonunu güvenli parse eder.
-
-    ISO ('2026-08-03') ise dayfirst KAPALI, aksi halde ('03.08.2026') AÇIK.
-    dayfirst=True'yu ISO string'e uygulamak pandas'ta ayın 13'ünden itibaren
-    'unconverted data remains' hatası veriyor — bu ayrım onu engelliyor.
-    """
-    if pd.api.types.is_datetime64_any_dtype(s):
-        return pd.to_datetime(s)
-    sample = s.dropna().astype(str)
-    is_iso = bool(len(sample)) and sample.str.match(r'^\d{4}-\d{2}-\d{2}').all()
-    return pd.to_datetime(s, dayfirst=not is_iso)
+def _is_true(s):
+    """1 / 'E' / 'Evet' / True / 'X' gibi değerleri bool'a çevirir."""
+    return s.map(lambda v: str(v).strip().lower() in TRUTHY
+                 if not isinstance(v, (int, float, bool)) or isinstance(v, bool)
+                 else v in TRUTHY)
 
 
 def _resolve_col(df, spec):
@@ -126,276 +100,326 @@ def _resolve_col(df, spec):
     return None
 
 
-def _aggregate_30(df, cols, prefix, source_label):
-    """15dk'lık geniş formatı 30dk'ya toplar.
+def _normalize_queue(s):
+    """'kitle_cagrilar' / 'Kitle' / 'kitle' → 'kitle'."""
+    v = s.astype(str).str.strip().str.lower()
+    return v.map(lambda x: QUEUE_BY_GROUP.get(x, x if x in QUEUES else None))
 
-    Returns: data_date, slot_30, {prefix}_kitle, {prefix}_kurumsal, {prefix}_gold
+
+def _to_date_series(s):
+    """ISO ('2026-08-03') ise dayfirst kapalı, aksi halde açık."""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return pd.to_datetime(s)
+    sample = s.dropna().astype(str)
+    is_iso = bool(len(sample)) and sample.str.match(r'^\d{4}-\d{2}-\d{2}').all()
+    return pd.to_datetime(s, dayfirst=not is_iso)
+
+
+_SHIFT_RE = re.compile(r'(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})')
+
+
+def shift_slots(text):
+    """'08:00-17:00' → kapsadığı 30dk slot listesi.
+
+    Geceyi aşan vardiyaları da doğru işler ('22:00-06:00' → 22:00…05:30).
+    Vardiya metni çözümlenemezse (OFF, İZİN, boş) boş liste döner.
     """
-    resolved = {k: _resolve_col(df, cols[k]) for k in ('date', 'time')}
-    missing = [k for k, v in resolved.items() if v is None]
-    if missing:
-        raise KeyError(f"{source_label}: şu kolon(lar) yok: "
-                       f"{[cols[k] for k in missing]}  |  mevcut: {list(df.columns)}")
-    cols = {**cols, **resolved}
+    m = _SHIFT_RE.search(str(text))
+    if not m:
+        return []
 
-    out = pd.DataFrame({
-        'data_date': _to_date_series(df[cols['date']]).dt.normalize(),
-        'slot_30': df[cols['time']].map(_to_slot_30),
-    })
+    sh, sm, eh, em = (int(g) for g in m.groups())
+    start = f"{sh % 24:02d}:{(sm // 30) * 30:02d}"
+    end_idx_raw = (eh % 24) * 2 + (em // 30)
+    if eh == 24 or (eh % 24) * 60 + em == 0:       # '…-24:00' / '…-00:00'
+        end_idx_raw = len(SLOTS_30)
 
-    for q in QUEUES:
-        col = _resolve_col(df, cols[q])
-        if col is None:
-            benzer = [c for c in df.columns if q in str(c).lower()]
-            print(f"  ⚠ {source_label}: {q} kolonu bulunamadı — {prefix}_{q} TÜM "
-                  f"GÜNLER İÇİN 0 olacak.\n"
-                  f"      arananlar: {cols[q]}\n"
-                  f"      df'te '{q}' geçen kolonlar: {benzer or 'yok'}")
-            out[f"{prefix}_{q}"] = 0
+    i, j = SLOT_IDX[start], end_idx_raw
+    if j <= i:                                     # geceyi aşıyor
+        j += len(SLOTS_30)
+    return [SLOTS_30[k % len(SLOTS_30)] for k in range(i, j)]
+
+
+def build_plan_coverage(df_plan, year=2026, month=8, plan_cols=None,
+                        flag_rules=None, verbose=True):
+    """Vardiya planını (gün × 30dk slot × kuyruk) kişi sayısına çevirir.
+
+    Aynı agent aynı gün birden fazla satırda geçse bile bir slotta bir kez
+    sayılır (agent_user_code üzerinden tekilleştirme).
+    """
+    cols = {**DEFAULT_PLAN_COLS, **(plan_cols or {})}
+    rules = {**DEFAULT_FLAG_RULES, **(flag_rules or {})}
+
+    eksik = [v for k, v in cols.items() if v not in df_plan.columns]
+    if eksik:
+        raise KeyError(f"PLAN: şu kolon(lar) yok: {eksik}  |  "
+                       f"mevcut: {list(df_plan.columns)}")
+
+    df = df_plan.copy()
+    df['data_date'] = _to_date_series(df[cols['date']]).dt.normalize()
+    df['queue'] = df[cols['group']].astype(str).str.strip().str.lower().map(QUEUE_BY_GROUP)
+    df['mesai'] = _is_true(df[cols['mesai']])
+
+    n0 = len(df)
+
+    # Ay filtresi
+    df = df[(df['data_date'].dt.year == year) & (df['data_date'].dt.month == month)]
+    if verbose and len(df) < n0:
+        print(f"  ℹ PLAN: {n0 - len(df):,} satır {year}/{month:02d} dışında, elendi.")
+
+    # Tanınmayan kuyruk
+    bilinmeyen = df[df['queue'].isna()][cols['group']].dropna().unique()
+    if len(bilinmeyen):
+        print(f"  ⚠ PLAN: tanınmayan {cols['group']} değerleri elendi: "
+              f"{list(bilinmeyen)[:10]}")
+    df = df[df['queue'].notna()]
+
+    # Flag süzgeci
+    for flag, rule in rules.items():
+        if rule != 'exclude':
             continue
-        if col != (cols[q] if isinstance(cols[q], str) else cols[q][0]):
-            print(f"  ℹ {source_label}: {q} ← '{col}'")
-        out[f"{prefix}_{q}"] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        if flag not in df.columns:
+            if verbose:
+                print(f"  ℹ PLAN: '{flag}' kolonu yok, kural atlandı.")
+            continue
+        maske = _is_true(df[flag])
+        if verbose and maske.any():
+            print(f"  ℹ PLAN: {flag} → {int(maske.sum()):,} satır sahada sayılmadı.")
+        df = df[~maske]
 
-    # Anahtar kaybı kontrolü — NaT tarih / NaN slot groupby'da sessizce düşer
-    bad = out['data_date'].isna() | out['slot_30'].isna()
-    if bad.any():
-        print(f"  ⚠ {source_label}: {int(bad.sum()):,} satırda tarih/saat "
-              f"çözümlenemedi, toplamdan düşüyor ({len(out):,} satırın "
-              f"%{bad.mean()*100:.1f}'i).")
+    # Vardiya metni → slotlar
+    vardiyalar = df[cols['shift']].astype(str).unique()
+    slot_map = {v: shift_slots(v) for v in vardiyalar}
+    cozulmeyen = [v for v, s in slot_map.items() if not s]
+    if cozulmeyen and verbose:
+        print(f"  ℹ PLAN: vardiya olarak okunamayan {len(cozulmeyen)} değer "
+              f"(off/izin sayıldı): {cozulmeyen[:8]}")
 
-    return out.groupby(['data_date', 'slot_30'], as_index=False).sum()
+    df['slot_30'] = df[cols['shift']].astype(str).map(slot_map)
+    df = df.explode('slot_30').dropna(subset=['slot_30'])
 
+    # Slot × kuyruk bazında tekil agent sayısı
+    plan = (df.groupby(['data_date', 'slot_30', 'queue'])[cols['agent']]
+              .nunique().rename('kisi').reset_index())
+    mesai = (df[df['mesai']].groupby(['data_date', 'slot_30', 'queue'])[cols['agent']]
+               .nunique().rename('mesai').reset_index())
 
-def prepare_actual_calls_30(df_actual, actual_cols=None):
-    """Gerçekleşen çağrıları 30dk'ya toplar."""
-    cols = {**DEFAULT_ACTUAL_COLS, **(actual_cols or {})}
-    return _aggregate_30(df_actual, cols, 'actual', 'ACTUAL')
-
-
-def prepare_forecast_calls_30(df_forecast, forecast_cols=None):
-    """Forecast çağrılarını 30dk'ya toplar."""
-    cols = {**DEFAULT_FORECAST_COLS, **(forecast_cols or {})}
-    return _aggregate_30(df_forecast, cols, 'forecast', 'FORECAST')
-
-
-# ---------------------------------------------------------------------------
-# Karşılaştırma
-# ---------------------------------------------------------------------------
-
-def build_comparison(df_actual, df_forecast, year=2026, month=8,
-                     actual_cols=None, forecast_cols=None,
-                     interval_style='start', only_actual_days=True,
-                     verbose=True):
-    """Ayın günleri × 48 slot için forecast/actual tablosu üretir.
-
-    interval_style: 'start' → '10:30'  |  'range' → '10:30-11:00'
-    only_actual_days: True ise actual'ı hiç olmayan günler tablodan çıkarılır
-        (ay bitmeden koşulduğunda ilerideki günler sapmayı ve MAPE'yi bozmasın).
-        False dersen ay tam ızgara olarak gelir, eksik günler 0 ile dolar.
-    Gün içindeki eksik slotlar her hâlükârda 0 ile doldurulur.
-    """
-    df_a = prepare_actual_calls_30(df_actual, actual_cols)
-    df_f = prepare_forecast_calls_30(df_forecast, forecast_cols)
-
-    # Ayın tam ızgarası — eksik gün/slot sessizce kaybolmasın
+    # Ayın tam ızgarası
     first = pd.Timestamp(year=year, month=month, day=1)
     all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
-    grid = pd.MultiIndex.from_product(
+    out = pd.MultiIndex.from_product(
         [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
 
-    df = (grid
-          .merge(df_f, on=['data_date', 'slot_30'], how='left')
-          .merge(df_a, on=['data_date', 'slot_30'], how='left'))
-
-    value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
-    df[value_cols] = df[value_cols].fillna(0).round().astype(int)
-
-    # Actual'ı hiç olmayan günleri karşılaştırma dışında bırak
-    gunluk_actual = df.groupby('data_date')[[f"actual_{q}" for q in QUEUES]].sum().sum(axis=1)
-    bos_gunler = list(gunluk_actual[gunluk_actual == 0].index)
-    if only_actual_days and bos_gunler:
-        df = df[~df['data_date'].isin(bos_gunler)]
-        if verbose:
-            print(f"  ℹ actual'ı tamamen boş {len(bos_gunler)} gün "
-                  f"(karşılaştırmaya alınmadı): "
-                  f"{', '.join(d.strftime('%d.%m.%Y') for d in bos_gunler)}")
-
-    # Sapma % — her kuyruğun forecast/actual çiftinin hemen ardına
-    # (+ : forecast fazla tahmin etmiş | actual 0 ise 0.0)
     for q in QUEUES:
-        f, a = df[f"forecast_{q}"], df[f"actual_{q}"]
-        df[f"sapma_{q}"] = ((f - a) / a.where(a != 0) * 100).round(1).fillna(0.0)
+        for src, prefix in ((plan, 'plan'), (mesai, 'mesai')):
+            col = 'kisi' if prefix == 'plan' else 'mesai'
+            sub = src[src['queue'] == q][['data_date', 'slot_30', col]]
+            sub = sub.rename(columns={col: f"{prefix}_{q}"})
+            out = out.merge(sub, on=['data_date', 'slot_30'], how='left')
 
-    if interval_style == 'range':
-        nxt = {s: SLOTS_30[(i + 1) % len(SLOTS_30)] for i, s in enumerate(SLOTS_30)}
-        df['interval'] = df['slot_30'] + '-' + df['slot_30'].map(nxt)
-    else:
-        df['interval'] = df['slot_30']
+    value_cols = [f"{p}_{q}" for q in QUEUES for p in ('plan', 'mesai')]
+    out[value_cols] = out[value_cols].fillna(0).astype(int)
 
-    df = df.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
-    df = df[['data_date', 'interval',
-             'forecast_kitle', 'actual_kitle', 'sapma_kitle',
-             'forecast_kurumsal', 'actual_kurumsal', 'sapma_kurumsal',
-             'forecast_gold', 'actual_gold', 'sapma_gold']]
+    out['interval'] = out['slot_30']
+    out = out.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+    out = out[['data_date', 'interval'] +
+              [f"plan_{q}" for q in QUEUES] + [f"mesai_{q}" for q in QUEUES]]
 
     if verbose:
-        _print_summary(df, df_a, df_f, all_days, year, month)
+        _print_plan_summary(out, all_days)
+    return out
 
+
+def _print_plan_summary(out, all_days):
+    print(f"VARDİYA PLANI — SLOT BAZLI KİŞİ  |  {len(out):,} satır "
+          f"({len(all_days)} gün × {len(SLOTS_30)} slot)")
+    satirlar = []
+    for q in QUEUES:
+        s = out[f"plan_{q}"]
+        tepe = out.loc[s.idxmax()] if s.max() else None
+        satirlar.append({
+            'kuyruk': q,
+            'tepe_kisi': int(s.max()),
+            'tepe_saat': tepe['interval'] if tepe is not None else '—',
+            'ort_kisi_saat_gun': round(
+                out.groupby('data_date')[f"plan_{q}"].sum().mean() / 2),
+            'mesai_payi_%': round(out[f"mesai_{q}"].sum() / s.sum() * 100, 1)
+                            if s.sum() else 0.0,
+        })
+    ozet = pd.DataFrame(satirlar)
+    show(ozet)
+
+    bos = out.groupby('data_date')[[f"plan_{q}" for q in QUEUES]].sum().sum(axis=1)
+    if (bos == 0).any():
+        gunler = ', '.join(bos[bos == 0].index.strftime('%d.%m'))
+        print(f"  ⚠ planda hiç kişi olmayan günler: {gunler}")
+    return ozet
+
+
+# ---------------------------------------------------------------------------
+# MODEL TARAFI — {data_date, kuyruk, vardiya, kisi, company}
+# ---------------------------------------------------------------------------
+
+def build_model_coverage(df_model, year=2026, month=8, model_cols=None,
+                         company='inhouse', verbose=True):
+    """Modelin vardiya bazlı kişi sayılarını slot ızgarasına açar.
+
+    Plan tarafıyla AYNI shift_slots parser'ını kullanır — iki taraf arasında
+    vardiya→slot yöntem farkı oluşmaz.
+
+    Çıktı: data_date, interval, model_kitle, model_kurumsal, model_gold
+    """
+    cols = {**DEFAULT_MODEL_COLS, **(model_cols or {})}
+    resolved = {k: _resolve_col(df_model, v) for k, v in cols.items()}
+
+    zorunlu = ['date', 'queue', 'shift', 'kisi']
+    eksik = [cols[k] for k in zorunlu if resolved[k] is None]
+    if eksik:
+        raise KeyError(f"MODEL: şu kolon(lar) yok: {eksik}  |  "
+                       f"mevcut: {list(df_model.columns)}")
+
+    df = df_model.copy()
+    df['data_date'] = _to_date_series(df[resolved['date']]).dt.normalize()
+    df['queue'] = _normalize_queue(df[resolved['queue']])
+    df['kisi'] = pd.to_numeric(df[resolved['kisi']], errors='coerce').fillna(0)
+
+    # Company filtresi
+    if company and resolved['company'] is not None:
+        c = df[resolved['company']].astype(str).str.strip().str.lower()
+        n0 = len(df)
+        df = df[c == str(company).lower()]
+        if verbose and len(df) < n0:
+            print(f"  ℹ MODEL: company='{company}' filtresi — "
+                  f"{n0 - len(df):,} satır elendi ({len(df):,} kaldı).")
+    elif company and verbose:
+        print(f"  ℹ MODEL: company kolonu yok, filtre uygulanmadı.")
+
+    n0 = len(df)
+    df = df[(df['data_date'].dt.year == year) & (df['data_date'].dt.month == month)]
+    if verbose and len(df) < n0:
+        print(f"  ℹ MODEL: {n0 - len(df):,} satır {year}/{month:02d} dışında, elendi.")
+
+    bilinmeyen = df[df['queue'].isna()][resolved['queue']].dropna().unique()
+    if len(bilinmeyen):
+        print(f"  ⚠ MODEL: tanınmayan kuyruk değerleri elendi: {list(bilinmeyen)[:10]}")
+    df = df[df['queue'].notna()]
+
+    slot_map = {v: shift_slots(v) for v in df[resolved['shift']].astype(str).unique()}
+    cozulmeyen = [v for v, s in slot_map.items() if not s]
+    if cozulmeyen:
+        print(f"  ⚠ MODEL: vardiya olarak okunamayan {len(cozulmeyen)} değer "
+              f"(kapsamaya girmedi): {cozulmeyen[:8]}")
+
+    df['slot_30'] = df[resolved['shift']].astype(str).map(slot_map)
+    df = df.explode('slot_30').dropna(subset=['slot_30'])
+
+    model = (df.groupby(['data_date', 'slot_30', 'queue'])['kisi']
+               .sum().rename('kisi').reset_index())
+
+    first = pd.Timestamp(year=year, month=month, day=1)
+    all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
+    out = pd.MultiIndex.from_product(
+        [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
+
+    for q in QUEUES:
+        sub = model[model['queue'] == q][['data_date', 'slot_30', 'kisi']]
+        out = out.merge(sub.rename(columns={'kisi': f"model_{q}"}),
+                        on=['data_date', 'slot_30'], how='left')
+
+    value_cols = [f"model_{q}" for q in QUEUES]
+    out[value_cols] = out[value_cols].fillna(0).round().astype(int)
+    out['interval'] = out['slot_30']
+    out = out.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+    out = out[['data_date', 'interval'] + value_cols]
+
+    if verbose:
+        print("MODEL kapsama — tepe kişi: " +
+              '  '.join(f"{q}={int(out[f'model_{q}'].max())}" for q in QUEUES))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# KARŞILAŞTIRMA
+# ---------------------------------------------------------------------------
+
+def compare_plan_vs_model(df_plan_cov, df_model_cov, verbose=True):
+    """Slot bazında model ↔ plan karşılaştırması.
+
+    Çıktı: data_date, interval, her kuyruk için model_{q}, plan_{q}, fark_{q}
+    (fark = plan - model; eksi ise modelin dediğinden az kişi konmuş)
+    """
+    df = df_model_cov.merge(df_plan_cov, on=['data_date', 'interval'], how='outer')
+
+    cols = ['data_date', 'interval']
+    for q in QUEUES:
+        for c in (f"model_{q}", f"plan_{q}", f"mesai_{q}"):
+            if c not in df.columns:
+                df[c] = 0
+        df[[f"model_{q}", f"plan_{q}", f"mesai_{q}"]] = \
+            df[[f"model_{q}", f"plan_{q}", f"mesai_{q}"]].fillna(0).astype(int)
+        df[f"fark_{q}"] = df[f"plan_{q}"] - df[f"model_{q}"]
+        cols += [f"model_{q}", f"plan_{q}", f"fark_{q}"]
+
+    df = df.sort_values(['data_date', 'interval'])[cols].reset_index(drop=True)
+    if verbose:
+        _print_compare_summary(df)
     return df
 
 
-def _print_summary(df, df_a, df_f, all_days, year, month):
-    """Kapsanan gün bilgisi + kuyruk bazlı toplam sapma tablosu."""
-    kapsanan = df['data_date'].nunique()
-    print(f"FORECAST ↔ ACTUAL — {year}/{month:02d}  |  {len(df):,} satır "
-          f"({kapsanan}/{len(all_days)} gün × {len(SLOTS_30)} slot)")
-
-    # Karşılaştırılan günlerde forecast tarafı eksikse bu ayrı bir sorun
-    kapsanan_gunler = set(df['data_date'].unique())
-    f_yok = sorted(kapsanan_gunler - set(df_f['data_date'].unique()))
-    if f_yok:
-        print(f"  ⚠ FORECAST'ta veri olmayan {len(f_yok)} gün (0 sayıldı): "
-              f"{', '.join(pd.Timestamp(d).strftime('%d.%m') for d in f_yok)}")
-
-    ozet = pd.DataFrame([{
-        'kuyruk': q,
-        'forecast': int(df[f"forecast_{q}"].sum()),
-        'actual': int(df[f"actual_{q}"].sum()),
-        'fark': int(df[f"forecast_{q}"].sum() - df[f"actual_{q}"].sum()),
-        'sapma_%': round((df[f"forecast_{q}"].sum() - df[f"actual_{q}"].sum())
-                         / df[f"actual_{q}"].sum() * 100, 1)
-                   if df[f"actual_{q}"].sum() else 0.0,
-    } for q in QUEUES])
-    show(ozet)
-    return ozet
-
-
-DAY_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz']
-
-
-def build_daily_comparison(df_cmp, verbose=True):
-    """30dk'lık karşılaştırma tablosunu gün bazına toplar.
-
-    Girdi: build_comparison çıktısı (df_cmp) — böylece iki tablo her zaman
-    tutarlı kalır, ayrı bir toplama mantığı devreye girmez.
-
-    Çıktı kolonları (her kuyruk için):
-        forecast_{q}, actual_{q}, fark_{q}, sapma_{q}   (sapma = % , +: forecast fazla)
-    """
-    value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
-    d = df_cmp.groupby('data_date', as_index=False)[value_cols].sum()   # slot sapmaları toplanmaz
-
-    d['gun'] = pd.to_datetime(d['data_date']).dt.weekday.map(lambda i: DAY_TR[i])
-
-    cols = ['data_date', 'gun']
-    for q in QUEUES:
-        f, a = d[f"forecast_{q}"], d[f"actual_{q}"]
-        d[f"fark_{q}"] = f - a
-        d[f"sapma_{q}"] = ((f - a) / a.where(a != 0) * 100).round(1).fillna(0.0)
-        cols += [f"forecast_{q}", f"actual_{q}", f"fark_{q}", f"sapma_{q}"]
-
-    d = d[cols].sort_values('data_date').reset_index(drop=True)
-
-    if verbose:
-        _print_daily_summary(d)
-    return d
-
-
-def _gun_etiketi(row, q):
-    """'12.08 (Çar) +0.3%' biçiminde tek satırlık gün etiketi."""
-    return (f"{pd.Timestamp(row['data_date']).strftime('%d.%m')} "
-            f"({row['gun']}) {row[f'sapma_{q}']:+.1f}%")
-
-
-def _print_daily_summary(d):
-    """MAPE + en iyi/en kötü gün tablosu (DataFrame olarak gösterilir)."""
-    if not len(d):
-        return None
+def _print_compare_summary(df):
+    print("MODEL ↔ PLAN  (fark = plan - model  |  eksik/fazla slot: modelin kişi "
+          "istediği slotlarda)")
     satirlar = []
     for q in QUEUES:
-        sapma = d[f"sapma_{q}"].abs()
+        mo, pl, fa = df[f"model_{q}"], df[f"plan_{q}"], df[f"fark_{q}"]
+        aktif = mo > 0
         satirlar.append({
             'kuyruk': q,
-            'MAPE_%': round(sapma.mean(), 1),
-            'en_iyi_gun': _gun_etiketi(d.loc[sapma.idxmin()], q),
-            'en_kotu_gun': _gun_etiketi(d.loc[sapma.idxmax()], q),
+            'model_kisi_slot': int(mo.sum()),
+            'plan_kisi_slot': int(pl.sum()),
+            'fark': int(fa.sum()),
+            'eksik_slot': int((fa[aktif] < 0).sum()),
+            'fazla_slot': int((fa[aktif] > 0).sum()),
         })
     ozet = pd.DataFrame(satirlar)
-    print("GÜNLÜK FORECAST ↔ ACTUAL  (MAPE = günlük mutlak sapmaların ortalaması)")
     show(ozet)
-
-    tam = d[(d[[f"actual_{q}" for q in QUEUES]].sum(axis=1) == 0)]
-    if len(tam):
-        gunler = ', '.join(pd.to_datetime(tam['data_date']).dt.strftime('%d.%m'))
-        print(f"  ⚠ actual'ı tamamen boş {len(tam)} gün: {gunler}")
     return ozet
 
 
-def gun_siralama(df_gunluk, queue='kitle', n=5, en_kotu=False):
-    """Bir kuyruk için sapması en küçük (veya en büyük) n günü döndürür.
-
-    queue    : 'kitle' | 'kurumsal' | 'gold'
-    en_kotu  : False → en isabetli günler | True → en çok sapan günler
-    """
-    d = df_gunluk.copy()
-    d['abs_sapma'] = d[f"sapma_{queue}"].abs()
-    d = d.sort_values('abs_sapma', ascending=not en_kotu)
-    cols = ['data_date', 'gun', f"forecast_{queue}", f"actual_{queue}",
-            f"fark_{queue}", f"sapma_{queue}"]
-    return d[cols].head(n).reset_index(drop=True)
-
-
-def save_comparison(df, df_daily=None, path=None, year=2026, month=8):
-    """Excel'e yazar. df_daily verilirse ikinci sayfa olarak eklenir."""
-    path = path or f"forecast_vs_actual_{year}_{month:02d}.xlsx"
-
-    def _fmt(x):
-        out = x.copy()
-        out['data_date'] = pd.to_datetime(out['data_date']).dt.strftime('%Y-%m-%d')
-        return out
-
-    with pd.ExcelWriter(path) as writer:
-        _fmt(df).to_excel(writer, sheet_name='30dk', index=False)
-        if df_daily is not None:
-            _fmt(df_daily).to_excel(writer, sheet_name='gunluk', index=False)
-
-    sayfa = '30dk + gunluk' if df_daily is not None else '30dk'
-    print(f"✓ Kaydedildi: {path}  ({sayfa})")
-    return path
+def summarize_by_interval(df_cmp_plan):
+    """Saat bazında ortalama: hangi slotlarda sistematik eksik/fazla var."""
+    cols = [c for q in QUEUES for c in (f"model_{q}", f"plan_{q}", f"fark_{q}")]
+    out = df_cmp_plan.groupby('interval')[cols].mean().round(1)
+    return out.reset_index()
 
 
 # %% [HÜCRE 2] — KULLANIM
-# df_actual ve df_forecast akışta hazırsa bu hücre doğrudan çalışır.
 
 YEAR = 2026
 MONTH = 8
 
-if 'df_actual' in globals() and 'df_forecast' in globals():
-    df_cmp = build_comparison(df_actual, df_forecast, year=YEAR, month=MONTH)
-    show(df_cmp, 10)
+if 'df_plan' in globals():
+    df_plan_cov = build_plan_coverage(df_plan, year=YEAR, month=MONTH)
+    show(df_plan_cov, 10)
 else:
-    print("df_actual / df_forecast bulunamadı — önce tabloları getir, sonra bu hücreyi çalıştır.")
+    print("df_plan bulunamadı — vardiya planı tablosunu getirip bu hücreyi çalıştır.")
 
 
-# %% [HÜCRE 3] — GÜNLÜK KARŞILAŞTIRMA
+# %% [HÜCRE 3] — MODEL KAPSAMASI + KARŞILAŞTIRMA
+# df_model: data_date, kuyruk, vardiya, kisi, company  (inhouse)
 
-if 'df_cmp' in globals():
-    df_gunluk = build_daily_comparison(df_cmp)
-    show(df_gunluk)
+if 'df_model' in globals() and 'df_plan_cov' in globals():
+    df_model_cov = build_model_coverage(df_model, year=YEAR, month=MONTH,
+                                        company='inhouse')
+    df_cmp_plan = compare_plan_vs_model(df_plan_cov, df_model_cov)
+    show(df_cmp_plan, 10)
 else:
-    print("df_cmp yok — önce HÜCRE 2'yi çalıştır.")
+    print("df_model veya df_plan_cov yok — önce HÜCRE 2'yi ve model tablosunu hazırla.")
 
 
-# %% [HÜCRE 4] — EN İSABETLİ / EN ÇOK SAPAN GÜNLER
+# %% [HÜCRE 4] — SAAT BAZINDA ORTALAMA (sistematik eksik/fazla)
 
-if 'df_gunluk' in globals():
-    for q in QUEUES:
-        print(f"— {q}: en isabetli 5 gün")
-        show(gun_siralama(df_gunluk, queue=q, n=5))
+if 'df_cmp_plan' in globals():
+    show(summarize_by_interval(df_cmp_plan))
 else:
-    print("df_gunluk yok — önce HÜCRE 3'ü çalıştır.")
-
-
-# %% [HÜCRE 5] — EXCEL'E KAYDET (opsiyonel)
-# save_comparison(df_cmp, df_gunluk, year=YEAR, month=MONTH)
+    print("df_cmp_plan yok — önce HÜCRE 3'ü çalıştır.")
