@@ -31,6 +31,26 @@ import datetime as dt
 
 import pandas as pd
 
+try:                                   # Jupyter'da zengin tablo, terminalde düz metin
+    from IPython.display import display as _display
+except ImportError:                     # pragma: no cover
+    _display = None
+
+
+def show(df, n=None):
+    """DataFrame'i Jupyter tablosu olarak gösterir (terminalde metne düşer).
+
+    print(df.to_string()) satırları ekrana sığmayınca alta kaydığı için
+    tablolar hep bu fonksiyondan geçiriliyor.
+    """
+    x = df.head(n) if n else df
+    if _display is not None:
+        _display(x)
+    else:
+        print(x.to_string(index=False))
+    return x
+
+
 SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ('00', '30')]
 
 QUEUES = ('kitle', 'kurumsal', 'gold')
@@ -212,11 +232,9 @@ def build_comparison(df_actual, df_forecast, year=2026, month=8,
 
 
 def _print_summary(df, df_a, df_f, all_days, year, month):
-    """Eksik gün ve kuyruk bazlı sapma özeti — sessiz veri kaybını yakalamak için."""
-    print(f"\n{'='*70}")
-    print(f"FORECAST ↔ ACTUAL KARŞILAŞTIRMA — {year}/{month:02d}")
-    print(f"{'='*70}")
-    print(f"  Satır: {len(df):,}  ({len(all_days)} gün × {len(SLOTS_30)} slot)")
+    """Eksik gün uyarıları + kuyruk bazlı toplam sapma tablosu."""
+    print(f"FORECAST ↔ ACTUAL — {year}/{month:02d}  |  {len(df):,} satır "
+          f"({len(all_days)} gün × {len(SLOTS_30)} slot)")
 
     for label, src in (('ACTUAL', df_a), ('FORECAST', df_f)):
         have = set(src['data_date'].unique())
@@ -224,18 +242,18 @@ def _print_summary(df, df_a, df_f, all_days, year, month):
         if miss:
             print(f"  ⚠ {label}'da veri olmayan {len(miss)} gün: "
                   f"{', '.join(d.strftime('%d.%m') for d in miss)}")
-    if all(len(set(src['data_date'].unique())) >= len(all_days) for src in (df_a, df_f)):
-        print(f"  ✓ Her iki tarafta da ayın {len(all_days)} günü mevcut.")
 
-    print(f"\n  {'Kuyruk':<10} {'Forecast':>14} {'Actual':>14} {'Fark':>12} {'Sapma':>9}")
-    print(f"  {'-'*10} {'-'*14} {'-'*14} {'-'*12} {'-'*9}")
-    for q in QUEUES:
-        f_sum = int(df[f"forecast_{q}"].sum())
-        a_sum = int(df[f"actual_{q}"].sum())
-        diff = f_sum - a_sum
-        pct = (diff / a_sum * 100) if a_sum else 0.0
-        print(f"  {q:<10} {f_sum:>14,} {a_sum:>14,} {diff:>+12,} {pct:>8.1f}%")
-    print()
+    ozet = pd.DataFrame([{
+        'kuyruk': q,
+        'forecast': int(df[f"forecast_{q}"].sum()),
+        'actual': int(df[f"actual_{q}"].sum()),
+        'fark': int(df[f"forecast_{q}"].sum() - df[f"actual_{q}"].sum()),
+        'sapma_%': round((df[f"forecast_{q}"].sum() - df[f"actual_{q}"].sum())
+                         / df[f"actual_{q}"].sum() * 100, 1)
+                   if df[f"actual_{q}"].sum() else 0.0,
+    } for q in QUEUES])
+    show(ozet)
+    return ozet
 
 
 DAY_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz']
@@ -269,21 +287,34 @@ def build_daily_comparison(df_cmp, verbose=True):
     return d
 
 
+def _gun_etiketi(row, q):
+    """'12.08 (Çar) +0.3%' biçiminde tek satırlık gün etiketi."""
+    return (f"{pd.Timestamp(row['data_date']).strftime('%d.%m')} "
+            f"({row['gun']}) {row[f'sapma_{q}']:+.1f}%")
+
+
 def _print_daily_summary(d):
-    """Günlük tablonun kısa özeti — en çok sapan günler ve MAPE."""
-    print(f"\n{'='*70}")
-    print("GÜNLÜK FORECAST ↔ ACTUAL")
-    print(f"{'='*70}")
+    """MAPE + en iyi/en kötü gün tablosu (DataFrame olarak gösterilir)."""
+    if not len(d):
+        return None
+    satirlar = []
     for q in QUEUES:
-        sapma = d[f"sapma_{q}"]
-        mape = sapma.abs().mean()
-        worst = d.loc[sapma.abs().idxmax()] if len(d) else None
-        line = f"  {q:<10} ortalama mutlak sapma (MAPE): {mape:5.1f}%"
-        if worst is not None:
-            line += (f"   |  en kötü gün: "
-                     f"{pd.Timestamp(worst['data_date']).strftime('%d.%m')} "
-                     f"({worst['gun']}) {worst[f'sapma_{q}']:+.1f}%")
-        print(line)
+        sapma = d[f"sapma_{q}"].abs()
+        satirlar.append({
+            'kuyruk': q,
+            'MAPE_%': round(sapma.mean(), 1),
+            'en_iyi_gun': _gun_etiketi(d.loc[sapma.idxmin()], q),
+            'en_kotu_gun': _gun_etiketi(d.loc[sapma.idxmax()], q),
+        })
+    ozet = pd.DataFrame(satirlar)
+    print("GÜNLÜK FORECAST ↔ ACTUAL  (MAPE = günlük mutlak sapmaların ortalaması)")
+    show(ozet)
+
+    tam = d[(d[[f"actual_{q}" for q in QUEUES]].sum(axis=1) == 0)]
+    if len(tam):
+        gunler = ', '.join(pd.to_datetime(tam['data_date']).dt.strftime('%d.%m'))
+        print(f"  ⚠ actual'ı tamamen boş {len(tam)} gün: {gunler}")
+    return ozet
 
     tam = d[(d[[f"actual_{q}" for q in QUEUES]].sum(axis=1) == 0)]
     if len(tam):
@@ -319,7 +350,7 @@ MONTH = 8
 
 if 'df_actual' in globals() and 'df_forecast' in globals():
     df_cmp = build_comparison(df_actual, df_forecast, year=YEAR, month=MONTH)
-    print(df_cmp.head(10).to_string(index=False))
+    show(df_cmp, 10)
 else:
     print("df_actual / df_forecast bulunamadı — önce tabloları getir, sonra bu hücreyi çalıştır.")
 
@@ -328,7 +359,7 @@ else:
 
 if 'df_cmp' in globals():
     df_gunluk = build_daily_comparison(df_cmp)
-    print(df_gunluk.to_string(index=False))
+    show(df_gunluk)
 else:
     print("df_cmp yok — önce HÜCRE 2'yi çalıştır.")
 
