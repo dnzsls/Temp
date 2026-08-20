@@ -2234,6 +2234,9 @@ else:
 #   [3] HAFTA BAZLI    — takım bütünlüğü (H19) hesaba katılınca yeterli mi
 _gece_t = set(GECE_BASLANGIC)                       # {"00:00", "24:00"}
 _bilinmeyen_l = globals().get("_bilinmeyen", [])    # H14B'den (yoksa boş)
+if not isinstance(_bilinmeyen_l, (list, tuple, set)):   # H22 aynı adı INT olarak
+    _bilinmeyen_l = []                                  # kullanıyor → eski koşudan
+                                                        # kalmışsa yanlış okumayalım
 
 print("=" * 78)
 print("H19F — GECE KAPASİTE RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
@@ -2740,6 +2743,33 @@ if TESHIS_MODU and _teshis:                        # varsayımlar → INFEASIBLE
           f"{[_ad for _ad, _ in _teshis][:6]}{' ...' if len(_teshis) > 6 else ''}")
 solver = cp_model.CpSolver()
 solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya göre artır)
+
+# ── SİMETRİ KIRMA ─────────────────────────────────────────────────────
+# SORUN (çözücü logundan ölçüldü): [Symmetry] 7575 orbits on 84434 variables.
+# "Orbit" = birbirinin yerine geçebilen değişken grubu. Bu modelde agentlar
+# büyük ölçüde BİRBİRİNİN AYNI: aynı takımda, aynı kısıtlara tabi iki agentı
+# yer değiştirmek yeni bir çözüm üretmiyor ama çözücü için AYRI bir düğüm.
+# Ayrılma hakkı olan ~97 agent (62 kıdemsiz + 35 sabahçı) × 5 hafta × 3 tip
+# → milyonlarca DENK çözüm. Çözücü bunların arasında dolaşıyor; ne çözümü
+# sabitleyebiliyor ne alt sınırı yükseltebiliyor → 2700 sn sonunda UNKNOWN.
+# (Model FİZİBİL olduğu FIZIBILITE_MODU ile doğrulandı — sorun arama.)
+#
+# symmetry_level: CP-SAT orbitleri ZATEN buluyor; bu ayar onları ne kadar
+#   agresif KULLANACAĞINI söylüyor.
+#     2 = varsayılan   3 = daha fazla presolve kırması
+#     4 = en agresif (orbital sabitleme + arama sırasında kullanım)
+#   Riski yok: simetri kırma çözüm KÜMESİNİ daraltmaz, sadece birbirinin
+#   aynı olan çözümlerden birini seçer. Optimal değer değişmez.
+SIMETRI_SEVIYE = 4                                 # 2 = OR-Tools varsayılanı
+solver.parameters.symmetry_level = SIMETRI_SEVIYE
+
+# İKİNCİ KALDIRAÇ (şimdilik KAPALI, varsayılan davranış): simetriyi LP
+# gevşemesinde de kullan. Bu modelin bilinen zayıf noktası tam olarak LP
+# gevşemesi — H19D'de yazıldığı gibi kesirli y ("takımın yarısı 08:00'de")
+# kötü tahsisi bedavaymış gibi gösteriyor, alt sınır yükselmiyor.
+# UNKNOWN devam ederse ilk denenecek şey bu. Deneysel bir seçenek olduğu
+# için varsayılanı DEĞİŞTİRMİYORUM — bilinçli açılsın.
+# solver.parameters.use_symmetry_in_lp = True
 solver.parameters.max_time_in_seconds = COZUM_SURE_SN   # en iyi BULUNAN'ı al (optimal şart değil)
 solver.parameters.log_search_progress = True       # ilerlemeyi terminale bas (feasible bulundu mu görürsün)
 status = solver.Solve(model)
