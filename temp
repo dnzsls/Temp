@@ -778,7 +778,7 @@ def hakem_tablosu(df_kitle, df_act30, aht, esik=2, verbose=True):
 
     fark = df['plan_sapma'].abs() - df['model_sapma'].abs()
     df['kazanan'] = 'BERABERE'
-    df.loc[fark < -esik, 'kazanan'] = 'BEN'
+    df.loc[fark < -esik, 'kazanan'] = 'PLAN'
     df.loc[fark > esik, 'kazanan'] = 'MODEL'
     df.loc[df['ihtiyac'] == 0, 'kazanan'] = '—'        # çağrı yok, kıyas anlamsız
 
@@ -799,14 +799,14 @@ def skor_ozeti(df_hakem, esik=2):
         return None
 
     sayim = kiyaslanan['kazanan'].value_counts()
-    ben, model = int(sayim.get('BEN', 0)), int(sayim.get('MODEL', 0))
+    plan, model = int(sayim.get('PLAN', 0)), int(sayim.get('MODEL', 0))
     berabere = int(sayim.get('BERABERE', 0))
 
     print(f"SKOR ({n:,} slot, berabere eşiği ±{esik} kişi)")
-    print(f"  BEN      {ben:>6,}  (%{ben/n*100:.0f})")
+    print(f"  PLAN     {plan:>6,}  (%{plan/n*100:.0f})")
     print(f"  MODEL    {model:>6,}  (%{model/n*100:.0f})")
     print(f"  BERABERE {berabere:>6,}  (%{berabere/n*100:.0f})")
-    kazanan = 'BEN' if ben > model else ('MODEL' if model > ben else 'BERABERE')
+    kazanan = 'PLAN' if plan > model else ('MODEL' if model > plan else 'BERABERE')
     print(f"  → genel: {kazanan}")
 
     ozet = pd.DataFrame([{
@@ -815,7 +815,7 @@ def skor_ozeti(df_hakem, esik=2):
         'ort_sapma': round(kiyaslanan[kol].mean(), 1),
         'fazla_slot': int((kiyaslanan[kol] > 0).sum()),
         'eksik_slot': int((kiyaslanan[kol] < 0).sum()),
-    } for etiket, kol in (('BEN (plan)', 'plan_sapma'),
+    } for etiket, kol in (('PLAN', 'plan_sapma'),
                           ('MODEL', 'model_sapma'))])
     show(ozet)
     return ozet
@@ -832,7 +832,7 @@ def hakem_gunluk(df_hakem):
         plan_mutlak_sapma=('plan_sapma', lambda s: s.abs().sum()),
     ).reset_index()
     g['kazanan'] = g.apply(
-        lambda r: 'BEN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
+        lambda r: 'PLAN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
         else ('MODEL' if r['model_mutlak_sapma'] < r['plan_mutlak_sapma']
               else 'BERABERE'), axis=1)
     g['gun'] = pd.to_datetime(g['data_date']).dt.weekday.map(
@@ -842,7 +842,7 @@ def hakem_gunluk(df_hakem):
 
 
 def hakem_saat(df_hakem):
-    """Saat bazında kazanan — hangi saatlerde sen daha iyisin."""
+    """Saat bazında kazanan — hangi saatlerde plan daha iyi."""
     d = df_hakem[df_hakem['kazanan'] != '—'].copy()
     g = d.groupby('interval').agg(
         ihtiyac=('ihtiyac', 'mean'),
@@ -852,7 +852,7 @@ def hakem_saat(df_hakem):
         plan_mutlak_sapma=('plan_sapma', lambda s: s.abs().mean()),
     ).round(1).reset_index()
     g['kazanan'] = g.apply(
-        lambda r: 'BEN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
+        lambda r: 'PLAN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
         else ('MODEL' if r['model_mutlak_sapma'] < r['plan_mutlak_sapma']
               else 'BERABERE'), axis=1)
     return g
@@ -1056,7 +1056,7 @@ def rr_tablosu(df_kitle, df_act30, aht, esik_rr=0.05, cagri_adedi=CAGRI_ADEDI,
         m = (df[a] - 1).abs()
         p = (df[b] - 1).abs()
         kaz = pd.Series('BERABERE', index=df.index)
-        kaz[p < m - esik_rr] = 'BEN'
+        kaz[p < m - esik_rr] = 'PLAN'
         kaz[m < p - esik_rr] = 'MODEL'
         kaz[df['ihtiyac'] == 0] = '—'
         kaz[df[a].isna() | df[b].isna()] = '—'
@@ -1086,10 +1086,10 @@ def rr_skor(df_rr, esik_rr=0.05):
             'ort_rr_model': round(d[m_kol].mean(), 2),
             'ort_rr_plan': round(d[p_kol].mean(), 2),
             'MODEL_slot': int(s.get('MODEL', 0)),
-            'BEN_slot': int(s.get('BEN', 0)),
+            'PLAN_slot': int(s.get('PLAN', 0)),
             'BERABERE': int(s.get('BERABERE', 0)),
-            'genel': ('BEN' if s.get('BEN', 0) > s.get('MODEL', 0)
-                      else 'MODEL' if s.get('MODEL', 0) > s.get('BEN', 0)
+            'genel': ('PLAN' if s.get('PLAN', 0) > s.get('MODEL', 0)
+                      else 'MODEL' if s.get('MODEL', 0) > s.get('PLAN', 0)
                       else 'BERABERE'),
         })
     print(f"RR SKOR  (1.00 = ihtiyacı tam karşılama, berabere eşiği ±{esik_rr:.2f})")
@@ -1136,7 +1136,7 @@ def np_kazanan(rr_model, rr_plan, esik=0.05):
     m = (rr_model - 1).abs()
     p = (rr_plan - 1).abs()
     out = pd.Series('BERABERE', index=rr_model.index)
-    out[p < m - esik] = 'BEN'
+    out[p < m - esik] = 'PLAN'
     out[m < p - esik] = 'MODEL'
     return out
 
