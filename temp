@@ -1,3 +1,6 @@
 "Slot bazında model biraz önde, sapma büyüklüğünde plan biraz önde → pratikte başa baş"
 Modelin gerçek avantajı burada değil: fazla kadroyu daha az slotta eksiğe düşerek sağlıyor (eksik_slot 263 vs 372)
 Yani model hizmet riskini düşürüyor, plan maliyeti düşürüyor — asıl anlatılacak hikâye bu
+
+
+Model gün gün değil, hafta boyu sabit kadro kuruyor. Talep hafta içinde düştüğünde plan elle aşağı çekilebiliyor, model çekemiyor. Ağustos'un 2. haftasında fark buradan çıktı.
