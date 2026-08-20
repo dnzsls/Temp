@@ -7,7 +7,8 @@
 # GİRDİLER (hepsi bu notebook'ta):
 #   df_plan   — DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
 #   results   — monthly run pickle'ı (PKL_PATH)
-#   df_actual — data_date, min_time_period_value, kitle_nof_call …
+#   df_actual — data_date, min_time_period_value, line_based_main_group,
+#               resource_group_key, nof_call   (monthly run formatı)
 #   df_aht    — saat, sub_queue, line_based_main_group, weighted_avg_aht (ops.)
 #
 # Bu dosya veri çekmez, başka dosyaya bağımlı değildir. Sadece pandas.
@@ -885,9 +886,15 @@ def hakem_saat(df_hakem):
 
 import datetime as _dt
 
+# İki format da destekleniyor:
+#   GENİŞ : data_date, min_time_period_value, kitle_nof_call, …
+#   UZUN  : data_date, min_time_period_value, line_based_main_group,
+#           resource_group_key, nof_call      (monthly run formatı)
 DEFAULT_ACTUAL_COLS = {
     'date':     ['data_date', 'date', 'tarih'],
     'time':     ['min_time_period_value', 'interval', 'saat_dilimi'],
+    'group':    ['line_based_main_group'],
+    'calls':    ['nof_call', 'calls', 'cagri'],
     'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
     'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col'],
     'gold':     ['gold_nof_call', 'gold_nof_col', 'gold_total_call'],
@@ -918,17 +925,37 @@ def actual_calls_30(df_actual, year=2026, month=8, queue='kitle',
     cols = {**DEFAULT_ACTUAL_COLS, **(actual_cols or {})}
     d_col = _resolve_col(df_actual, cols['date'])
     t_col = _resolve_col(df_actual, cols['time'])
+    g_col = _resolve_col(df_actual, cols['group'])
+    n_col = _resolve_col(df_actual, cols['calls'])
     c_col = _resolve_col(df_actual, cols[queue])
-    eksik = [k for k, v in (('date', d_col), ('time', t_col), (queue, c_col))
-             if v is None]
+
+    uzun = g_col is not None and n_col is not None
+    eksik = [k for k, v in (('date', d_col), ('time', t_col)) if v is None]
+    if not uzun and c_col is None:
+        eksik.append(queue)
     if eksik:
         raise KeyError(f"ACTUAL: şu alan(lar) için kolon yok: {eksik}  |  "
                        f"mevcut: {list(df_actual.columns)}")
 
+    if uzun:                              # monthly run formatı (satır bazlı)
+        df = df_actual[df_actual[g_col].astype(str).str.strip().str.lower()
+                       == f"{queue}_cagrilar"]
+        if df.empty:
+            mevcut = sorted(df_actual[g_col].dropna().astype(str).unique())
+            raise ValueError(f"ACTUAL: '{queue}_cagrilar' satırı yok. "
+                             f"Mevcut: {mevcut[:10]}")
+        deger = pd.to_numeric(df[n_col], errors='coerce').fillna(0)
+        if verbose:
+            print(f"  ℹ ACTUAL: uzun format ({g_col} = {queue}_cagrilar, "
+                  f"{len(df):,} satır)")
+    else:                                 # geniş format
+        df = df_actual
+        deger = pd.to_numeric(df[c_col], errors='coerce').fillna(0)
+
     out = pd.DataFrame({
-        'data_date': _to_date_series(df_actual[d_col]).dt.normalize(),
-        'interval': df_actual[t_col].map(_to_slot_30),
-        f"actual_{queue}": pd.to_numeric(df_actual[c_col], errors='coerce').fillna(0),
+        'data_date': _to_date_series(df[d_col]).dt.normalize(),
+        'interval': df[t_col].map(_to_slot_30),
+        f"actual_{queue}": deger.values,
     })
 
     bad = out['data_date'].isna() | out['interval'].isna()
@@ -998,8 +1025,9 @@ def aht_saatlik(df_aht, queue='kitle', df_sq_calls=None, verbose=True):
 DEFAULT_SQ_COLS = {
     'date':      ['data_date', 'date', 'tarih'],
     'time':      ['min_time_period_value', 'interval', 'saat_dilimi'],
-    'sub_queue': ['sub_queue', 'alt_kuyruk'],
+    'sub_queue': ['resource_group_key', 'sub_queue', 'alt_kuyruk'],
     'calls':     ['nof_call', 'calls', 'cagri', 'call_count'],
+    'group':     ['line_based_main_group'],
 }
 
 
@@ -1010,8 +1038,9 @@ def aht_slot_bazli(df_actual_sq, df_aht, queue='kitle', sq_cols=None,
     Modelin calculate_weighted_aht'i ile aynı mantık:
         aht_slot = Σ(çağrı_sq × aht_sq) / Σ(çağrı_sq)
 
-    df_actual_sq (uzun format): data_date, min_time_period_value,
-                                sub_queue, nof_call
+    df_actual_sq: df_actual'ın kendisi olabilir — uzun formatta
+                  (data_date, min_time_period_value, resource_group_key,
+                   line_based_main_group, nof_call) alt-kuyruk kırılımı zaten var
     df_aht                    : saat, sub_queue, line_based_main_group,
                                 weighted_avg_aht
 
@@ -1028,11 +1057,19 @@ def aht_slot_bazli(df_actual_sq, df_aht, queue='kitle', sq_cols=None,
         raise KeyError(f"ALT-KUYRUK: şu alan(lar) için kolon yok: {eksik}  |  "
                        f"mevcut: {list(df_actual_sq.columns)}")
 
+    kaynak = df_actual_sq
+    g_col = _resolve_col(kaynak, cols['group'])
+    if g_col is not None:                 # aynı tabloda diğer kuyruklar da varsa süz
+        kaynak = kaynak[kaynak[g_col].astype(str).str.strip().str.lower()
+                        == f"{queue}_cagrilar"]
+        if kaynak.empty:
+            raise ValueError(f"ALT-KUYRUK: '{queue}_cagrilar' satırı yok.")
+
     d = pd.DataFrame({
-        'data_date': _to_date_series(df_actual_sq[d_col]).dt.normalize(),
-        'interval': df_actual_sq[t_col].map(_to_slot_30),
-        'sub_queue': df_actual_sq[q_col].astype(str).str.strip(),
-        'calls': pd.to_numeric(df_actual_sq[c_col], errors='coerce').fillna(0),
+        'data_date': _to_date_series(kaynak[d_col]).dt.normalize(),
+        'interval': kaynak[t_col].map(_to_slot_30),
+        'sub_queue': kaynak[q_col].astype(str).str.strip(),
+        'calls': pd.to_numeric(kaynak[c_col], errors='coerce').fillna(0),
     })
     d['saat'] = d['interval'].str[:2].astype(int)
     d = d.groupby(['data_date', 'interval', 'saat', 'sub_queue'],
@@ -1295,8 +1332,9 @@ else:
 # AHT önceliği: alt-kuyruk kırılımı > saatlik df_aht > pickle kalibrasyonu
 _yok = _eksik('df_kitle', 'df_act30')
 if not _yok:
-    if 'df_actual_sq' in globals() and 'df_aht' in globals():
-        AHT = aht_slot_bazli(df_actual_sq, df_aht, queue='kitle')
+    if 'df_aht' in globals() and _resolve_col(df_actual, ['resource_group_key',
+                                                          'sub_queue']) is not None:
+        AHT = aht_slot_bazli(df_actual, df_aht, queue='kitle')
     elif 'df_aht' in globals():
         AHT = aht_saatlik(df_aht, queue='kitle')
     else:
@@ -1322,8 +1360,8 @@ else:
 
 _yok = _eksik('df_kitle', 'df_act30', 'df_aht')
 if not _yok:
-    if 'df_actual_sq' in globals():
-        AHT_KULLANILAN = aht_slot_bazli(df_actual_sq, df_aht, queue='kitle')
+    if _resolve_col(df_actual, ['resource_group_key', 'sub_queue']) is not None:
+        AHT_KULLANILAN = aht_slot_bazli(df_actual, df_aht, queue='kitle')
     else:
         AHT_KULLANILAN = aht_saatlik(df_aht, queue='kitle')
     df_rr = rr_tablosu(df_kitle, df_act30, aht=AHT_KULLANILAN, esik_rr=0.05)
