@@ -15,3 +15,11 @@ Model tarafı: 15:00–16:30 shrinkage/slot_cap ayarı gözden geçirilmeli, 100
 
 
 Plan ortalamada ihtiyacı tutturuyor ama gün içinde savruluyor: gece %60 eksik, öğleden sonra %35 fazla. Model daha dar bantta kalıyor — iki farklı RR yönteminde de sonuç aynı.
+
+Her iki plan da ihtiyacın üstünde çalışıyor; fark %10–20 bandında.
+Planın zayıf noktası uçlar: sabah 07:30–08:30 ve akşam 20:00–22:30'da %10–20 eksik, gece 04:00–06:00'da 2 kat fazla.
+Modelin zayıf noktası hafta içi esnememesi: talep düşen 13–14 Ağustos'ta %35 fazla kadroda kaldı.
+En yüksek kazançlı iki aksiyon
+
+Gece vardiya yapısı: 01:00–02:30 takviye, 04:00–06:00 azaltma (plan tarafı)
+Modelin haftaiçi stable kısıtına gün bazlı esneklik (model tarafı)
