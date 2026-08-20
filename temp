@@ -423,3 +423,4 @@ if 'df_cmp_plan' in globals():
     show(summarize_by_interval(df_cmp_plan))
 else:
     print("df_cmp_plan yok — önce HÜCRE 3'ü çalıştır.")
+ 
