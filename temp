@@ -1,10 +1,16 @@
 # =============================================================================
-# VARDİYA PLANI → SLOT BAZLI KİŞİ SAYISI (30 DK)  —  BAĞIMSIZ
+# PLAN ↔ MODEL ↔ GERÇEK ÇAĞRI  (KİTLE, 30 DK)  —  BAĞIMSIZ
 # =============================================================================
-# Amaç: agent bazlı vardiya planını, modelin çıktısıyla aynı dilde konuşan bir
-# tabloya çevirmek: her (gün × 30dk slot × kuyruk) için sahada kaç kişi var.
+# Amaç: planlamadan gelen kadro ile modelin (pickle) kadrosunu, GERÇEK çağrı
+# adetlerinden hesaplanan ihtiyaca göre kıyaslamak.
 #
-# Bu dosya veri çekmez, pipeline'a bağlı değildir. Sadece pandas.
+# GİRDİLER (hepsi bu notebook'ta):
+#   df_plan   — DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
+#   results   — monthly run pickle'ı (PKL_PATH)
+#   df_actual — data_date, min_time_period_value, kitle_nof_call …
+#   df_aht    — saat, sub_queue, line_based_main_group, weighted_avg_aht (ops.)
+#
+# Bu dosya veri çekmez, başka dosyaya bağımlı değildir. Sadece pandas.
 #
 # GİRDİ — VARDİYA PLANI (agent × gün):
 #   agent_user_code, agent_name, date, vardiya ('08:00-17:00'),
@@ -712,39 +718,34 @@ def _erlang_serisi(calls_serisi, slot_serisi, aht):
     return out
 
 
-def kalibre_aht(df_cmp, results, adaylar=range(90, 331, 10), verbose=True):
+def kalibre_aht(results, queue='kitle', adaylar=range(90, 331, 10), verbose=True):
     """Pickle'daki Erlang'ı en iyi yeniden üreten AHT'yi bulur.
 
-    df_cmp : forecast_vs_actual_karsilastirma.build_comparison çıktısı
-             (forecast_kitle / actual_kitle kolonları)
-    results: monthly run pickle'ı
+    Sadece pickle'ı kullanır: model, kendi forecast çağrılarından
+    (calls_by_slot) bir Erlang (erlang_by_slot) üretti. Hangi AHT o Erlang'ı
+    geri veriyorsa, gerçek çağrılar için de o AHT geçerlidir.
 
-    Mantık: model, forecast çağrılarından bir Erlang üretti. Aynı çağrılarla
-    hangi AHT o Erlang'ı veriyorsa, gerçek çağrılar için de o AHT geçerlidir.
+    df_aht'yi PL/SQL'den çekiyorsan buna gerek yok — aht_saatlik() kullan.
     """
-    hedef = []
+    kayit = []
     for date_str, day in results.items():
-        r = (day or {}).get('kitle')
+        r = (day or {}).get(queue)
         if not r:
             continue
-        d = pd.to_datetime(date_str)
-        for slot, erl in (r.get('erlang_by_slot') or {}).items():
-            if erl > 0:
-                hedef.append({'data_date': d, 'interval': slot, 'erlang_pkl': erl})
-    if not hedef:
-        raise ValueError("results içinde kitle erlang_by_slot yok.")
+        erl = r.get('erlang_by_slot') or {}
+        calls = r.get('calls_by_slot') or {}
+        for slot, e in erl.items():
+            c = calls.get(slot, 0)
+            if e > 0 and c > 0:
+                kayit.append({'interval': slot, 'calls': c, 'erlang_pkl': e})
+    if not kayit:
+        raise ValueError(f"results içinde {queue} için erlang_by_slot + "
+                         f"calls_by_slot eşleşmesi yok.")
 
-    df = pd.DataFrame(hedef).merge(
-        df_cmp[['data_date', 'interval', 'forecast_kitle']],
-        on=['data_date', 'interval'], how='inner')
-    df = df[df['forecast_kitle'] > 0]
-    if df.empty:
-        raise ValueError("Pickle Erlang'ı ile forecast çağrıları eşleşmedi "
-                         "(tarih/slot kesişimi boş).")
-
+    df = pd.DataFrame(kayit)
     en_iyi, en_iyi_hata = None, None
     for aht in adaylar:
-        tahmin = _erlang_serisi(df['forecast_kitle'], df['interval'], aht)
+        tahmin = _erlang_serisi(df['calls'], df['interval'], aht)
         hata = (pd.Series(tahmin) - df['erlang_pkl'].values).abs().mean()
         if en_iyi_hata is None or hata < en_iyi_hata:
             en_iyi, en_iyi_hata = aht, hata
@@ -759,17 +760,17 @@ def kalibre_aht(df_cmp, results, adaylar=range(90, 331, 10), verbose=True):
     return en_iyi
 
 
-def hakem_tablosu(df_kitle, df_cmp, aht, esik=2, verbose=True):
+def hakem_tablosu(df_kitle, df_act30, aht, esik=2, verbose=True):
     """Gerçek çağrı ihtiyacına kim daha yakın: plan mı model mi?
 
-    df_kitle: compare_kitle çıktısı (model_toplam / plan_toplam)
-    df_cmp  : forecast↔actual tablosu (actual_kitle)
-    esik    : |plan_sapma - model_sapma| bu değerin altındaysa BERABERE
+    df_kitle : compare_kitle çıktısı (model_toplam / plan_toplam)
+    df_act30 : actual_calls_30 çıktısı (actual_kitle)
+    esik     : |plan_sapma - model_sapma| bu değerin altındaysa BERABERE
     """
-    df = df_kitle.merge(df_cmp[['data_date', 'interval', 'actual_kitle']],
+    df = df_kitle.merge(df_act30[['data_date', 'interval', 'actual_kitle']],
                         on=['data_date', 'interval'], how='inner')
     if df.empty:
-        raise ValueError("df_kitle ile df_cmp kesişmedi — tarih aralıklarını kontrol et.")
+        raise ValueError("df_kitle ile actual kesişmedi — tarih aralıklarını kontrol et.")
 
     df['ihtiyac'] = _erlang_serisi(df['actual_kitle'], df['interval'], aht)
     df['model_sapma'] = df['model_toplam'] - df['ihtiyac']
@@ -856,6 +857,71 @@ def hakem_saat(df_hakem):
               else 'BERABERE'), axis=1)
     return g
 
+
+
+# --- ACTUAL ÇAĞRILAR → 30 DK ----------------------------------------------
+
+import datetime as _dt
+
+DEFAULT_ACTUAL_COLS = {
+    'date':     ['data_date', 'date', 'tarih'],
+    'time':     ['min_time_period_value', 'interval', 'saat_dilimi'],
+    'kitle':    ['kitle_nof_call', 'kitle_nof_col', 'kitle_total_call'],
+    'kurumsal': ['kurumsal_nof_call', 'kurumsal_nof_col'],
+    'gold':     ['gold_nof_call', 'gold_nof_col', 'gold_total_call'],
+}
+
+
+def _to_slot_30(value):
+    """'10:45' / '10:45:00' / time / timedelta / timestamp → '10:30'."""
+    if isinstance(value, (pd.Timedelta, _dt.timedelta)):
+        tm = int(pd.Timedelta(value).total_seconds() // 60) % (24 * 60)
+        h, m = divmod(tm, 60)
+        return f"{h:02d}:{(m // 30) * 30:02d}"
+    if isinstance(value, (_dt.datetime, pd.Timestamp, _dt.time)):
+        return f"{value.hour:02d}:{(value.minute // 30) * 30:02d}"
+    m = re.search(r'(\d{1,2}):(\d{2})', str(value).strip())
+    if not m:
+        raise ValueError(f"Saat değeri çözümlenemedi: {value!r}")
+    return f"{int(m.group(1)) % 24:02d}:{(int(m.group(2)) // 30) * 30:02d}"
+
+
+def actual_calls_30(df_actual, year=2026, month=8, queue='kitle',
+                    actual_cols=None, verbose=True):
+    """Gerçekleşen 15dk çağrıları 30dk'ya toplar.
+
+    Girdi: data_date, min_time_period_value, {queue}_nof_call
+    Çıktı: data_date, interval, actual_{queue}
+    """
+    cols = {**DEFAULT_ACTUAL_COLS, **(actual_cols or {})}
+    d_col = _resolve_col(df_actual, cols['date'])
+    t_col = _resolve_col(df_actual, cols['time'])
+    c_col = _resolve_col(df_actual, cols[queue])
+    eksik = [k for k, v in (('date', d_col), ('time', t_col), (queue, c_col))
+             if v is None]
+    if eksik:
+        raise KeyError(f"ACTUAL: şu alan(lar) için kolon yok: {eksik}  |  "
+                       f"mevcut: {list(df_actual.columns)}")
+
+    out = pd.DataFrame({
+        'data_date': _to_date_series(df_actual[d_col]).dt.normalize(),
+        'interval': df_actual[t_col].map(_to_slot_30),
+        f"actual_{queue}": pd.to_numeric(df_actual[c_col], errors='coerce').fillna(0),
+    })
+
+    bad = out['data_date'].isna() | out['interval'].isna()
+    if bad.any():
+        print(f"  ⚠ ACTUAL: {int(bad.sum()):,} satırda tarih/saat çözümlenemedi, "
+              f"toplamdan düşüyor.")
+
+    out = out.groupby(['data_date', 'interval'], as_index=False).sum()
+    n0 = len(out)
+    out = out[(out['data_date'].dt.year == year) & (out['data_date'].dt.month == month)]
+    if verbose:
+        print(f"ACTUAL ({queue}) — {out['data_date'].nunique()} gün, "
+              f"{len(out):,} slot, toplam {int(out[f'actual_{queue}'].sum()):,} çağrı"
+              + (f"  ({n0 - len(out):,} satır ay dışı, elendi)" if n0 > len(out) else ""))
+    return out.sort_values(['data_date', 'interval']).reset_index(drop=True)
 
 
 # --- AHT: monthly run formatındaki df_aht'den saatlik AHT ------------------
@@ -945,12 +1011,12 @@ def kap_rr(kisi, calls, slot, cagri_adedi=CAGRI_ADEDI,
     return (net * (cagri_adedi / 2)) / calls
 
 
-def rr_tablosu(df_kitle, df_cmp, aht, esik_rr=0.05, cagri_adedi=CAGRI_ADEDI,
+def rr_tablosu(df_kitle, df_act30, aht, esik_rr=0.05, cagri_adedi=CAGRI_ADEDI,
                verbose=True):
     """Gerçek çağrılara göre iki yöntemle RR: Erlang bazlı ve kapasite bazlı.
 
     df_kitle : compare_kitle çıktısı
-    df_cmp   : forecast↔actual tablosu (actual_kitle)
+    df_act30 : actual_calls_30 çıktısı (actual_kitle)
     aht      : tek sayı veya {saat: aht}
     esik_rr  : RR farkı bu değerin altındaysa BERABERE (0.05 = 5 puan)
 
@@ -958,10 +1024,10 @@ def rr_tablosu(df_kitle, df_cmp, aht, esik_rr=0.05, cagri_adedi=CAGRI_ADEDI,
       ihtiyac, rr_model, rr_plan, kazanan_erlang
       kap_rr_model, kap_rr_plan, kazanan_kapasite
     """
-    df = df_kitle.merge(df_cmp[['data_date', 'interval', 'actual_kitle']],
+    df = df_kitle.merge(df_act30[['data_date', 'interval', 'actual_kitle']],
                         on=['data_date', 'interval'], how='inner')
     if df.empty:
-        raise ValueError("df_kitle ile df_cmp kesişmedi — tarihleri kontrol et.")
+        raise ValueError("df_kitle ile actual kesişmedi — tarihleri kontrol et.")
 
     cache = {}
     def _ihtiyac(c, s):
@@ -1059,6 +1125,12 @@ def rr_saat(df_rr):
     return g
 
 
+def _eksik(*adlar):
+    """globals()'ta olmayan değişken adlarını döndürür."""
+    g = globals()
+    return [a for a in adlar if a not in g or g[a] is None]
+
+
 def np_kazanan(rr_model, rr_plan, esik=0.05):
     """1.00'e daha yakın olan kazanır."""
     m = (rr_model - 1).abs()
@@ -1123,15 +1195,25 @@ else:
     print("df_kitle yok — önce HÜCRE 3'ü çalıştır.")
 
 
-# %% [HÜCRE 6] — HAKEM: GERÇEK ÇAĞRIDAN ERLANG
-# df_cmp: forecast_vs_actual_karsilastirma.build_comparison çıktısı
+# %% [HÜCRE 5B] — GERÇEK ÇAĞRILAR → 30 DK
 
-if 'df_kitle' in globals() and 'df_cmp' in globals():
-    AHT = kalibre_aht(df_cmp, results)
-    df_hakem = hakem_tablosu(df_kitle, df_cmp, aht=AHT, esik=2)
+if 'df_actual' in globals():
+    df_act30 = actual_calls_30(df_actual, year=YEAR, month=MONTH, queue='kitle')
+    show(df_act30, 5)
+else:
+    print("df_actual yok — SQL'den çekip bu hücreyi çalıştır.")
+
+
+# %% [HÜCRE 6] — HAKEM: GERÇEK ÇAĞRIDAN ERLANG
+
+_yok = _eksik('df_kitle', 'df_act30', 'results')
+if not _yok:
+    AHT = kalibre_aht(results)                 # df_aht varsa HÜCRE 8'i kullan
+    df_hakem = hakem_tablosu(df_kitle, df_act30, aht=AHT, esik=2)
     show(df_hakem, 10)
 else:
-    print("df_kitle veya df_cmp yok — HÜCRE 3'ü ve forecast↔actual dosyasını çalıştır.")
+    print(f"Eksik: {', '.join(_yok)}")
+    print("  df_kitle → HÜCRE 3  |  df_act30 → HÜCRE 5B  |  results → HÜCRE 2")
 
 
 # %% [HÜCRE 7] — GÜN / SAAT BAZINDA KAZANAN
@@ -1146,12 +1228,14 @@ else:
 # %% [HÜCRE 8] — RR KARŞILAŞTIRMA (iki yöntem)
 # df_aht: saat, sub_queue, line_based_main_group, weighted_avg_aht  (PL/SQL)
 
-if 'df_kitle' in globals() and 'df_cmp' in globals() and 'df_aht' in globals():
+_yok = _eksik('df_kitle', 'df_act30', 'df_aht')
+if not _yok:
     AHT_SAATLIK = aht_saatlik(df_aht, queue='kitle')
-    df_rr = rr_tablosu(df_kitle, df_cmp, aht=AHT_SAATLIK, esik_rr=0.05)
+    df_rr = rr_tablosu(df_kitle, df_act30, aht=AHT_SAATLIK, esik_rr=0.05)
     show(df_rr, 10)
 else:
-    print("df_kitle / df_cmp / df_aht eksik.")
+    print(f"Eksik: {', '.join(_yok)}")
+    print("  df_kitle → HÜCRE 3  |  df_act30 → HÜCRE 5B  |  df_aht → PL/SQL'den çek")
 
 
 # %% [HÜCRE 9] — RR: GÜN VE SAAT BAZINDA
@@ -1161,4 +1245,3 @@ if 'df_rr' in globals():
     show(rr_saat(df_rr))
 else:
     print("df_rr yok — önce HÜCRE 8'i çalıştır.")
- 
