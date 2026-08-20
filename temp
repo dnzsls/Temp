@@ -1161,3 +1161,4 @@ if 'df_rr' in globals():
     show(rr_saat(df_rr))
 else:
     print("df_rr yok — önce HÜCRE 8'i çalıştır.")
+ 
