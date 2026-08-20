@@ -21,6 +21,8 @@
 
 # %% [HÜCRE 1] — FONKSİYONLAR
 
+import os
+import pickle
 import re
 
 import pandas as pd
@@ -92,11 +94,19 @@ def _is_true(s):
 
 
 def _resolve_col(df, spec):
-    """Aday kolon adlarından df'te bulunan ilkini döndürür (yoksa None)."""
+    """Aday kolon adlarından df'te bulunan ilkini döndürür (yoksa None).
+
+    Önce birebir, sonra büyük/küçük harf duyarsız arar — SQL kolonları
+    KISI_SAYISI gibi büyük harfle gelebiliyor.
+    """
     cands = [spec] if isinstance(spec, str) else list(spec)
     for c in cands:
         if c in df.columns:
             return c
+    lower = {str(c).lower(): c for c in df.columns}
+    for c in cands:
+        if str(c).lower() in lower:
+            return lower[str(c).lower()]
     return None
 
 
@@ -257,7 +267,110 @@ def _print_plan_summary(out, all_days):
 
 
 # ---------------------------------------------------------------------------
-# MODEL TARAFI — {data_date, kuyruk, vardiya, kisi, company}
+# MODEL TARAFI — PICKLE (monthly run çıktısı)
+# ---------------------------------------------------------------------------
+
+def load_model_from_pickle(path=None, year=2026, month=8, verbose=True):
+    """Aylık run pickle'ından slot bazlı model kadrosunu çıkarır.
+
+    results[tarih][kuyruk]['mip_info'] içinden okur:
+        mip_in_by_slot  → inhouse kişi
+        mip_out_by_slot → outsource kişi
+    Vardiya açmaya gerek yok; pickle zaten slot bazında tutuyor. Bu sayede
+    surplus dağıtımı sonrası NİHAİ sayılar gelir (assignments ile aynı kaynak).
+
+    Çıktı: data_date, interval,
+           model_in_{q}, model_out_{q}  (her kuyruk)
+           model_in_toplam, model_out_toplam, model_toplam
+    """
+    path = path or f"monthly_v9_forecast_{year}_{month:02d}.pkl"
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Pickle bulunamadı: {path}")
+
+    with open(path, 'rb') as f:
+        results = pickle.load(f)
+
+    rows = []
+    bos_gunler, eksik_kuyruk = [], []
+    for date_str, day in results.items():
+        d = pd.to_datetime(date_str)
+        if d.year != year or d.month != month:
+            continue
+        if not day:
+            bos_gunler.append(d)
+            continue
+        for q in QUEUES:
+            r = day.get(q)
+            if not r:
+                eksik_kuyruk.append((d, q))
+                continue
+            mi = r.get('mip_info', {}) or {}
+            inn = mi.get('mip_in_by_slot', {}) or {}
+            out = mi.get('mip_out_by_slot', {}) or {}
+            if not inn and not out:                      # ayrım yoksa toplamı inhouse say
+                inn = mi.get('mip_by_slot', {}) or {}
+            for slot in set(inn) | set(out):
+                rows.append({'data_date': d, 'slot_30': slot, 'queue': q,
+                             'inhouse': inn.get(slot, 0), 'outsource': out.get(slot, 0)})
+
+    if not rows:
+        raise ValueError(f"{path}: {year}/{month:02d} için sonuç yok.")
+
+    long = pd.DataFrame(rows)
+
+    first = pd.Timestamp(year=year, month=month, day=1)
+    all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
+    out = pd.MultiIndex.from_product(
+        [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
+
+    for q in QUEUES:
+        sub = long[long['queue'] == q][['data_date', 'slot_30', 'inhouse', 'outsource']]
+        sub = sub.rename(columns={'inhouse': f"model_in_{q}", 'outsource': f"model_out_{q}"})
+        out = out.merge(sub, on=['data_date', 'slot_30'], how='left')
+
+    value_cols = [f"model_{s}_{q}" for q in QUEUES for s in ('in', 'out')]
+    out[value_cols] = out[value_cols].fillna(0).round().astype(int)
+
+    out['model_in_toplam'] = out[[f"model_in_{q}" for q in QUEUES]].sum(axis=1)
+    out['model_out_toplam'] = out[[f"model_out_{q}" for q in QUEUES]].sum(axis=1)
+    out['model_toplam'] = out['model_in_toplam'] + out['model_out_toplam']
+
+    out['interval'] = out['slot_30']
+    out = out.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+    out = out[['data_date', 'interval'] + value_cols +
+              ['model_in_toplam', 'model_out_toplam', 'model_toplam']]
+
+    if verbose:
+        _print_pickle_summary(out, long, all_days, bos_gunler, eksik_kuyruk, path)
+    return out
+
+
+def _print_pickle_summary(out, long, all_days, bos_gunler, eksik_kuyruk, path):
+    kapsanan = long['data_date'].nunique()
+    print(f"PICKLE: {os.path.basename(path)}  |  {kapsanan}/{len(all_days)} gün")
+    if bos_gunler:
+        print(f"  ⚠ sonucu boş (None) {len(bos_gunler)} gün: "
+              f"{', '.join(d.strftime('%d.%m') for d in bos_gunler)}")
+    if eksik_kuyruk:
+        ozet = {}
+        for d, q in eksik_kuyruk:
+            ozet.setdefault(q, []).append(d.strftime('%d.%m'))
+        for q, gunler in ozet.items():
+            print(f"  ⚠ {q}: {len(gunler)} günde sonuç yok (INFEASIBLE olabilir): "
+                  f"{', '.join(gunler[:10])}{' …' if len(gunler) > 10 else ''}")
+
+    satirlar = [{
+        'kuyruk': q,
+        'inhouse_tepe': int(out[f"model_in_{q}"].max()),
+        'outsource_tepe': int(out[f"model_out_{q}"].max()),
+        'inhouse_kisi_slot': int(out[f"model_in_{q}"].sum()),
+        'outsource_kisi_slot': int(out[f"model_out_{q}"].sum()),
+    } for q in QUEUES]
+    show(pd.DataFrame(satirlar))
+
+
+# ---------------------------------------------------------------------------
+# MODEL TARAFI — {data_date, kuyruk, vardiya, kisi, company} (tablo hâli)
 # ---------------------------------------------------------------------------
 
 def build_model_coverage(df_model, year=2026, month=8, model_cols=None,
@@ -393,34 +506,184 @@ def summarize_by_interval(df_cmp_plan):
     return out.reset_index()
 
 
-# %% [HÜCRE 2] — KULLANIM
+# ---------------------------------------------------------------------------
+# KİTLE — PLAN (vardiya bazlı özet tablo) ve KARŞILAŞTIRMA
+# ---------------------------------------------------------------------------
+
+DEFAULT_PLAN_AGG_COLS = {
+    'date':  ['data_date', 'date', 'tarih'],
+    'shift': ['vardiya', 'shift'],
+    'group': ['working_main_group', 'company', 'line_based_main_group'],
+    'kisi':  ['kisi_sayisi', 'kisi', 'count', 'adet'],
+}
+
+
+def _company_from_group(s):
+    """'outsource' → outsource, geri kalan her şey (izmir_kitle, gebze_kitle…)
+    → inhouse."""
+    v = s.astype(str).str.strip().str.lower()
+    return v.map(lambda x: 'outsource' if 'outsource' in x else 'inhouse')
+
+
+def build_plan_coverage_kitle(df_plan, year=2026, month=8, plan_cols=None,
+                              verbose=True):
+    """Vardiya bazlı plan tablosunu slot ızgarasına açar (tamamı kitle).
+
+    Girdi: DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
+    Çıktı: data_date, interval, plan_in, plan_out, plan_toplam
+    """
+    cols = {**DEFAULT_PLAN_AGG_COLS, **(plan_cols or {})}
+    resolved = {k: _resolve_col(df_plan, v) for k, v in cols.items()}
+    eksik = [cols[k] for k, v in resolved.items() if v is None]
+    if eksik:
+        raise KeyError(f"PLAN: şu kolon(lar) yok: {eksik}  |  "
+                       f"mevcut: {list(df_plan.columns)}")
+
+    df = df_plan.copy()
+    df['data_date'] = _to_date_series(df[resolved['date']]).dt.normalize()
+    df['company'] = _company_from_group(df[resolved['group']])
+    df['kisi'] = pd.to_numeric(df[resolved['kisi']], errors='coerce').fillna(0)
+
+    n0 = len(df)
+    df = df[(df['data_date'].dt.year == year) & (df['data_date'].dt.month == month)]
+    if verbose and len(df) < n0:
+        print(f"  ℹ PLAN: {n0 - len(df):,} satır {year}/{month:02d} dışında, elendi.")
+
+    slot_map = {v: shift_slots(v) for v in df[resolved['shift']].astype(str).unique()}
+    cozulmeyen = [v for v, s in slot_map.items() if not s]
+    if cozulmeyen:
+        print(f"  ⚠ PLAN: vardiya olarak okunamayan {len(cozulmeyen)} değer "
+              f"(kapsamaya girmedi): {cozulmeyen[:8]}")
+
+    df['slot_30'] = df[resolved['shift']].astype(str).map(slot_map)
+    df = df.explode('slot_30').dropna(subset=['slot_30'])
+
+    agg = (df.groupby(['data_date', 'slot_30', 'company'])['kisi']
+             .sum().reset_index())
+
+    first = pd.Timestamp(year=year, month=month, day=1)
+    all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
+    out = pd.MultiIndex.from_product(
+        [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
+
+    for comp, kol in (('inhouse', 'plan_in'), ('outsource', 'plan_out')):
+        sub = agg[agg['company'] == comp][['data_date', 'slot_30', 'kisi']]
+        out = out.merge(sub.rename(columns={'kisi': kol}),
+                        on=['data_date', 'slot_30'], how='left')
+
+    out[['plan_in', 'plan_out']] = out[['plan_in', 'plan_out']].fillna(0).round().astype(int)
+    out['plan_toplam'] = out['plan_in'] + out['plan_out']
+    out['interval'] = out['slot_30']
+    out = out.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+    out = out[['data_date', 'interval', 'plan_in', 'plan_out', 'plan_toplam']]
+
+    if verbose:
+        gunler = df['data_date'].nunique()
+        print(f"PLAN (kitle) — {gunler}/{len(all_days)} gün  |  tepe: "
+              f"inhouse={int(out['plan_in'].max())} "
+              f"outsource={int(out['plan_out'].max())}")
+    return out
+
+
+def compare_kitle(df_plan_cov, df_model_cov, only_plan_days=True, verbose=True):
+    """Kitle için slot bazlı model ↔ plan karşılaştırması.
+
+    fark = plan - model  (eksi: modelin dediğinden az kişi konmuş)
+    only_plan_days: planda hiç kişi olmayan günleri tablodan çıkarır.
+    """
+    df = df_model_cov[['data_date', 'interval', 'model_in_kitle',
+                       'model_out_kitle']].merge(
+        df_plan_cov, on=['data_date', 'interval'], how='outer')
+
+    df = df.rename(columns={'model_in_kitle': 'model_in',
+                            'model_out_kitle': 'model_out'})
+    for c in ('model_in', 'model_out', 'plan_in', 'plan_out'):
+        df[c] = df[c].fillna(0).astype(int)
+    df['model_toplam'] = df['model_in'] + df['model_out']
+    df['plan_toplam'] = df['plan_in'] + df['plan_out']
+
+    if only_plan_days:
+        gunluk = df.groupby('data_date')['plan_toplam'].sum()
+        bos = list(gunluk[gunluk == 0].index)
+        if bos:
+            df = df[~df['data_date'].isin(bos)]
+            if verbose:
+                print(f"  ℹ planda kişi olmayan {len(bos)} gün "
+                      f"(karşılaştırmaya alınmadı): "
+                      f"{', '.join(d.strftime('%d.%m.%Y') for d in bos)}")
+
+    df['fark_in'] = df['plan_in'] - df['model_in']
+    df['fark_out'] = df['plan_out'] - df['model_out']
+    df['fark_toplam'] = df['plan_toplam'] - df['model_toplam']
+
+    df = df.sort_values(['data_date', 'interval']).reset_index(drop=True)
+    df = df[['data_date', 'interval',
+             'model_in', 'plan_in', 'fark_in',
+             'model_out', 'plan_out', 'fark_out',
+             'model_toplam', 'plan_toplam', 'fark_toplam']]
+
+    if verbose:
+        satirlar = []
+        for etiket, mo, pl, fa in (
+                ('inhouse', 'model_in', 'plan_in', 'fark_in'),
+                ('outsource', 'model_out', 'plan_out', 'fark_out'),
+                ('toplam', 'model_toplam', 'plan_toplam', 'fark_toplam')):
+            aktif = df[mo] > 0
+            satirlar.append({
+                'kesim': etiket,
+                'model_kisi_slot': int(df[mo].sum()),
+                'plan_kisi_slot': int(df[pl].sum()),
+                'fark': int(df[fa].sum()),
+                'eksik_slot': int((df[fa][aktif] < 0).sum()),
+                'fazla_slot': int((df[fa][aktif] > 0).sum()),
+            })
+        print("KİTLE — MODEL ↔ PLAN  (fark = plan - model)")
+        show(pd.DataFrame(satirlar))
+    return df
+
+
+def kitle_gunluk(df_cmp):
+    """Slot tablosunu gün bazına toplar (kişi-slot)."""
+    cols = ['model_in', 'plan_in', 'fark_in', 'model_out', 'plan_out', 'fark_out',
+            'model_toplam', 'plan_toplam', 'fark_toplam']
+    d = df_cmp.groupby('data_date', as_index=False)[cols].sum()
+    d['gun'] = pd.to_datetime(d['data_date']).dt.weekday.map(
+        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i])
+    return d[['data_date', 'gun'] + cols]
+
+
+def kitle_saat_bazinda(df_cmp):
+    """Saat bazında ortalama — sistematik eksik/fazla nerede."""
+    cols = ['model_in', 'plan_in', 'fark_in', 'model_out', 'plan_out', 'fark_out']
+    return df_cmp.groupby('interval')[cols].mean().round(1).reset_index()
+
+
+# %% [HÜCRE 2] — KİTLE: PLAN + MODEL + KARŞILAŞTIRMA
 
 YEAR = 2026
 MONTH = 8
+PICKLE = f"monthly_v9_forecast_{YEAR}_{MONTH:02d}.pkl"
 
 if 'df_plan' in globals():
-    df_plan_cov = build_plan_coverage(df_plan, year=YEAR, month=MONTH)
-    show(df_plan_cov, 10)
+    plan_cov = build_plan_coverage_kitle(df_plan, year=YEAR, month=MONTH)
+    model_cov = load_model_from_pickle(PICKLE, year=YEAR, month=MONTH)
+    df_kitle = compare_kitle(plan_cov, model_cov)
+    show(df_kitle, 10)
 else:
-    print("df_plan bulunamadı — vardiya planı tablosunu getirip bu hücreyi çalıştır.")
+    print("df_plan bulunamadı — plan tablosunu getirip bu hücreyi çalıştır.")
 
 
-# %% [HÜCRE 3] — MODEL KAPSAMASI + KARŞILAŞTIRMA
-# df_model: data_date, kuyruk, vardiya, kisi, company  (inhouse)
+# %% [HÜCRE 3] — GÜNLÜK
 
-if 'df_model' in globals() and 'df_plan_cov' in globals():
-    df_model_cov = build_model_coverage(df_model, year=YEAR, month=MONTH,
-                                        company='inhouse')
-    df_cmp_plan = compare_plan_vs_model(df_plan_cov, df_model_cov)
-    show(df_cmp_plan, 10)
+if 'df_kitle' in globals():
+    show(kitle_gunluk(df_kitle))
 else:
-    print("df_model veya df_plan_cov yok — önce HÜCRE 2'yi ve model tablosunu hazırla.")
+    print("df_kitle yok — önce HÜCRE 2'yi çalıştır.")
 
 
-# %% [HÜCRE 4] — SAAT BAZINDA ORTALAMA (sistematik eksik/fazla)
+# %% [HÜCRE 4] — SAAT BAZINDA ORTALAMA
 
-if 'df_cmp_plan' in globals():
-    show(summarize_by_interval(df_cmp_plan))
+if 'df_kitle' in globals():
+    show(kitle_saat_bazinda(df_kitle))
 else:
-    print("df_cmp_plan yok — önce HÜCRE 3'ü çalıştır.")
- 
+    print("df_kitle yok — önce HÜCRE 2'yi çalıştır.")
