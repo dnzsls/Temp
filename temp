@@ -6,10 +6,11 @@
 #
 # ÇIKTI:
 #   data_date, interval,
-#   forecast_kitle, actual_kitle,
-#   forecast_kurumsal, actual_kurumsal,
-#   forecast_gold, actual_gold
+#   forecast_kitle, actual_kitle, sapma_kitle,
+#   forecast_kurumsal, actual_kurumsal, sapma_kurumsal,
+#   forecast_gold, actual_gold, sapma_gold
 #   → ayın her günü × 48 slot (Ağustos için 31 × 48 = 1.488 satır)
+#   sapma = (forecast - actual) / actual × 100  (+ : forecast fazla tahmin)
 #
 # GİRDİ — ACTUAL (15 dk):
 #   data_date, weekday_flg, min_time_period_value ('10:30', '00:00' …),
@@ -186,6 +187,12 @@ def build_comparison(df_actual, df_forecast, year=2026, month=8,
     value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
     df[value_cols] = df[value_cols].fillna(0).round().astype(int)
 
+    # Sapma % — her kuyruğun forecast/actual çiftinin hemen ardına
+    # (+ : forecast fazla tahmin etmiş | actual 0 ise 0.0)
+    for q in QUEUES:
+        f, a = df[f"forecast_{q}"], df[f"actual_{q}"]
+        df[f"sapma_{q}"] = ((f - a) / a.where(a != 0) * 100).round(1).fillna(0.0)
+
     if interval_style == 'range':
         nxt = {s: SLOTS_30[(i + 1) % len(SLOTS_30)] for i, s in enumerate(SLOTS_30)}
         df['interval'] = df['slot_30'] + '-' + df['slot_30'].map(nxt)
@@ -194,9 +201,9 @@ def build_comparison(df_actual, df_forecast, year=2026, month=8,
 
     df = df.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
     df = df[['data_date', 'interval',
-             'forecast_kitle', 'actual_kitle',
-             'forecast_kurumsal', 'actual_kurumsal',
-             'forecast_gold', 'actual_gold']]
+             'forecast_kitle', 'actual_kitle', 'sapma_kitle',
+             'forecast_kurumsal', 'actual_kurumsal', 'sapma_kurumsal',
+             'forecast_gold', 'actual_gold', 'sapma_gold']]
 
     if verbose:
         _print_summary(df, df_a, df_f, all_days, year, month)
@@ -231,13 +238,76 @@ def _print_summary(df, df_a, df_f, all_days, year, month):
     print()
 
 
-def save_comparison(df, path=None, year=2026, month=8):
-    """Excel'e yazar."""
+DAY_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz']
+
+
+def build_daily_comparison(df_cmp, verbose=True):
+    """30dk'lık karşılaştırma tablosunu gün bazına toplar.
+
+    Girdi: build_comparison çıktısı (df_cmp) — böylece iki tablo her zaman
+    tutarlı kalır, ayrı bir toplama mantığı devreye girmez.
+
+    Çıktı kolonları (her kuyruk için):
+        forecast_{q}, actual_{q}, fark_{q}, sapma_{q}   (sapma = % , +: forecast fazla)
+    """
+    value_cols = [f"{side}_{q}" for q in QUEUES for side in ('forecast', 'actual')]
+    d = df_cmp.groupby('data_date', as_index=False)[value_cols].sum()   # slot sapmaları toplanmaz
+
+    d['gun'] = pd.to_datetime(d['data_date']).dt.weekday.map(lambda i: DAY_TR[i])
+
+    cols = ['data_date', 'gun']
+    for q in QUEUES:
+        f, a = d[f"forecast_{q}"], d[f"actual_{q}"]
+        d[f"fark_{q}"] = f - a
+        d[f"sapma_{q}"] = ((f - a) / a.where(a != 0) * 100).round(1).fillna(0.0)
+        cols += [f"forecast_{q}", f"actual_{q}", f"fark_{q}", f"sapma_{q}"]
+
+    d = d[cols].sort_values('data_date').reset_index(drop=True)
+
+    if verbose:
+        _print_daily_summary(d)
+    return d
+
+
+def _print_daily_summary(d):
+    """Günlük tablonun kısa özeti — en çok sapan günler ve MAPE."""
+    print(f"\n{'='*70}")
+    print("GÜNLÜK FORECAST ↔ ACTUAL")
+    print(f"{'='*70}")
+    for q in QUEUES:
+        sapma = d[f"sapma_{q}"]
+        mape = sapma.abs().mean()
+        worst = d.loc[sapma.abs().idxmax()] if len(d) else None
+        line = f"  {q:<10} ortalama mutlak sapma (MAPE): {mape:5.1f}%"
+        if worst is not None:
+            line += (f"   |  en kötü gün: "
+                     f"{pd.Timestamp(worst['data_date']).strftime('%d.%m')} "
+                     f"({worst['gun']}) {worst[f'sapma_{q}']:+.1f}%")
+        print(line)
+
+    tam = d[(d[[f"actual_{q}" for q in QUEUES]].sum(axis=1) == 0)]
+    if len(tam):
+        gunler = ', '.join(pd.to_datetime(tam['data_date']).dt.strftime('%d.%m'))
+        print(f"  ⚠ actual'ı tamamen boş {len(tam)} gün: {gunler}")
+    print()
+
+
+def save_comparison(df, df_daily=None, path=None, year=2026, month=8):
+    """Excel'e yazar. df_daily verilirse ikinci sayfa olarak eklenir."""
     path = path or f"forecast_vs_actual_{year}_{month:02d}.xlsx"
-    out = df.copy()
-    out['data_date'] = pd.to_datetime(out['data_date']).dt.strftime('%Y-%m-%d')
-    out.to_excel(path, index=False)
-    print(f"✓ Kaydedildi: {path}")
+
+    def _fmt(x):
+        out = x.copy()
+        out['data_date'] = pd.to_datetime(out['data_date']).dt.strftime('%Y-%m-%d')
+        return out
+
+    with pd.ExcelWriter(path) as writer:
+        _fmt(df).to_excel(writer, sheet_name='30dk', index=False)
+        if df_daily is not None:
+            _fmt(df_daily).to_excel(writer, sheet_name='gunluk', index=False)
+
+    sayfa = '30dk + gunluk' if df_daily is not None else '30dk'
+    print(f"✓ Kaydedildi: {path}  ({sayfa})")
     return path
 
 
@@ -254,5 +324,14 @@ else:
     print("df_actual / df_forecast bulunamadı — önce tabloları getir, sonra bu hücreyi çalıştır.")
 
 
-# %% [HÜCRE 3] — EXCEL'E KAYDET (opsiyonel)
-# save_comparison(df_cmp, year=YEAR, month=MONTH)
+# %% [HÜCRE 3] — GÜNLÜK KARŞILAŞTIRMA
+
+if 'df_cmp' in globals():
+    df_gunluk = build_daily_comparison(df_cmp)
+    print(df_gunluk.to_string(index=False))
+else:
+    print("df_cmp yok — önce HÜCRE 2'yi çalıştır.")
+
+
+# %% [HÜCRE 4] — EXCEL'E KAYDET (opsiyonel)
+# save_comparison(df_cmp, df_gunluk, year=YEAR, month=MONTH)
