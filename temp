@@ -4493,3 +4493,124 @@ print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} 
       + ("   ⚠ df_gecmis yok → geçmiş 0" if df_gecmis is None else ""))
 print(f"  Sheet5 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
+
+
+# %% [HÜCRE 30] — DARBOĞAZ RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ──────
+# GEÇİCİ TEŞHİS HÜCRESİ — kalıcı akışın parçası değil, istediğin an SİL.
+# H19F gibi çözüm gerektirmez; hücreleri 0..19C arası koşup burayı çalıştır.
+#
+# NE ZAMAN: model FİZİBİL (FIZIBILITE_MODU çözüm buluyor) ama amaç açıkken
+# 2700 sn'de tek bir çözüm bile bulunamıyor. O tabloda tek bir kural çözümsüzlük
+# yapmıyor — birlikte daraltan kurallar fizibil bölgeyi iğne deliğine çeviriyor.
+# Bu hücre, hiçbir mevcut kontrolün bakmadığı ÜÇ daralmayı aritmetikle ölçer.
+_dar_gec = dakika(AKSAM_BASLANGIC)                 # 17:00 → akşam/gece eşiği
+
+print("=" * 78)
+print("H30 — DARBOĞAZ RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
+print("=" * 78)
+
+# ── [0] TİP SAYISI — y uzayının büyüklüğü ────────────────────────────
+# H19 takımı HAFTADA TEK TİPE bağlıyor. Tip sayısı arttıkça:
+#   • y[takım,hafta,tip] değişkeni ve H19D kısıtı doğru orantılı büyür
+#   • talep daha çok tipe BÖLÜNÜR, her tip yine TAM takım ister → takım
+#     boyutuna yuvarlama kaybı katlanır (16 kişilik takım, 5 kişilik tip talebi)
+# Yeni bir pickle tip kırılımını değiştirdiyse (ör. 09:00 → 08:30/09:30) model
+# aniden çok daha zor hale gelir. Kural değişmez, arama uzayı büyür.
+_tip_talep = {}                                    # tip → hafta içi toplam talep
+for (_ds, _v), _k in talep.items():
+    if dt.date.fromisoformat(_ds).weekday() < 5:
+        _t = saat[(_ds, _v)][0]
+        _tip_talep[_t] = _tip_talep.get(_t, 0) + _k
+print(f"\n[0] VARDİYA TİPİ SAYISI  (H19: takım haftada TEK tip)")
+print(f"    farklı tip           : {len(TIP_SET)}   {sorted(TIP_SET)}")
+print(f"    y[takım,hafta,tip]   : {len(takim_tip)} ikili değişken")
+print(f"    takım sayısı         : {len(takimlar)}  |  ortalama üye "
+      f"{len(AGENTS) / max(1, len(takimlar)):.1f}")
+print(f"    {'tip':>7} {'hafta içi toplam talep':>24} {'≈ takım-hafta':>14}")
+_ort_uye = len(AGENTS) / max(1, len(takimlar))
+for _t in sorted(_tip_talep, key=lambda k: -_tip_talep[k]):
+    print(f"    {_t:>7} {_tip_talep[_t]:>24} "
+          f"{_tip_talep[_t] / max(1, _ort_uye * 5):>14.1f}")
+print(f"    → tip sayısı ARTTIYSA (ör. 5 → 10) arama uzayı katlanır ve her tip")
+print(f"      yine TAM takım ister; küçük talepli tipler yuvarlama kaybı yaratır.")
+
+# ── [1] AKŞAM/GECE ROTASYON BÜTÇESİ — H16D × H19 ─────────────────────
+# Hiçbir mevcut kontrol buna bakmıyor. Mekanizma:
+#   H19  → takım o hafta tek tipte; geç tipe giderse TÜM üyeleri o hafta akşam
+#   H16D → her agent ayda EN FAZLA MAX_AKSAM_HAFTA hafta akşam/gece
+#   ⇒ fiilen: her TAKIM ayda en fazla MAX_AKSAM_HAFTA hafta geç tipte olabilir
+# Bütçe dolarsa model çözümsüz olmaz (üyeler ayrılabilir/izinli olabilir) ama
+# fizibil bölge çok daralır → "çözüm var, bulunamıyor".
+print(f"\n[1] AKŞAM/GECE ROTASYON BÜTÇESİ  (H16D × H19; eşik ≥{AKSAM_BASLANGIC})")
+_kapasite_th = len(takimlar) * MAX_AKSAM_HAFTA
+_gereken_th, _hafta_satir = 0, []
+for _wk in sorted(haftalar):
+    _hi = [g for g in haftalar[_wk] if dt.date.fromisoformat(g).weekday() < 5]
+    if not _hi:
+        continue
+    _gec_tipler = [t for t in hafta_tipler.get(_wk, []) if dakika(t) >= _dar_gec]
+    if not _gec_tipler:
+        continue
+    # o haftanın ZİRVE günlük geç talebi (H19: takım hafta boyu o tipte)
+    _zirve = max(sum(talep[(g, v)] for v in gun_vardiyalari[g]
+                     if (g, v) in talep and saat[(g, v)][0] in _gec_tipler)
+                 for g in _hi)
+    # zirveyi kapatmak için EN AZ kaç takım gerekir (büyükten küçüğe doldur)
+    _kat = sorted((max((takim_etkin_tip.get((T, _wk, t), 0) for t in _gec_tipler),
+                       default=0) for T in takimlar), reverse=True)
+    _top, _n = 0, 0
+    for _c in _kat:
+        if _top >= _zirve:
+            break
+        _top += _c
+        _n += 1
+    _gereken_th += _n
+    _hafta_satir.append((_wk, _zirve, _n))
+print(f"    {'hafta':>10} {'zirve geç talep':>16} {'gereken takım':>14}")
+for _wk, _z, _n in _hafta_satir:
+    print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>16} {_n:>14}")
+print(f"    {'':>10} {'TOPLAM gereken':>16} {_gereken_th:>14} takım-hafta")
+print(f"    MEVCUT kapasite: {len(takimlar)} takım × {MAX_AKSAM_HAFTA} hafta "
+      f"= {_kapasite_th} takım-hafta")
+_oran = 100 * _gereken_th / max(1, _kapasite_th)
+if _gereken_th > _kapasite_th:
+    print(f"    ⚠ BÜTÇE AŞILDI (%{_oran:.0f}) → H16D ile H19 birlikte tutmuyor.")
+    print(f"      Çare: MAX_AKSAM_HAFTA'yı {MAX_AKSAM_HAFTA + 1} yap, ya da Stage-1'de")
+    print(f"      geç vardiya talebini düşür. Bu hâliyle model ya çözümsüz ya da")
+    print(f"      fizibil bölge o kadar dar ki çözücü bulamıyor.")
+elif _oran > 70:
+    print(f"    ⚠ DAR: kapasitenin %{_oran:.0f}'i kullanılıyor. Çözümsüz değil ama")
+    print(f"      arama çok zorlaşır — UNKNOWN'ın muhtemel sebebi bu.")
+else:
+    print(f"    ✓ rahat: kapasitenin %{_oran:.0f}'i kullanılıyor")
+
+# ── [2] HAFTA SONU BÜTÇESİ — H18 × sert band ─────────────────────────
+# H10 hafta sonu kovaları talep ± HS_TOL SERT band → alt sınırı doldurmak ZORUNLU.
+# H18 ise her agentın 1 tam Cmt+Pzr'ı off geçirmesini ZORUNLU kılıyor.
+# İkisi aynı hafta sonu havuzundan yiyor.
+print(f"\n[2] HAFTA SONU BÜTÇESİ  (H18 × sert band ±{HS_TOL})")
+_hs_kolon30 = [ds for ds in PLAN_GUNLER
+               if dt.date.fromisoformat(ds).weekday() >= 5
+               and dt.date.fromisoformat(ds) not in TATIL]
+_gereken_hs30 = sum(max(0, _k - HS_TOL) for (_ds, _v), _k in talep.items()
+                    if dt.date.fromisoformat(_ds).weekday() >= 5)
+_uygun30 = [a for a in AGENTS if a not in hafta_sonu_yasak]
+_kap_hs30 = 0
+for a in _uygun30:
+    _m = sum(1 for ds in _hs_kolon30
+             if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])))
+    _kap_hs30 += max(0, _m - (2 if CIFT_HS_OFF else 0))   # H18 zorunlu çift off
+print(f"    sert band alt sınırı için GEREKEN : {_gereken_hs30:>6} kişi-gün")
+print(f"    H18 sonrası KALAN kapasite        : {_kap_hs30:>6} kişi-gün "
+      f"({len(_uygun30)} uygun agent, hamile/süt hariç)")
+_pay30 = _kap_hs30 - _gereken_hs30
+if _pay30 < 0:
+    print(f"    ⚠ AÇIK {-_pay30} kişi-gün → H18 ile sert band birlikte tutmuyor.")
+    print(f"      Çare: CIFT_HS_OFF=False ya da HS_TOL'ü artır.")
+elif _pay30 < 0.15 * max(1, _gereken_hs30):
+    print(f"    ⚠ DAR: pay sadece +{_pay30} kişi-gün (%{100*_pay30/max(1,_gereken_hs30):.0f})")
+    print(f"      → hafta sonu yerleşimi neredeyse tek bir çözüme sıkışıyor.")
+else:
+    print(f"    ✓ rahat: pay +{_pay30} kişi-gün "
+          f"(%{100*_pay30/max(1,_gereken_hs30):.0f})")
+print("=" * 78)
