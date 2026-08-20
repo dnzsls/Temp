@@ -2218,6 +2218,123 @@ else:
         print(f"    ✓ gece sert bandı kilit sonrası da dolabiliyor")
 
 
+# %% [HÜCRE 19F] — GECE KAPASİTE RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ─
+# NE ZAMAN: model INFEASIBLE ya da UNKNOWN döndüğünde, 45 dakika beklemeden
+# "gece kovaları gerçekten dolabiliyor mu?" sorusunu cevaplar. Hücreleri
+# 0'dan buraya kadar koşmak yeterli — H21 (çöz) çalıştırılmaz.
+#
+# NEDEN GECE ÖZEL: hafta içi gece kovalarında SERT band var (talep ± GECE_BUFFER).
+# Alt sınırı dolduracak kadar UYGUN agent yoksa model çözümsüz olur ve bunu
+# hiçbir ağırlık kurtaramaz. Gündüz kovalarında band yok (yumuşak ceza) →
+# orada eksik kalır ama çözüm yine bulunur.
+#
+# ÜÇ KADEME — üstteki sorunu açıklıyorsa alttakine bakmaya gerek yok:
+#   [1] KİM YAZILAMAZ  — havuz ne kadar daraldı, hangi kural daraltmış
+#   [2] KOVA BAZLI     — her gece kovası tek tek: uygun agent ≥ alt sınır mı
+#   [3] HAFTA BAZLI    — takım bütünlüğü (H19) hesaba katılınca yeterli mi
+_gece_t = set(GECE_BASLANGIC)                       # {"00:00", "24:00"}
+_bilinmeyen_l = globals().get("_bilinmeyen", [])    # H14B'den (yoksa boş)
+
+print("=" * 78)
+print("H19F — GECE KAPASİTE RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
+print("=" * 78)
+
+# ── [1] HAVUZ: kim geceye yazılamaz, neden ───────────────────────────
+_gece_yazilabilir = [a for a in AGENTS
+                     if a not in junior_agents and a not in sabah_agents]
+print(f"\n[1] GECEYE YAZILABİLİR HAVUZ")
+print(f"    toplam agent                       : {len(AGENTS):>5}")
+print(f"    − kıdemsiz/bilinmeyen (H14B)       : {len(junior_agents):>5}"
+      + (f"   [bunun {len(_bilinmeyen_l)}'i KIDEMİ BİLİNMEYEN, "
+         f"BILINMEYEN_KIDEMSIZ={BILINMEYEN_KIDEMSIZ}]"
+         if _bilinmeyen_l else ""))
+print(f"    − sabahçı (H13, bitiş ≤20:00)      : "
+      f"{len(sabah_agents - junior_agents):>5}")
+print(f"    = geceye yazılabilir               : {len(_gece_yazilabilir):>5}")
+if _bilinmeyen_l and BILINMEYEN_KIDEMSIZ:
+    print(f"    → BILINMEYEN_KIDEMSIZ=False yapılsa havuz "
+          f"{len(_gece_yazilabilir) + len(_bilinmeyen_l)} olurdu "
+          f"(+{len(_bilinmeyen_l)}). Aşağıdaki tablolarda bu fark kritikse")
+    print(f"      ya bayrağı kapat ya da o agentların kıdemini df_kidem'e gir.")
+
+# ── [2] KOVA BAZLI: her gece kovası sert bandın altını dolduruyor mu ──
+# "uygun" = o kovada FİİLEN çalışabilen agent (_kova_calisabilir: izin/off_t2 →
+# değişken yok, H13 sabahçı, H14B kıdem, H14 hamile hafta sonu). Bu bir ÜST
+# sınır: takım bütünlüğü (H19) ve 11 saat/7 gün taşıması daha da daraltabilir.
+_kova_satir, _kova_sorun = [], []
+for (_ds, _v), _kisi in talep.items():
+    if saat[(_ds, _v)][0] not in _gece_t:
+        continue
+    _d = dt.date.fromisoformat(_ds)
+    _hs = _d.weekday() >= 5
+    _alt = _kisi - (HS_TOL if _hs else GECE_BUFFER)
+    _uy = sum(1 for a in AGENTS if _kova_calisabilir(a, _ds, _v))
+    _kova_satir.append((_ds, _d.weekday(), _kisi, _alt, _uy, _uy - _alt))
+    if _uy < _alt:
+        _kova_sorun.append((_ds, _kisi, _alt, _uy))
+_kova_satir.sort(key=lambda r: r[5])                # en dar önce
+print(f"\n[2] KOVA BAZLI  ({len(_kova_satir)} gece kovası; "
+      f"alt sınır = talep − {GECE_BUFFER} hafta içi / − {HS_TOL} hafta sonu)")
+print(f"    {'tarih':>12} {'gün':>4} {'talep':>6} {'alt sınır':>10} "
+      f"{'uygun agent':>12} {'pay':>6}")
+for _ds, _wd, _k, _alt, _uy, _pay in _kova_satir[:12]:
+    print(f"    {_ds:>12} {DAY_TR[_wd]:>4} {_k:>6} {_alt:>10} {_uy:>12} "
+          f"{_pay:>+6}{'   ⚠ DOLMAZ' if _pay < 0 else ''}")
+if len(_kova_satir) > 12:
+    print(f"    ... ({len(_kova_satir) - 12} kova daha; en dar 12 gösterildi)")
+if _kova_sorun:
+    print(f"    ⚠ {len(_kova_sorun)} kovada uygun agent ALT SINIRIN ALTINDA →")
+    print(f"      model MATEMATİKSEL OLARAK çözümsüz. Tek başına bu yeter.")
+else:
+    print(f"    ✓ her gece kovasında uygun agent alt sınırı karşılıyor")
+    print(f"      (bu GEREK şart; yeter şart değil — [3]'e bak)")
+
+# ── [3] HAFTA BAZLI: takım bütünlüğü hesaba katılınca ─────────────────
+# H19: gece kovası ancak takımı O HAFTA geceye atanmış üyelerle dolar. Takım
+# bölünemez (ayrılma yalnız fiziksel imkânsızlıkta) → kapasite takım
+# boyutlarına YUVARLANIR. Bir takımın geceye katkısı = o tipte çalışabilen
+# üye sayısı (takim_etkin_tip, H19C).
+print(f"\n[3] HAFTA BAZLI  (H19 takım bütünlüğü dahil)")
+print(f"    {'hafta':>10} {'zirve gece talep':>17} {'Σ gece-uygun üye':>17} "
+      f"{'gereken takım':>14}")
+_h_sorun = 0
+for _wk in sorted(haftalar):
+    _hi = [g for g in haftalar[_wk] if dt.date.fromisoformat(g).weekday() < 5]
+    if not _hi:
+        continue
+    _gt = [t for t in hafta_tipler.get(_wk, []) if t in _gece_t]
+    if not _gt:
+        continue
+    _zirve = max(sum(talep[(g, v)] for v in gun_vardiyalari[g]
+                     for _t in _gt
+                     if (g, v) in talep and saat[(g, v)][0] == _t) for g in _hi)
+    # takımların gece katkısı, büyükten küçüğe → zirveyi kaç takım kapatır
+    _kat = sorted((takim_etkin_tip.get((T, _wk, _t), 0)
+                   for T in takimlar for _t in _gt), reverse=True)
+    _top, _n = 0, 0
+    for _c in _kat:
+        if _top >= _zirve:
+            break
+        _top += _c
+        _n += 1
+    _yeter = _top >= _zirve
+    if not _yeter:
+        _h_sorun += 1
+    print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_zirve:>17} {sum(_kat):>17} "
+          f"{(str(_n) + ' takım') if _yeter else 'YETMİYOR':>14}"
+          f"{'   ⚠' if not _yeter else ''}")
+if _h_sorun:
+    print(f"    ⚠ {_h_sorun} haftada TÜM takımlar geceye verilse bile zirve talep")
+    print(f"      karşılanmıyor → gece bandı kırılmak zorunda (çözümsüzlük).")
+else:
+    print(f"    ✓ her haftada yeterli takım kapasitesi var")
+print(f"    NOT: 'gereken takım' o haftanın gece zirvesini kapatmak için EN AZ")
+print(f"         kaç takımın geceye gitmesi gerektiği. Sayı büyükse gündüz")
+print(f"         tiplerine takım kalmaz → gündüz eksiği artar (ama çözümsüzlük")
+print(f"         yapmaz, orada band yok).")
+print("=" * 78)
+
+
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
 # Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
 # (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
