@@ -4,3 +4,11 @@ Yani model hizmet riskini düşürüyor, plan maliyeti düşürüyor — asıl a
 
 
 Model gün gün değil, hafta boyu sabit kadro kuruyor. Talep hafta içinde düştüğünde plan elle aşağı çekilebiliyor, model çekemiyor. Ağustos'un 2. haftasında fark buradan çıktı.
+
+
+Plan uçlarda (sabah açılış, akşam kapanış) eksik kalıyor; model orta saatlerde fazla kadro tutuyor. İkisi de gece minimum vardiya kuralı yüzünden ihtiyaç üstünde.
+
+İki somut aksiyon
+
+Plan tarafı: 19:30–22:00 arasına takviye — burada hizmet riski var
+Model tarafı: 15:00–16:30 shrinkage/slot_cap ayarı gözden geçirilmeli, 100 kişilik fazlalık gerçek maliyet
