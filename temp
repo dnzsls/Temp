@@ -1,3 +1,3 @@
-k = df_actual[df_actual['line_based_main_group']=='kitle_cagrilar']
-pay = k.groupby('resource_group_key')['nof_call'].sum()
-print((pay / pay.sum() * 100).round(1).sort_values(ascending=False))
+"Slot bazında model biraz önde, sapma büyüklüğünde plan biraz önde → pratikte başa baş"
+Modelin gerçek avantajı burada değil: fazla kadroyu daha az slotta eksiğe düşerek sağlıyor (eksik_slot 263 vs 372)
+Yani model hizmet riskini düşürüyor, plan maliyeti düşürüyor — asıl anlatılacak hikâye bu
