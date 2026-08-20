@@ -760,6 +760,28 @@ def kalibre_aht(results, queue='kitle', adaylar=range(90, 331, 10), verbose=True
     return en_iyi
 
 
+def _ihtiyac_kolonu(df, aht):
+    """aht: sayı | {saat: aht} | DataFrame(data_date, interval, aht)."""
+    if isinstance(aht, pd.DataFrame):
+        d = df.merge(aht, on=['data_date', 'interval'], how='left')
+        varsayilan = float(aht['aht'].mean())
+        eksik = int(d['aht'].isna().sum())
+        if eksik:
+            print(f"  ℹ {eksik:,} slotta alt-kuyruk AHT'si yok, "
+                  f"ortalama ({varsayilan:.0f} sn) kullanıldı.")
+        d['aht'] = d['aht'].fillna(varsayilan)
+        return [gerekli_kisi(int(c), a, s) for c, a, s in
+                zip(d['actual_kitle'], d['aht'], d['interval'])]
+    cache = {}
+    out = []
+    for c, s in zip(df['actual_kitle'], df['interval']):
+        key = (int(c), s)
+        if key not in cache:
+            cache[key] = gerekli_kisi(int(c), _aht_of(aht, s), s)
+        out.append(cache[key])
+    return out
+
+
 def hakem_tablosu(df_kitle, df_act30, aht, esik=2, verbose=True):
     """Gerçek çağrı ihtiyacına kim daha yakın: plan mı model mi?
 
@@ -772,7 +794,7 @@ def hakem_tablosu(df_kitle, df_act30, aht, esik=2, verbose=True):
     if df.empty:
         raise ValueError("df_kitle ile actual kesişmedi — tarih aralıklarını kontrol et.")
 
-    df['ihtiyac'] = _erlang_serisi(df['actual_kitle'], df['interval'], aht)
+    df['ihtiyac'] = _ihtiyac_kolonu(df, aht)
     df['model_sapma'] = df['model_toplam'] - df['ihtiyac']
     df['plan_sapma'] = df['plan_toplam'] - df['ihtiyac']
 
@@ -973,6 +995,78 @@ def aht_saatlik(df_aht, queue='kitle', df_sq_calls=None, verbose=True):
     return saatlik
 
 
+DEFAULT_SQ_COLS = {
+    'date':      ['data_date', 'date', 'tarih'],
+    'time':      ['min_time_period_value', 'interval', 'saat_dilimi'],
+    'sub_queue': ['sub_queue', 'alt_kuyruk'],
+    'calls':     ['nof_call', 'calls', 'cagri', 'call_count'],
+}
+
+
+def aht_slot_bazli(df_actual_sq, df_aht, queue='kitle', sq_cols=None,
+                   verbose=True):
+    """Her (gün × slot) için alt-kuyruk çağrı payına göre ağırlıklı AHT.
+
+    Modelin calculate_weighted_aht'i ile aynı mantık:
+        aht_slot = Σ(çağrı_sq × aht_sq) / Σ(çağrı_sq)
+
+    df_actual_sq (uzun format): data_date, min_time_period_value,
+                                sub_queue, nof_call
+    df_aht                    : saat, sub_queue, line_based_main_group,
+                                weighted_avg_aht
+
+    Çıktı: data_date, interval, aht   → hakem/rr fonksiyonlarına doğrudan verilir
+    """
+    cols = {**DEFAULT_SQ_COLS, **(sq_cols or {})}
+    d_col = _resolve_col(df_actual_sq, cols['date'])
+    t_col = _resolve_col(df_actual_sq, cols['time'])
+    q_col = _resolve_col(df_actual_sq, cols['sub_queue'])
+    c_col = _resolve_col(df_actual_sq, cols['calls'])
+    eksik = [k for k, v in (('date', d_col), ('time', t_col),
+                            ('sub_queue', q_col), ('calls', c_col)) if v is None]
+    if eksik:
+        raise KeyError(f"ALT-KUYRUK: şu alan(lar) için kolon yok: {eksik}  |  "
+                       f"mevcut: {list(df_actual_sq.columns)}")
+
+    d = pd.DataFrame({
+        'data_date': _to_date_series(df_actual_sq[d_col]).dt.normalize(),
+        'interval': df_actual_sq[t_col].map(_to_slot_30),
+        'sub_queue': df_actual_sq[q_col].astype(str).str.strip(),
+        'calls': pd.to_numeric(df_actual_sq[c_col], errors='coerce').fillna(0),
+    })
+    d['saat'] = d['interval'].str[:2].astype(int)
+    d = d.groupby(['data_date', 'interval', 'saat', 'sub_queue'],
+                  as_index=False)['calls'].sum()
+
+    a = df_aht[df_aht['line_based_main_group'] == f"{queue}_cagrilar"].copy()
+    if a.empty:
+        raise ValueError(f"df_aht'de '{queue}_cagrilar' yok.")
+    a['saat'] = a['saat'].astype(int)
+    a['sub_queue'] = a['sub_queue'].astype(str).str.strip()
+    a['aht'] = pd.to_numeric(a['weighted_avg_aht'], errors='coerce')
+
+    m = d.merge(a[['saat', 'sub_queue', 'aht']], on=['saat', 'sub_queue'],
+                how='left')
+    eslesmeyen = sorted(m[m['aht'].isna()]['sub_queue'].unique())
+    if eslesmeyen:
+        print(f"  ⚠ df_aht'de karşılığı olmayan alt-kuyruklar (atlandı): "
+              f"{eslesmeyen[:8]}")
+    m = m.dropna(subset=['aht'])
+    m = m[m['calls'] > 0]
+
+    out = (m.assign(x=m['calls'] * m['aht'])
+             .groupby(['data_date', 'interval'], as_index=False)
+             .agg(x=('x', 'sum'), c=('calls', 'sum')))
+    out['aht'] = (out['x'] / out['c']).round(1)
+    out = out[['data_date', 'interval', 'aht']]
+
+    if verbose:
+        print(f"AHT (slot bazlı, çağrı ağırlıklı): {out['aht'].min():.0f}–"
+              f"{out['aht'].max():.0f} sn, {len(out):,} slot  "
+              f"(ortalama {out['aht'].mean():.0f} sn)")
+    return out
+
+
 def _aht_of(aht, slot):
     """aht tek sayı ya da {saat: aht} olabilir."""
     if isinstance(aht, dict):
@@ -1029,15 +1123,7 @@ def rr_tablosu(df_kitle, df_act30, aht, esik_rr=0.05, cagri_adedi=CAGRI_ADEDI,
     if df.empty:
         raise ValueError("df_kitle ile actual kesişmedi — tarihleri kontrol et.")
 
-    cache = {}
-    def _ihtiyac(c, s):
-        key = (int(c), s)
-        if key not in cache:
-            cache[key] = gerekli_kisi(int(c), _aht_of(aht, s), s)
-        return cache[key]
-
-    df['ihtiyac'] = [_ihtiyac(c, s) for c, s in
-                     zip(df['actual_kitle'], df['interval'])]
+    df['ihtiyac'] = _ihtiyac_kolonu(df, aht)
 
     # Erlang bazlı RR = atanan / ihtiyaç
     for kim, kol in (('model', 'model_toplam'), ('plan', 'plan_toplam')):
@@ -1206,14 +1292,20 @@ else:
 
 # %% [HÜCRE 6] — HAKEM: GERÇEK ÇAĞRIDAN ERLANG
 
-_yok = _eksik('df_kitle', 'df_act30', 'results')
+# AHT önceliği: alt-kuyruk kırılımı > saatlik df_aht > pickle kalibrasyonu
+_yok = _eksik('df_kitle', 'df_act30')
 if not _yok:
-    AHT = kalibre_aht(results)                 # df_aht varsa HÜCRE 8'i kullan
+    if 'df_actual_sq' in globals() and 'df_aht' in globals():
+        AHT = aht_slot_bazli(df_actual_sq, df_aht, queue='kitle')
+    elif 'df_aht' in globals():
+        AHT = aht_saatlik(df_aht, queue='kitle')
+    else:
+        AHT = kalibre_aht(results)
     df_hakem = hakem_tablosu(df_kitle, df_act30, aht=AHT, esik=2)
     show(df_hakem, 10)
 else:
     print(f"Eksik: {', '.join(_yok)}")
-    print("  df_kitle → HÜCRE 3  |  df_act30 → HÜCRE 5B  |  results → HÜCRE 2")
+    print("  df_kitle → HÜCRE 3  |  df_act30 → HÜCRE 5B")
 
 
 # %% [HÜCRE 7] — GÜN / SAAT BAZINDA KAZANAN
@@ -1230,8 +1322,11 @@ else:
 
 _yok = _eksik('df_kitle', 'df_act30', 'df_aht')
 if not _yok:
-    AHT_SAATLIK = aht_saatlik(df_aht, queue='kitle')
-    df_rr = rr_tablosu(df_kitle, df_act30, aht=AHT_SAATLIK, esik_rr=0.05)
+    if 'df_actual_sq' in globals():
+        AHT_KULLANILAN = aht_slot_bazli(df_actual_sq, df_aht, queue='kitle')
+    else:
+        AHT_KULLANILAN = aht_saatlik(df_aht, queue='kitle')
+    df_rr = rr_tablosu(df_kitle, df_act30, aht=AHT_KULLANILAN, esik_rr=0.05)
     show(df_rr, 10)
 else:
     print(f"Eksik: {', '.join(_yok)}")
