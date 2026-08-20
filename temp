@@ -12,3 +12,6 @@ Plan uçlarda (sabah açılış, akşam kapanış) eksik kalıyor; model orta sa
 
 Plan tarafı: 19:30–22:00 arasına takviye — burada hizmet riski var
 Model tarafı: 15:00–16:30 shrinkage/slot_cap ayarı gözden geçirilmeli, 100 kişilik fazlalık gerçek maliyet
+
+
+Plan ortalamada ihtiyacı tutturuyor ama gün içinde savruluyor: gece %60 eksik, öğleden sonra %35 fazla. Model daha dar bantta kalıyor — iki farklı RR yönteminde de sonuç aynı.
