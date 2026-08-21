@@ -878,41 +878,56 @@ def skor_ozeti(df_hakem, esik=2):
     return ozet
 
 
-def hakem_gunluk(df_hakem):
-    """Gün bazında kazanan."""
+def _hakem_ozet(df_hakem, anahtar, nasil, esik=2):
+    """hakem tablosunu gün ya da saat bazına toplar (model2 varsa dahil)."""
     d = df_hakem[df_hakem['kazanan'] != '—'].copy()
-    g = d.groupby('data_date').agg(
-        ihtiyac=('ihtiyac', 'sum'),
-        model=('model_toplam', 'sum'),
-        plan=('plan_toplam', 'sum'),
-        model_mutlak_sapma=('model_sapma', lambda s: s.abs().sum()),
-        plan_mutlak_sapma=('plan_sapma', lambda s: s.abs().sum()),
-    ).reset_index()
-    g['kazanan'] = g.apply(
-        lambda r: 'PLAN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
-        else ('MODEL' if r['model_mutlak_sapma'] < r['plan_mutlak_sapma']
-              else 'BERABERE'), axis=1)
-    g['gun'] = pd.to_datetime(g['data_date']).dt.weekday.map(
-        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i])
-    return g[['data_date', 'gun', 'ihtiyac', 'model', 'plan',
-              'model_mutlak_sapma', 'plan_mutlak_sapma', 'kazanan']]
+    m2 = 'model2_toplam' in d.columns
+    agg = {
+        'ihtiyac': ('ihtiyac', nasil),
+        'model':   ('model_toplam', nasil),
+        'plan':    ('plan_toplam', nasil),
+        'model_mutlak_sapma': ('model_sapma',
+                               (lambda s: s.abs().sum()) if nasil == 'sum'
+                               else (lambda s: s.abs().mean())),
+        'plan_mutlak_sapma':  ('plan_sapma',
+                               (lambda s: s.abs().sum()) if nasil == 'sum'
+                               else (lambda s: s.abs().mean())),
+    }
+    if m2:
+        agg['model2'] = ('model2_toplam', nasil)
+        agg['model2_mutlak_sapma'] = ('model2_sapma',
+                                      (lambda s: s.abs().sum()) if nasil == 'sum'
+                                      else (lambda s: s.abs().mean()))
+        if 'kayip' in d.columns:
+            agg['kayip'] = ('kayip', nasil)
+
+    g = d.groupby(anahtar).agg(**agg).reset_index()
+    if nasil == 'mean':
+        g = g.round(1)
+
+    adaylar = {'MODEL': 'model_mutlak_sapma', 'PLAN': 'plan_mutlak_sapma'}
+    if m2:
+        adaylar['MODEL2'] = 'model2_mutlak_sapma'
+    g['kazanan'] = _kazanan_sapma(g, adaylar, esik=esik)
+
+    kolonlar = [anahtar, 'ihtiyac', 'model'] + (['model2'] if m2 else []) + ['plan',
+                'model_mutlak_sapma'] + (['model2_mutlak_sapma'] if m2 else []) + [
+                'plan_mutlak_sapma'] + (['kayip'] if m2 and 'kayip' in g.columns else []) + [
+                'kazanan']
+    return g[kolonlar]
 
 
-def hakem_saat(df_hakem):
-    """Saat bazında kazanan — hangi saatlerde plan daha iyi."""
-    d = df_hakem[df_hakem['kazanan'] != '—'].copy()
-    g = d.groupby('interval').agg(
-        ihtiyac=('ihtiyac', 'mean'),
-        model=('model_toplam', 'mean'),
-        plan=('plan_toplam', 'mean'),
-        model_mutlak_sapma=('model_sapma', lambda s: s.abs().mean()),
-        plan_mutlak_sapma=('plan_sapma', lambda s: s.abs().mean()),
-    ).round(1).reset_index()
-    g['kazanan'] = g.apply(
-        lambda r: 'PLAN' if r['plan_mutlak_sapma'] < r['model_mutlak_sapma']
-        else ('MODEL' if r['model_mutlak_sapma'] < r['plan_mutlak_sapma']
-              else 'BERABERE'), axis=1)
+def hakem_gunluk(df_hakem, esik=2):
+    """Gün bazında kazanan (model2 varsa üçlü)."""
+    g = _hakem_ozet(df_hakem, 'data_date', 'sum', esik)
+    g.insert(1, 'gun', pd.to_datetime(g['data_date']).dt.weekday.map(
+        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i]))
     return g
+
+
+def hakem_saat(df_hakem, esik=2):
+    """Saat bazında kazanan (model2 varsa üçlü)."""
+    return _hakem_ozet(df_hakem, 'interval', 'mean', esik)
 
 
 
@@ -1304,33 +1319,58 @@ def rr_skor(df_rr, esik_rr=0.05):
     show(pd.DataFrame(satirlar))
 
 
-def rr_gunluk(df_rr):
-    """Gün bazında ortalama RR ve kazanan."""
+def _rr_ozet(df_rr, anahtar, nasil, esik_rr=0.05):
+    """RR tablosunu gün ya da saat bazına toplar (model2 varsa dahil).
+
+    kişi/çağrı kolonları toplam ya da ortalama, RR kolonları HER ZAMAN ortalama
+    (oranların toplamı anlamsız).
+    """
     d = df_rr[df_rr['kazanan_erlang'] != '—'].copy()
-    g = d.groupby('data_date').agg(
-        cagri=('actual_kitle', 'sum'), ihtiyac=('ihtiyac', 'sum'),
-        model=('model_toplam', 'sum'), plan=('plan_toplam', 'sum'),
-        rr_model=('rr_model', 'mean'), rr_plan=('rr_plan', 'mean'),
-        kap_rr_model=('kap_rr_model', 'mean'), kap_rr_plan=('kap_rr_plan', 'mean'),
-    ).round(2).reset_index()
-    g['gun'] = pd.to_datetime(g['data_date']).dt.weekday.map(
-        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i])
-    g['kazanan'] = np_kazanan(g['rr_model'], g['rr_plan'])
-    return g[['data_date', 'gun', 'cagri', 'ihtiyac', 'model', 'plan',
-              'rr_model', 'rr_plan', 'kap_rr_model', 'kap_rr_plan', 'kazanan']]
+    m2 = 'rr_model2' in d.columns
+    agg = {
+        'cagri':   ('actual_kitle', nasil),
+        'ihtiyac': ('ihtiyac', nasil),
+        'model':   ('model_toplam', nasil),
+        'plan':    ('plan_toplam', nasil),
+        'rr_model': ('rr_model', 'mean'),
+        'rr_plan':  ('rr_plan', 'mean'),
+        'kap_rr_model': ('kap_rr_model', 'mean'),
+        'kap_rr_plan':  ('kap_rr_plan', 'mean'),
+    }
+    if m2:
+        agg['model2'] = ('model2_toplam', nasil)
+        agg['rr_model2'] = ('rr_model2', 'mean')
+        agg['kap_rr_model2'] = ('kap_rr_model2', 'mean')
+        if 'kayip' in d.columns:
+            agg['kayip'] = ('kayip', nasil)
+
+    g = d.groupby(anahtar).agg(**agg).round(2).reset_index()
+    g['kazanan_erlang'] = np_kazanan(
+        g['rr_model'], g['rr_plan'], g['rr_model2'] if m2 else None, esik_rr)
+    g['kazanan_kapasite'] = np_kazanan(
+        g['kap_rr_model'], g['kap_rr_plan'],
+        g['kap_rr_model2'] if m2 else None, esik_rr)
+
+    kolonlar = ([anahtar, 'cagri', 'ihtiyac', 'model']
+                + (['model2'] if m2 else []) + ['plan',
+                'rr_model'] + (['rr_model2'] if m2 else []) + ['rr_plan',
+                'kap_rr_model'] + (['kap_rr_model2'] if m2 else []) + ['kap_rr_plan']
+                + (['kayip'] if m2 and 'kayip' in g.columns else [])
+                + ['kazanan_erlang', 'kazanan_kapasite'])
+    return g[kolonlar]
 
 
-def rr_saat(df_rr):
-    """Saat bazında ortalama RR ve kazanan."""
-    d = df_rr[df_rr['kazanan_erlang'] != '—'].copy()
-    g = d.groupby('interval').agg(
-        ihtiyac=('ihtiyac', 'mean'),
-        model=('model_toplam', 'mean'), plan=('plan_toplam', 'mean'),
-        rr_model=('rr_model', 'mean'), rr_plan=('rr_plan', 'mean'),
-        kap_rr_model=('kap_rr_model', 'mean'), kap_rr_plan=('kap_rr_plan', 'mean'),
-    ).round(2).reset_index()
-    g['kazanan'] = np_kazanan(g['rr_model'], g['rr_plan'])
+def rr_gunluk(df_rr, esik_rr=0.05):
+    """Gün bazında RR ve kazanan (model2 varsa üçlü)."""
+    g = _rr_ozet(df_rr, 'data_date', 'sum', esik_rr)
+    g.insert(1, 'gun', pd.to_datetime(g['data_date']).dt.weekday.map(
+        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i]))
     return g
+
+
+def rr_saat(df_rr, esik_rr=0.05):
+    """Saat bazında RR ve kazanan (model2 varsa üçlü)."""
+    return _rr_ozet(df_rr, 'interval', 'mean', esik_rr)
 
 
 def _eksik(*adlar):
@@ -1339,14 +1379,29 @@ def _eksik(*adlar):
     return [a for a in adlar if a not in g or g[a] is None]
 
 
-def np_kazanan(rr_model, rr_plan, esik=0.05):
-    """1.00'e daha yakın olan kazanır."""
-    m = (rr_model - 1).abs()
-    p = (rr_plan - 1).abs()
-    out = pd.Series('BERABERE', index=rr_model.index)
-    out[p < m - esik] = 'PLAN'
-    out[m < p - esik] = 'MODEL'
-    return out
+def np_kazanan(rr_model, rr_plan, rr_model2=None, esik=0.05):
+    """1.00'e daha yakın olan kazanır. rr_model2 verilirse üçlü yarışır."""
+    adaylar = {'MODEL': rr_model, 'PLAN': rr_plan}
+    if rr_model2 is not None:
+        adaylar['MODEL2'] = rr_model2
+    s = pd.DataFrame({ad: (v - 1).abs() for ad, v in adaylar.items()})
+    if s.shape[1] == 1:
+        return pd.Series(s.columns[0], index=s.index)
+    en_iyi = s.min(axis=1)
+    ikinci = s.apply(lambda r: r.nsmallest(2).iloc[-1], axis=1)
+    kaz = s.idxmin(axis=1).where(ikinci - en_iyi > esik, 'BERABERE')
+    kaz[s.isna().any(axis=1)] = '—'
+    return kaz
+
+
+def _kazanan_sapma(g, adaylar, esik=2):
+    """Mutlak sapma kolonlarından kazananı seçer (küçük olan kazanır)."""
+    s = pd.DataFrame({ad: g[kol] for ad, kol in adaylar.items()})
+    if s.shape[1] == 1:
+        return pd.Series(s.columns[0], index=s.index)
+    en_iyi = s.min(axis=1)
+    ikinci = s.apply(lambda r: r.nsmallest(2).iloc[-1], axis=1)
+    return s.idxmin(axis=1).where(ikinci - en_iyi > esik, 'BERABERE')
 
 
 
