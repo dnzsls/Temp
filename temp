@@ -1,4 +1,4 @@
-# =============================================================================
+-# =============================================================================
 # AYLIK GENEL BAKIŞ — kapasite / vardiya başlangıcı / çağrı  (30 DK)
 # =============================================================================
 # Sunum görselleri için. Karşılaştırma akışından BAĞIMSIZ, sadece iki girdi:
@@ -611,6 +611,86 @@ def grafik_isi_haritasi(df, kolon='kapasite_toplam', queue='KİTLE', kaydet=None
     return fig
 
 
+def grafik_yogunluk_haritasi(df, queue='KİTLE', merkez=None, min_kapasite=5,
+                             kaydet=None):
+    """Gün × slot: KİŞİ-SAAT BAŞINA ÇAĞRI — nerede dar, nerede bol.
+
+    Değer = cagri / (kapasite_toplam / 2)
+    Renk ıraksak: merkez = ayın medyanı.
+      KIRMIZI → yoğunluk yüksek, kapasite dar
+      MAVİ    → yoğunluk düşük, kapasite bol
+      GRİ     → kapasite yok / ölçülemez (gece slotları)
+
+    merkez: None ise ayın medyanı kullanılır; sabit bir hedef vermek
+      istersen sayı geç (örn. 16).
+    min_kapasite: bu kişi sayısının altındaki slotlar ölçülmez (gri).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import TwoSlopeNorm
+
+    d = df.copy()
+    kisi_saat = d['kapasite_toplam'] / 2
+    d['yogunluk'] = (d['cagri'] / kisi_saat.replace(0, np.nan))
+    d.loc[d['kapasite_toplam'] < min_kapasite, 'yogunluk'] = np.nan
+
+    p = d.pivot_table(index='data_date', columns='interval', values='yogunluk',
+                      aggfunc='mean').reindex(columns=SLOTS_30)
+
+    gecerli = p.values[~np.isnan(p.values)]
+    if not len(gecerli):
+        raise ValueError("Ölçülebilir slot yok — min_kapasite'yi düşür.")
+    orta = float(np.median(gecerli)) if merkez is None else float(merkez)
+    alt, ust = np.percentile(gecerli, [5, 95])
+    alt, ust = min(alt, orta * 0.99), max(ust, orta * 1.01)
+
+    cmap = plt.get_cmap('RdBu_r').copy()
+    cmap.set_bad(RENK['izgara'])
+
+    fig, ax = plt.subplots(figsize=(15, 0.32 * len(p) + 2.4))
+    fig.patch.set_facecolor(RENK['yuzey'])
+    im = ax.imshow(p.values, aspect='auto', cmap=cmap, interpolation='nearest',
+                   norm=TwoSlopeNorm(vcenter=orta, vmin=alt, vmax=ust))
+
+    ax.set_xticks(range(0, len(SLOTS_30), 4))
+    ax.set_xticklabels(SLOTS_30[::4], fontsize=8, color=RENK['metin2'])
+    ax.set_yticks(range(len(p)))
+    ax.set_yticklabels([f"{d.day:02d} {GUN_TR[d.weekday()]}" for d in p.index],
+                       fontsize=7, color=RENK['metin2'])
+    ax.set_title(f"{queue} — kişi-saat başına çağrı (gün × slot)",
+                 fontsize=11, fontweight='bold', color=RENK['metin'],
+                 loc='left', pad=10)
+    for k in ax.spines.values():
+        k.set_visible(False)
+
+    cb = fig.colorbar(im, ax=ax, pad=0.01)
+    cb.ax.tick_params(labelsize=8, colors=RENK['metin2'])
+    cb.set_label(f"çağrı / kişi-saat  (orta çizgi {orta:.1f})",
+                 fontsize=8, color=RENK['metin2'])
+    cb.ax.axhline(orta, color=RENK['metin'], lw=1)
+
+    fig.tight_layout()
+    if kaydet:
+        fig.savefig(kaydet, dpi=150, facecolor=fig.get_facecolor())
+        print(f"✓ {kaydet}")
+    return fig
+
+
+def yogunluk_tablosu(df, min_kapasite=5):
+    """Isı haritasının sayısal hali: slot × gün tipi yoğunluk özeti."""
+    import numpy as np
+    d = df.copy()
+    d['kisi_saat'] = d['kapasite_toplam'] / 2
+    d = d[d['kapasite_toplam'] >= min_kapasite]
+    g = d.groupby(['hafta_sonu', 'interval'], as_index=False)[['cagri', 'kisi_saat']].sum()
+    g['cagri_kisi_saat'] = (g['cagri'] / g['kisi_saat']).round(1)
+    genel = d['cagri'].sum() / d['kisi_saat'].sum()
+    g['ay_ortasina_fark'] = (g['cagri_kisi_saat'] - genel).round(1)
+    g['gun_tipi'] = np.where(g['hafta_sonu'] == 1, 'hafta sonu', 'hafta içi')
+    return g[['gun_tipi', 'interval', 'cagri', 'kisi_saat',
+              'cagri_kisi_saat', 'ay_ortasina_fark']]
+
+
 def excel_yaz(df, yol=None, year=2026, month=7):
     """Slot özeti + gün özeti + ham tabloyu Excel'e yazar."""
     yol = yol or f"genel_bakis_{year}_{month:02d}.xlsx"
@@ -702,6 +782,16 @@ else:
 if 'df_genel' in globals():
     grafik_isi_haritasi(df_genel, 'kapasite_toplam', queue=QUEUE.upper())
     grafik_isi_haritasi(df_genel, 'cagri', queue=QUEUE.upper())
+else:
+    print("df_genel yok — HÜCRE 2'yi çalıştır.")
+
+
+# %% [HÜCRE 7B] — GRAFİK: YOĞUNLUK (kişi-saat başına çağrı)
+# Kırmızı = kapasite dar · Mavi = kapasite bol · Gri = ölçülemez (kapasite yok)
+
+if 'df_genel' in globals():
+    grafik_yogunluk_haritasi(df_genel, queue=QUEUE.upper())
+    show(yogunluk_tablosu(df_genel))
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
 
