@@ -1946,9 +1946,35 @@ else:
 # AĞIRLIK YOK — sert kısıt. Eksik cezası (W_EKSIK_HI) zaten x tarafında duruyor,
 # bu kısıt onu ARAMA için görünür kılıyor; amaç fonksiyonuna terim EKLENMİYOR.
 TIP_KAPASITE_SERT = True     # False → kısıt kurulmaz (eski davranış)
-TIP_ACIK_TOLERANS = 0        # bütçeye eklenen ek pay (hafta başına).
-                             # 0 güvenli: bütçe zaten açgözlü tanığı içeriyor.
-                             # INFEASIBLE gelirse 1-2 artır (yuvarlama payı).
+# ── BÜTÇE FORMÜLÜ — v3'te HATALIYDI, burada düzeltildi ───────────────
+# v3: BÜTÇE = max(yapısal, açgözlü) + TOLERANS(0)
+#   Sorun: açgözlü MATEMATİKSEL OLARAK her zaman ≥ yapısal (bir sezgisel teorik
+#   minimumdan iyi olamaz) → max() hiçbir zaman yapısal'ı seçmiyor, o terim ÖLÜ.
+#   Bütçe %100 sezgiselin O GÜNKÜ performansına bağlanmış oluyordu.
+#   ÖLÇÜLDÜ (aynı ay, iki farklı pickle; talep/kapasite BİREBİR AYNI):
+#     yapısal  : 19 13  9 14 12   ← değişmedi (gerçek zorluk)
+#     açgözlü  : 24 27 17 32 25   → 22 20 15 25 28   ← sezgisel şansı
+#     BÜTÇE    : 125             → 110               ← 15 kişi-gün DARALDI
+#   Yani sezgisel daha iyi paketleyince kısıt SERTLEŞTİ. Model 2700 sn'de tek
+#   çözüm bile bulamadı; TIP_ACIK_TOLERANS=3 (eski seviyeye dönüş) çözdü.
+#   Kavram karışıklığı: "en az bir çözüm sığıyor" (fizibilite) ile "yeterince
+#   çözüm sığıyor" (çözücünün manevra alanı) aynı şey sanılmıştı.
+#
+# v4: BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS
+#   • açgözlü  → FİZİBİLİTE TANIĞI olarak KALIYOR (alt sınır): o çözüm bütçeyi
+#     sağladığı için kısıt asla INFEASIBLE yapamaz. Ama artık TEK belirleyici değil.
+#   • yapısal + PAY → ZORUNLULUK tabanı. Sezgiselden bağımsız, veriye dayalı.
+#     Sezgisel şanslı bir gün geçirse bile bütçe bunun altına düşemez.
+#   Artık max() gerçekten çalışıyor: bazen açgözlü, bazen taban seçiliyor.
+TIP_PAY_TIP_BASI = 2         # tip BAŞINA yuvarlama payı (kişi).
+                             # Gerekçe: takım bölünemez (H19) → her tipte bir
+                             # miktar israf KAÇINILMAZ. Ölçülen gerçek israf
+                             # (açgözlü − yapısal) hafta başına 6-16 arasında,
+                             # tip sayısı ~8 → tip başına ~1-2 kişi.
+                             # 0 → v3 davranışı (taban devre dışı, sadece açgözlü)
+TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay.
+                             # PAY devreye girdiği için artık 0 yeterli;
+                             # v3'te bu 3 yapılarak elle telafi ediliyordu.
 
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
 _19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
@@ -1982,7 +2008,10 @@ if TIP_KAPASITE_SERT and takim_tip:
         if not _zirve19d:
             continue
         _yapisal = max(0, sum(_zirve19d.values()) - _uye_top)
-        _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
+        # PAY: takım bölünmezliğinden doğan KAÇINILMAZ yuvarlama israfı.
+        # Tip sayısına bağlı — sezgiselin performansına DEĞİL.
+        _pay19d = TIP_PAY_TIP_BASI * len(_zirve19d)
+        _butce = max(_greedy.get(_wk, 0), _yapisal + _pay19d) + TIP_ACIK_TOLERANS
         _acik_var, _kt19 = [], []
         for _t, _z in _zirve19d.items():
             # TİPE DUYARLI kapasite: takımın o tipte FİİLEN çalışabilen üyesi
@@ -1996,21 +2025,26 @@ if TIP_KAPASITE_SERT and takim_tip:
         _kt19.append(model.Add(sum(_acik_var) <= _butce))   # açık SADECE kaçınılmaz kadar
         _tes_ekle(f"H19D_tip_kapasite_{_wk[0]}W{_wk[1]}", *_kt19)
         _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
-                          _yapisal, _greedy.get(_wk, 0), _butce))
+                          _yapisal, _greedy.get(_wk, 0), _butce, _pay19d))
 
 if _19d_ozet:
     print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
           f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
     print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} "
-          f"{'açgözlü':>8} {'BÜTÇE':>6}")
+          f"{'pay':>5} {'taban':>6} {'açgözlü':>8} {'BÜTÇE':>6}  seçilen")
     print(f"    (etkin üye = izin/off_t2 düşülmüş; KAPASİTE ayrıca TİPE DUYARLI: "
           f"kıdemsiz geceye, sabahçı geç tipe 0 sayılır)")
-    for _wk, _z, _u, _y, _g, _b in _19d_ozet:
+    for _wk, _z, _u, _y, _g, _b, _p in _19d_ozet:
+        _sec = "TABAN" if (_y + _p) >= _g else "açgözlü"
         _im = "  ← tip açığı YASAK" if _b == 0 else ""
         print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} "
-              f"{_g:>8} {_b:>6}{_im}")
-    print(f"  BÜTÇE = max(yapısal, açgözlü) + TOLERANS({TIP_ACIK_TOLERANS}); açgözlü")
-    print(f"  H19C'nin bulduğu ÇÖZÜM → o çözüm bütçeyi sağlar, kısıt INFEASIBLE yapmaz.")
+              f"{_p:>5} {_y + _p:>6} {_g:>8} {_b:>6}  {_sec}{_im}")
+    print(f"  BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS({TIP_ACIK_TOLERANS})")
+    print(f"  PAY = {TIP_PAY_TIP_BASI} × tip sayısı → sezgiselden BAĞIMSIZ taban.")
+    print(f"  açgözlü hâlâ ALT SINIR (fizibilite tanığı) → kısıt INFEASIBLE yapamaz;")
+    print(f"  ama artık tek belirleyici değil: sezgisel şanslıysa TABAN devreye girer.")
+    print(f"  (v3'te max(yapısal, açgözlü) idi; açgözlü her zaman büyük olduğu için")
+    print(f"   yapısal ÖLÜ terimdi ve bütçe tamamen sezgiselin performansına bağlıydı.)")
     if not _greedy:
         print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
         print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
