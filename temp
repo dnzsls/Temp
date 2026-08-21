@@ -1975,8 +1975,42 @@ TIP_PAY_TIP_BASI = 2         # tip BAŞINA yuvarlama payı (kişi).
 TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay.
                              # PAY devreye girdiği için artık 0 yeterli;
                              # v3'te bu 3 yapılarak elle telafi ediliyordu.
+# ── y-SEVİYESİ FAZLA CEZASI — H19D'nin EKSİK YARISI ──────────────────
+# GÖZLEM (v4 ilk koşu, FEASIBLE): W32'de 09:00 tipine zirve talep 175 iken
+# 207 kişi yığılmış (+32); aynı hafta 10:30 tipi 26 istiyor, 14 almış (−12).
+# 14 kişilik bir takımı taşımak 5 gün × 12 kişi × W_EKSIK_HI(25) = ~1500 puan
+# kazandıracaktı. Model bunu masada bıraktı.
+#
+# NEDEN: H19D `y` üzerinde SADECE alt sınır koyuyordu ("zirveyi karşıla").
+# Üst sınır ya da fazlaya ceza YOKTU. Yığılmanın bedeli sadece `x` seviyesinde
+# görünüyor (kova sapması, ağırlık 1, ilk 10 bedava) — oysa asıl karar `y`'de.
+# Ve LP gevşemesi `x` tarafında KÖR (kesirli y kötü tahsisi bedavaymış gibi
+# gösteriyor), o yüzden çözücü takımı taşımak için bir gradyan hissetmiyor.
+#
+# ÇÖZÜM: cezayı doğrudan `y`'ye koy (~1100 değişken, 98 bin değil).
+#   fazla = max(0, kapasite − zirve − SERBEST)
+# Kesirli y bile ceza üretir → LP alt sınırı artık "bu tahsis kötü" diyebilir.
+#
+# NEDEN YIĞILIYOR (suç modelde değil): kota SERT — 405 kişinin hepsi çalışmak
+# zorunda. Gidecek yeri olmayan takım, kendi tipine PARK ediliyor. Bu terim
+# "park edeceksen açığı olan tipe park et" baskısı yapıyor.
+W_TIP_FAZLA = 3              # (hafta,tip) kapasitesi zirveyi SERBEST'ten fazla
+                             # aşarsa kişi başına ceza. 0 → terim kurulmaz.
+                             # Kalibrasyon: 24 fazla × 3 = 72/hafta ceza;
+                             # karşılığında kapanan açık 12 × 25 × 5 = 1500 →
+                             # taşıma fazlasıyla kârlı, ama coverage'ı ezmiyor.
+TIP_FAZLA_SERBEST = None     # bu kadar fazla BEDAVA (yuvarlama payı).
+                             # None → ortalama takım boyu / 2 (yarım takım).
+                             # Takım bölünemediği için bir miktar fazla
+                             # KAÇINILMAZ; onu cezalandırmak anlamsız.
+
+# fazla cezası için serbest bölge: yarım takım (yuvarlama payı)
+_tf_serbest = (TIP_FAZLA_SERBEST if TIP_FAZLA_SERBEST is not None
+               else max(1, round(len(AGENTS) / max(1, df_tam["takim"].nunique()) / 2)))
 
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
+tip_fazla = {}                                     # (hafta, tip) → fazla IntVar
+_n_fazla19d = 0                                    # kurulan fazla-ceza terimi sayısı
 _19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
 if TIP_KAPASITE_SERT and takim_tip:
     # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
@@ -2022,6 +2056,15 @@ if TIP_KAPASITE_SERT and takim_tip:
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
             _acik_var.append(_av)
+            # ── FAZLA (yeni): zirveyi SERBEST'ten çok aşan kapasiteye ceza ──
+            # YUMUŞAK — üst sınır DEĞİL. Model gerekirse yığabilir, ama bedeli olur.
+            if W_TIP_FAZLA:
+                _fv = model.NewIntVar(0, len(AGENTS),
+                                      f"tipfazla_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
+                model.Add(_fv >= _kap - _z - _tf_serbest)   # ReLU
+                tip_fazla[(_wk, _t)] = _fv
+                amac.append(W_TIP_FAZLA * _fv)
+                _n_fazla19d += 1
         _kt19.append(model.Add(sum(_acik_var) <= _butce))   # açık SADECE kaçınılmaz kadar
         _tes_ekle(f"H19D_tip_kapasite_{_wk[0]}W{_wk[1]}", *_kt19)
         _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
@@ -2045,6 +2088,14 @@ if _19d_ozet:
     print(f"  ama artık tek belirleyici değil: sezgisel şanslıysa TABAN devreye girer.")
     print(f"  (v3'te max(yapısal, açgözlü) idi; açgözlü her zaman büyük olduğu için")
     print(f"   yapısal ÖLÜ terimdi ve bütçe tamamen sezgiselin performansına bağlıydı.)")
+    if W_TIP_FAZLA:
+        print(f"  y-SEVİYESİ FAZLA CEZASI: {_n_fazla19d} (hafta,tip) terimi, "
+              f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest} kişi (≈yarım takım)")
+        print(f"    fazla = max(0, kapasite − zirve − {_tf_serbest}) → 'boş yere yığma,")
+        print(f"    açığı olan tipe götür' baskısı. YUMUŞAK: üst sınır değil, ceza.")
+        print(f"    H19D artık iki yönlü: alt sınır (açık ≤ bütçe) + üst baskı (fazla).")
+    else:
+        print(f"  y-seviyesi fazla cezası: KAPALI (W_TIP_FAZLA=0)")
     if not _greedy:
         print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
         print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
