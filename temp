@@ -1865,6 +1865,13 @@ for _T, _uy in takimlar.items():
 
 _hint = {}                                         # y değişkeni → 0/1
 _hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
+_greedy_fazla = {}                                 # hafta → {tip: açgözlünün ürettiği FAZLA}
+# Açgözlü tahsis sadece AÇIĞI değil FAZLAYI da üretiyor: bir takım zirveyi
+# aşan bir tipe düştüğünde aradaki fark fazladır. H19D'nin SERT tip tavanı
+# bunu FİZİBİLİTE TANIĞI olarak kullanır — tavan asla bu değerin altına
+# inmez, dolayısıyla açgözlü çözüm her zaman tavanı sağlar ve kısıt
+# INFEASIBLE yapamaz. (Aynı desen bütçede de var; oradaki hata tanığı TEK
+# belirleyici yapmaktı, burada tanık sadece ALT SINIR.)
 if TAKIM_HINT and takim_tip:
     _boyut = {T: len(u) for T, u in takimlar.items()}   # ham boyut (yedek)
     for _wk in sorted(haftalar):
@@ -1901,6 +1908,8 @@ if TAKIM_HINT and takim_tip:
                 _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
         _hint_ozet.append((_wk, _acik_once,
                            sum(max(0, v) for v in _kalan.values())))
+        # _kalan[t] = ihtiyaç − atanan  →  negatifi FAZLA demek
+        _greedy_fazla[_wk] = {_t: max(0, -_v) for _t, _v in _kalan.items()}
     for _var, _val in _hint.items():
         model.AddHint(_var, _val)
 
@@ -1975,42 +1984,66 @@ TIP_PAY_TIP_BASI = 2         # tip BAŞINA yuvarlama payı (kişi).
 TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay.
                              # PAY devreye girdiği için artık 0 yeterli;
                              # v3'te bu 3 yapılarak elle telafi ediliyordu.
-# ── y-SEVİYESİ FAZLA CEZASI — H19D'nin EKSİK YARISI ──────────────────
-# GÖZLEM (v4 ilk koşu, FEASIBLE): W32'de 09:00 tipine zirve talep 175 iken
-# 207 kişi yığılmış (+32); aynı hafta 10:30 tipi 26 istiyor, 14 almış (−12).
-# 14 kişilik bir takımı taşımak 5 gün × 12 kişi × W_EKSIK_HI(25) = ~1500 puan
-# kazandıracaktı. Model bunu masada bıraktı.
+# ── TİP FAZLA TAVANI — "zirveyi çok aşma" (SERT) ─────────────────────
+# İSTEK (net hâli): bir tip, o haftanın EN YOĞUN günündeki ihtiyacından çok
+# fazla kişi almasın. Ölçülen: W32'de 09:00 zirve 175 iken 208 kişi (+33),
+# aynı hafta 10:30 26 istiyor 17 alıyor (−9) ve o hafta GÜNDE 27-28 kişi-gün
+# açık veriliyor. 14 kişilik bir takımı taşımak ~1125 kazandırıp ~500
+# kaybettirirdi (net +600) — model bunu masada bıraktı.
 #
-# NEDEN: H19D `y` üzerinde SADECE alt sınır koyuyordu ("zirveyi karşıla").
-# Üst sınır ya da fazlaya ceza YOKTU. Yığılmanın bedeli sadece `x` seviyesinde
-# görünüyor (kova sapması, ağırlık 1, ilk 10 bedava) — oysa asıl karar `y`'de.
-# Ve LP gevşemesi `x` tarafında KÖR (kesirli y kötü tahsisi bedavaymış gibi
-# gösteriyor), o yüzden çözücü takımı taşımak için bir gradyan hissetmiyor.
+# ÖNCEKİ DENEME (YUMUŞAK CEZA) BAŞARISIZ OLDU, sebebi kayda geçsin:
+#   W_TIP_FAZLA=3, serbest 8 kişi ile kuruldu → eksik 329'dan 387'ye ÇIKTI.
+#   İki ayrı hata vardı:
+#   (a) Haftalık TOPLAM fazla aritmetikle ~sabit (herkes çalışmak zorunda,
+#       Σfazla − Σaçık = etkin üye − Σzirve). Sabit bir toplama DOĞRUSAL ceza
+#       koymak SABİT ekler → 33'ü tek yere yığmak ile 5'er dağıtmak AYNI fiyat.
+#       Ceza yığılmayı hiç caydırmıyordu.
+#   (b) Tek doğrusal-olmayan parça serbest bölgeydi (8 kişi) ve sinyali yuttu:
+#       terimin toplam katkısı ~210 puan, amacın %1.7'si.
+#   Kısıtlar değişmediği için eski çözüm hâlâ geçerliydi; yani 329→387 bir
+#   TAKAS değil, terimin aramayı bozmasıydı. Ders: y üzerinde YUMUŞAK terim
+#   bulunmuyor, SERT kısıt buduyor (H19D'nin alt sınırı da bu yüzden sert).
 #
-# ÇÖZÜM: cezayı doğrudan `y`'ye koy (~1100 değişken, 98 bin değil).
-#   fazla = max(0, kapasite − zirve − SERBEST)
-# Kesirli y bile ceza üretir → LP alt sınırı artık "bu tahsis kötü" diyebilir.
+# YENİ KURGU — SERT TAVAN:
+#   kapasite(hafta,tip) ≤ zirve(hafta,tip) + TAVAN(hafta,tip)
+#   TAVAN = max( TIP_FAZLA_BUFFER , açgözlünün o tipte ürettiği fazla )
 #
-# NEDEN YIĞILIYOR (suç modelde değil): kota SERT — 405 kişinin hepsi çalışmak
-# zorunda. Gidecek yeri olmayan takım, kendi tipine PARK ediliyor. Bu terim
-# "park edeceksen açığı olan tipe park et" baskısı yapıyor.
-W_TIP_FAZLA = 3              # (hafta,tip) kapasitesi zirveyi SERBEST'ten fazla
-                             # aşarsa kişi başına ceza. 0 → terim kurulmaz.
-                             # Kalibrasyon: 24 fazla × 3 = 72/hafta ceza;
-                             # karşılığında kapanan açık 12 × 25 × 5 = 1500 →
-                             # taşıma fazlasıyla kârlı, ama coverage'ı ezmiyor.
-TIP_FAZLA_SERBEST = None     # bu kadar fazla BEDAVA (yuvarlama payı).
-                             # None → ortalama takım boyu / 2 (yarım takım).
-                             # Takım bölünemediği için bir miktar fazla
-                             # KAÇINILMAZ; onu cezalandırmak anlamsız.
+# TANIK NEDEN ŞART: kota SERT → 405 kişinin hepsi bir tipe yazılmak zorunda.
+# 09:00'dan çıkardığın 28 kişi buharlaşmıyor, başka tipe gidiyor. Tavanların
+# TOPLAMI herkesi almaya yetmezse model INFEASIBLE olur. Ayrıca takım
+# bölünemez: W34 gecesinde zirve 4, en küçük takım 10+ → sabit +5 tavanı
+# MATEMATİKSEL OLARAK imkânsız, ama gece kovasında sert band var (boş
+# bırakılamaz). Açgözlü (H19C) tahsisi geçerli bir dağılım olduğu için
+# tavan onun altına inmezse kısıt asla çözümsüz yapamaz; küçük tiplerde
+# tavan kendiliğinden takım boyuna çıkar.
+#   v3'teki BÜTÇE hatasının tersi: orada tanık TEK belirleyiciydi ve sertlik
+#   sezgiselin o günkü şansına bağlıydı. Burada tanık sadece ALT SINIR,
+#   sertlik BUFFER'dan geliyor.
+#
+# BİRİM UYARISI: buradaki `kapasite` ETKİN üye (izinli/kıdemsiz/sabahçı
+# düşülmüş, takim_etkin_tip). H25B [3] tablosu ise HAM takım boyu basıyor →
+# oradaki "+33" ile buradaki fazla AYNI SAYI DEĞİL, etkin taraf daha küçük.
+# Tavan bağlamazsa BUFFER'ı düşürmeden önce aşağıdaki tabloya bak: hangi
+# (hafta,tip) tavana dayanmış, kaçında tanık BUFFER'ı ezmiş.
+TIP_FAZLA_SERT   = True      # False → tavan kurulmaz (eski davranış)
+TIP_FAZLA_BUFFER = 5         # tip, haftanın zirve talebini en fazla bu kadar
+                             # aşabilir. Tanık bundan büyükse tanık geçerli.
+                             # Düşürmek yığılmayı kırar ama arama uzayını da
+                             # daraltır; 0 yapma (yuvarlama payı hiç kalmaz).
+W_TIP_FAZLA = 0              # ESKİ YUMUŞAK CEZA — KAPALI (yukarıdaki gerekçe).
+                             # 0 → terim kurulmaz. Sert tavanla birlikte
+                             # açmanın anlamı yok: tavan zaten üstünü kesiyor.
+TIP_FAZLA_SERBEST = None     # yumuşak ceza açıksa serbest bölge.
+                             # None → ortalama takım boyu / 2.
 
-# fazla cezası için serbest bölge: yarım takım (yuvarlama payı)
+# yumuşak ceza için serbest bölge (W_TIP_FAZLA=0 iken kullanılmaz)
 _tf_serbest = (TIP_FAZLA_SERBEST if TIP_FAZLA_SERBEST is not None
                else max(1, round(len(AGENTS) / max(1, df_tam["takim"].nunique()) / 2)))
 
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
-tip_fazla = {}                                     # (hafta, tip) → fazla IntVar
+tip_fazla = {}                                     # (hafta, tip) → fazla IntVar (yumuşak)
 _n_fazla19d = 0                                    # kurulan fazla-ceza terimi sayısı
+_tavan19d = []                                     # (hafta, tip, zirve, tavan, kaynak)
 _19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
 if TIP_KAPASITE_SERT and takim_tip:
     # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
@@ -2046,6 +2079,7 @@ if TIP_KAPASITE_SERT and takim_tip:
         # Tip sayısına bağlı — sezgiselin performansına DEĞİL.
         _pay19d = TIP_PAY_TIP_BASI * len(_zirve19d)
         _butce = max(_greedy.get(_wk, 0), _yapisal + _pay19d) + TIP_ACIK_TOLERANS
+        _gf19d = _greedy_fazla.get(_wk, {})         # tanık: açgözlünün tip fazlaları
         _acik_var, _kt19 = [], []
         for _t, _z in _zirve19d.items():
             # TİPE DUYARLI kapasite: takımın o tipte FİİLEN çalışabilen üyesi
@@ -2056,8 +2090,29 @@ if TIP_KAPASITE_SERT and takim_tip:
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
             _acik_var.append(_av)
-            # ── FAZLA (yeni): zirveyi SERBEST'ten çok aşan kapasiteye ceza ──
-            # YUMUŞAK — üst sınır DEĞİL. Model gerekirse yığabilir, ama bedeli olur.
+            # ── SERT TAVAN: zirveyi TAVAN'dan fazla aşamaz ──────────────
+            # Tanık (açgözlü) tavanı belirlerse kısıt o tipte gevşer ama ASLA
+            # çözümsüz olmaz; BUFFER büyükse sertlik ondan gelir.
+            if TIP_FAZLA_SERT:
+                # ÜÇÜNCÜ ALT SINIR — "en az bir takım sığsın":
+                # Açgözlü o tipe hiç takım koymamışsa tanık 0 döner ve tavan
+                # BUFFER'da kalır. Zirve küçükse (gece: 4) hiçbir takım
+                # (en küçüğü 10+) 4+5=9'un altına sığmaz → o tipin kapasitesi
+                # ZORUNLU 0 olur. Gündüzde bu sadece açık demek (yumuşak), ama
+                # GECE kovasında H10'un SERT bandı var (talep ± GECE_BUFFER)
+                # → model INFEASIBLE olurdu. Tavan, o tipe girebilen EN KÜÇÜK
+                # takımı her zaman kabul edecek kadar geniş tutuluyor.
+                _kat19 = [takim_etkin_tip.get((T, _wk, _t), 0) for T in _sec_takim
+                          if (T, _wk, _t) in takim_tip
+                          and takim_etkin_tip.get((T, _wk, _t), 0) > 0]
+                _min_kat = min(_kat19) if _kat19 else 0
+                _tv = max(TIP_FAZLA_BUFFER, _gf19d.get(_t, 0),
+                          max(0, _min_kat - _z))
+                _kt19.append(model.Add(_kap <= _z + _tv))
+                _kay19 = ("buffer" if _tv == TIP_FAZLA_BUFFER else
+                          "tanık" if _tv == _gf19d.get(_t, 0) else "min takım")
+                _tavan19d.append((_wk, _t, _z, _tv, _kay19))
+            # ── FAZLA (eski, yumuşak): W_TIP_FAZLA=0 iken kurulmaz ──────
             if W_TIP_FAZLA:
                 _fv = model.NewIntVar(0, len(AGENTS),
                                       f"tipfazla_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
@@ -2088,14 +2143,38 @@ if _19d_ozet:
     print(f"  ama artık tek belirleyici değil: sezgisel şanslıysa TABAN devreye girer.")
     print(f"  (v3'te max(yapısal, açgözlü) idi; açgözlü her zaman büyük olduğu için")
     print(f"   yapısal ÖLÜ terimdi ve bütçe tamamen sezgiselin performansına bağlıydı.)")
-    if W_TIP_FAZLA:
-        print(f"  y-SEVİYESİ FAZLA CEZASI: {_n_fazla19d} (hafta,tip) terimi, "
-              f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest} kişi (≈yarım takım)")
-        print(f"    fazla = max(0, kapasite − zirve − {_tf_serbest}) → 'boş yere yığma,")
-        print(f"    açığı olan tipe götür' baskısı. YUMUŞAK: üst sınır değil, ceza.")
-        print(f"    H19D artık iki yönlü: alt sınır (açık ≤ bütçe) + üst baskı (fazla).")
+    # ── TİP FAZLA TAVANI ─────────────────────────────────────────────
+    from collections import Counter as _Counter19d       # hücre tek başına koşsun
+    if _tavan19d:
+        _n_buf = sum(1 for *_r, _k in _tavan19d if _k == "buffer")
+        print(f"\n  TİP FAZLA TAVANI [SERT]: {len(_tavan19d)} (hafta,tip) kısıtı — "
+              f"kapasite ≤ zirve + TAVAN")
+        print(f"    TAVAN = max( BUFFER({TIP_FAZLA_BUFFER}) , açgözlü tanığı , "
+              f"en küçük takım − zirve )")
+        _kay_say = _Counter19d(_k for *_r, _k in _tavan19d)
+        print(f"    kaynak dağılımı: {dict(_kay_say)}")
+        print(f"    • buffer     → istenen sertlik burada devrede")
+        print(f"    • tanık      → açgözlü orada daha fazla yığmış; tavan onu "
+              f"kabul eder (fizibilite)")
+        print(f"    • min takım  → zirve küçük, tek takım bile taşmadan sığmıyor "
+              f"(ör. gece zirve 4,")
+        print(f"                   en küçük takım 12 → tavan 8). Sabit "
+              f"+{TIP_FAZLA_BUFFER} orada INFEASIBLE yapardı;")
+        print(f"                   gece kovasında H10'un SERT bandı var, boş "
+              f"bırakılamaz.")
+        print(f"    {'hafta':>10} {'tip':>7} {'zirve':>6} {'TAVAN':>6} {'üst sınır':>10}  kaynak")
+        for _wk_t, _t_t, _z_t, _tv_t, _kay in _tavan19d:
+            print(f"    {f'{_wk_t[0]}-W{_wk_t[1]}':>10} {_t_t:>7} {_z_t:>6} "
+                  f"{_tv_t:>6} {_z_t + _tv_t:>10}  {_kay}")
+        print(f"    NOT: buradaki kapasite ETKİN üye (izin/kıdem/sabahçı düşülmüş).")
+        print(f"    H25B [3] tablosu HAM takım boyu basar → oradaki fazla bu sayıdan")
+        print(f"    BÜYÜK görünür; ikisi aynı ölçü DEĞİL.")
     else:
-        print(f"  y-seviyesi fazla cezası: KAPALI (W_TIP_FAZLA=0)")
+        print(f"  tip fazla tavanı: KAPALI (TIP_FAZLA_SERT=False)")
+    if W_TIP_FAZLA:
+        print(f"  y-seviyesi YUMUŞAK fazla cezası: {_n_fazla19d} terim, "
+              f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest}  "
+              f"(sert tavan varken gereksiz)")
     if not _greedy:
         print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
         print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
