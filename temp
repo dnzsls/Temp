@@ -96,10 +96,11 @@ def shift_slots(text):
     return [SLOTS_30[k % len(SLOTS_30)] for k in range(i, j)]
 
 
-def shift_slots_ofset(text):
+def shift_slots_ofset(text, ek_slot=0):
     """'22:00-06:00' → [(0,'22:00'),…,(1,'00:00'),…,(1,'05:30')].
 
     Gece yarısını aşan kısım gün ofseti 1 ile işaretlenir.
+    ek_slot: bitişe eklenecek 30dk'lık slot sayısı (outsource +30 dk için 1).
     """
     m = _SHIFT_RE.search(str(text))
     if not m:
@@ -112,6 +113,7 @@ def shift_slots_ofset(text):
     i, j = SLOT_IDX[bas], son
     if j <= i:
         j += len(SLOTS_30)
+    j += int(ek_slot)
     return [(k // len(SLOTS_30), SLOTS_30[k % len(SLOTS_30)]) for k in range(i, j)]
 
 
@@ -121,7 +123,9 @@ def gece_asan_vardiyalar(df_vardiya, cols=None):
     v_col = _resolve_col(df_vardiya, c['shift'])
     d = pd.DataFrame({'vardiya': df_vardiya[v_col].astype(str).unique()})
     d['asiyor'] = d['vardiya'].map(lambda v: any(o for o, _ in shift_slots_ofset(v)))
-    d['slot_sayisi'] = d['vardiya'].map(lambda v: len(shift_slots_ofset(v)))
+    d['slot_in'] = d['vardiya'].map(lambda v: len(shift_slots_ofset(v)))
+    d['slot_out'] = d['vardiya'].map(
+        lambda v: len(shift_slots_ofset(v, OUTSOURCE_EK_SLOT)) if shift_slots_ofset(v) else 0)
     return d.sort_values(['asiyor', 'vardiya'], ascending=[False, True]).reset_index(drop=True)
 
 
@@ -149,14 +153,17 @@ ACTUAL_KOL = {
 }
 
 
+OUTSOURCE_EK_SLOT = 1        # outsource inhouse'dan 30 dk fazla çalışıyor
+
+
 def _company(s):
     """'outsource' geçen → outsource, gerisi inhouse."""
     v = s.astype(str).str.strip().str.lower()
     return v.map(lambda x: 'outsource' if 'outsource' in x else 'inhouse')
 
 
-def vardiya_tablosu(df_vardiya, year, month, cols=None,
-                    gece_ertesi_gune=True, verbose=True):
+def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
+                    outsource_ek_slot=OUTSOURCE_EK_SLOT, verbose=True):
     """Vardiya planından İKİ tablo: slot kapasitesi + vardiya başlangıcı.
 
     gece_ertesi_gune:
@@ -164,6 +171,11 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None,
             sonrası kısmı ERTESİ güne yazılır. Fiziksel gerçek budur.
       False — aşan kısım aynı güne yazılır (eski davranış; ayın 1'inin gecesi
             önceki aydan gelmediği için şişme yaratır).
+
+    outsource_ek_slot: outsource vardiyalarının bitişine eklenecek 30dk'lık
+      slot sayısı. Varsayılan 1 → outsource inhouse'dan 30 dk fazla çalışıyor
+      ('09:00-18:00' outsource fiilen 09:00-18:30 sayılır). 0 = kapalı.
+      Vardiya BAŞLANGICI bundan etkilenmez.
 
     NOT: Ayın 1'inin gece slotları için ÖNCEKİ AYIN SON GÜNÜ de df_vardiya'da
     olmalı. Yoksa uyarı basılır ve 1. günün gecesi eksik kalır.
@@ -190,14 +202,19 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None,
     onceki = ay_bas - pd.Timedelta(days=1)
     gunler = pd.date_range(ay_bas, ay_son, freq='D')
 
-    slot_map = {v: shift_slots(v) for v in d['_vardiya'].unique()}
-    pair_map = {v: shift_slots_ofset(v) for v in d['_vardiya'].unique()}
-    bas_map = {v: shift_baslangic(v) for v in d['_vardiya'].unique()}
-    cozulmeyen = [v for v, s in slot_map.items() if not s]
+    uniq = d['_vardiya'].unique()
+    pair_map = {v: shift_slots_ofset(v) for v in uniq}
+    pair_map_out = {v: (shift_slots_ofset(v, outsource_ek_slot) if pair_map[v] else [])
+                    for v in uniq}
+    bas_map = {v: shift_baslangic(v) for v in uniq}
+    cozulmeyen = [v for v, s in pair_map.items() if not s]
     if cozulmeyen:
         print(f"  ⚠ VARDİYA: okunamayan {len(cozulmeyen)} değer (atlandı): "
               f"{cozulmeyen[:8]}")
-    asan = [v for v in d['_vardiya'].unique() if any(o for o, _ in pair_map[v])]
+    asan = [v for v in uniq if any(o for o, _ in pair_map[v])]
+    if verbose and outsource_ek_slot:
+        print(f"  ℹ outsource vardiyaları +{outsource_ek_slot * 30} dk uzun "
+              f"sayılıyor (kapasite); başlangıç saatleri değişmiyor.")
 
     # KAPASİTE için önceki ayın son gününü de tut (geceye sarkanlar ayın 1'ine)
     alt_sinir = onceki if gece_ertesi_gune else ay_bas
@@ -218,16 +235,15 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None,
                                      names=['data_date', 'interval']).to_frame(index=False)
 
     # (1) SLOT KAPASİTESİ — vardiya boyunca her slota yazılır
+    kaynak = d_kap if gece_ertesi_gune else d_ay
+    k = kaynak.assign(_p=[(pair_map_out if c == 'outsource' else pair_map)[v]
+                          for c, v in zip(kaynak['company'], kaynak['_vardiya'])])
+    k = k.explode('_p').dropna(subset=['_p'])
+    k['interval'] = k['_p'].map(lambda t: t[1])
     if gece_ertesi_gune:
-        k = d_kap.assign(_p=d_kap['_vardiya'].map(pair_map)).explode('_p')
-        k = k.dropna(subset=['_p'])
-        k['interval'] = k['_p'].map(lambda t: t[1])
         k['data_date'] = k['data_date'] + pd.to_timedelta(
             k['_p'].map(lambda t: t[0]), unit='D')
         k = k[(k['data_date'] >= ay_bas) & (k['data_date'] <= ay_son)]
-    else:
-        k = d_ay.assign(interval=d_ay['_vardiya'].map(slot_map)).explode('interval')
-        k = k.dropna(subset=['interval'])
     k = k.groupby(['data_date', 'interval', 'company'], as_index=False)['kisi'].sum()
 
     # (2) VARDİYA BAŞLANGICI — sadece başlangıç slotu, hep kendi gününde
@@ -254,7 +270,8 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None,
     return out
 
 
-def slot_kaynagi(df_vardiya, tarih, interval, cols=None, gece_ertesi_gune=True):
+def slot_kaynagi(df_vardiya, tarih, interval, cols=None, gece_ertesi_gune=True,
+                 outsource_ek_slot=OUTSOURCE_EK_SLOT):
     """TEŞHİS: verilen gün+slotun kapasitesine HANGİ vardiya satırları giriyor.
 
     Örn: slot_kaynagi(df_vardiya, '2026-07-01', '00:00')
@@ -270,18 +287,18 @@ def slot_kaynagi(df_vardiya, tarih, interval, cols=None, gece_ertesi_gune=True):
     hedef = pd.Timestamp(tarih).normalize()
     kayit = []
     for v in d['_vardiya'].unique():
-        for ofset, slot in shift_slots_ofset(v):
-            if slot != interval:
-                continue
-            if not gece_ertesi_gune:
-                ofset = 0
-            kayit.append((v, ofset))
+        for sirket, ek in (('inhouse', 0), ('outsource', outsource_ek_slot)):
+            for ofset, slot in shift_slots_ofset(v, ek):
+                if slot != interval:
+                    continue
+                kayit.append((v, sirket, ofset if gece_ertesi_gune else 0))
     if not kayit:
         return pd.DataFrame(columns=['kaynak_gun', 'vardiya', 'company', 'kisi'])
 
     parca = []
-    for v, ofset in kayit:
-        alt = d[(d['_vardiya'] == v) & (d['data_date'] == hedef - pd.Timedelta(days=ofset))]
+    for v, sirket, ofset in kayit:
+        alt = d[(d['_vardiya'] == v) & (d['company'] == sirket)
+                & (d['data_date'] == hedef - pd.Timedelta(days=ofset))]
         if len(alt):
             parca.append(alt.assign(gun_ofseti=ofset))
     if not parca:
