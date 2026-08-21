@@ -381,17 +381,22 @@ def genel_bakis(df_vard, df_cagri, sadece_dolu_gun=True, verbose=True):
     return df[kol].sort_values(['data_date', 'interval']).reset_index(drop=True)
 
 
-def slot_ozet(df, hafta_sonu=None):
-    """Slot bazında AYLIK ORTALAMA (gün tipine göre süzülebilir).
+def slot_ozet(df, hafta_sonu=None, olcu='ortalama'):
+    """Slot bazında aylık profil (gün tipine göre süzülebilir).
 
     hafta_sonu: None → hepsi | 0 → hafta içi | 1 → hafta sonu
+    olcu: 'ortalama' (varsayılan) | 'medyan'
+      medyan aykırı günlerden (tatil, kampanya, eksik veri) etkilenmez.
     """
+    if olcu not in ('ortalama', 'medyan'):
+        raise ValueError("olcu: 'ortalama' veya 'medyan'")
     d = df if hafta_sonu is None else df[df['hafta_sonu'] == hafta_sonu]
     if d.empty:
         return pd.DataFrame()
     kol = [f"{o}_{s}" for o in ('kapasite', 'baslangic')
            for s in ('in', 'out', 'toplam')] + ['cagri']
-    g = d.groupby('interval', as_index=False)[kol].mean().round(1)
+    gb = d.groupby('interval', as_index=False)[kol]
+    g = (gb.mean() if olcu == 'ortalama' else gb.median()).round(1)
     g['gun_sayisi'] = d['data_date'].nunique()
     return g.sort_values('interval').reset_index(drop=True)
 
@@ -450,11 +455,12 @@ def _kutu(ax, metin, konum=(0.98, 0.95), renk='#fff7d6'):
                       edgecolor='#d9d2a8', linewidth=0.8))
 
 
-def grafik_genel(df, queue='KİTLE', kirilim=False, y_adim=25,
+def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
                  cagri_adim=None, kaydet=None):
     """Hafta içi / hafta sonu: slot kapasitesi + vardiya başlangıcı + çağrı.
 
     kirilim=True  → kapasite inhouse/outsource ayrı çizilir
+    olcu          → 'ortalama' (varsayılan) veya 'medyan'
     y_adim        → sol (kişi) ekseninde tick aralığı; None = otomatik
     cagri_adim    → sağ (çağrı) ekseninde tick aralığı; None = otomatik
     Çağrı SAĞ eksende (kesikli mor).
@@ -466,7 +472,7 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, y_adim=25,
 
     for j, (hs, ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
         ax = axes[j]
-        g = slot_ozet(df, hafta_sonu=hs)
+        g = slot_ozet(df, hafta_sonu=hs, olcu=olcu)
         if g.empty:
             ax.set_visible(False)
             continue
@@ -489,7 +495,8 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, y_adim=25,
                 marker='o', ms=3.5, zorder=4, label='Vardiya başlangıcı (kaç kişi başlıyor)')
 
         ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
-        ax.set_title(f"{queue} — {ad}\nSlot kapasitesi vs vardiya başlangıcı",
+        ax.set_title(f"{queue} — {ad} ({olcu})\n"
+                     f"Slot kapasitesi vs vardiya başlangıcı",
                      fontsize=11, fontweight='bold', color=RENK['metin'],
                      loc='left', pad=10)
         _eksen(ax, g, y_adim=y_adim)
@@ -511,7 +518,8 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, y_adim=25,
         i_tepe = int(g['kapasite_toplam'].idxmax())
         _kutu(ax, f"Tepe kapasite\n{g['kapasite_toplam'].iloc[i_tepe]:.0f} kişi "
                   f"@ {g['interval'].iloc[i_tepe]}")
-        _kutu(ax, f"{int(g['gun_sayisi'].iloc[0])} gün ortalaması",
+        etiket = 'ortalaması' if olcu == 'ortalama' else 'medyanı'
+        _kutu(ax, f"{int(g['gun_sayisi'].iloc[0])} gün {etiket}",
               konum=(0.98, 0.72), renk='#eaf1fb')
 
         h1, l1 = ax.get_legend_handles_labels()
@@ -609,6 +617,8 @@ def excel_yaz(df, yol=None, year=2026, month=7):
     with pd.ExcelWriter(yol) as w:
         slot_ozet(df, 0).to_excel(w, sheet_name='slot_haftaici', index=False)
         slot_ozet(df, 1).to_excel(w, sheet_name='slot_haftasonu', index=False)
+        slot_ozet(df, 0, 'medyan').to_excel(w, sheet_name='slot_haftaici_med', index=False)
+        slot_ozet(df, 1, 'medyan').to_excel(w, sheet_name='slot_haftasonu_med', index=False)
         gun_ozet(df).to_excel(w, sheet_name='gun_ozet', index=False)
         df.to_excel(w, sheet_name='ham_30dk', index=False)
     print(f"✓ {yol}")
@@ -647,10 +657,14 @@ else:
 # %% [HÜCRE 3] — SLOT ÖZETİ (aylık ortalama)
 
 if 'df_genel' in globals():
-    print("HAFTA İÇİ")
+    print("HAFTA İÇİ — ortalama")
     show(slot_ozet(df_genel, hafta_sonu=0))
-    print("HAFTA SONU")
+    print("HAFTA İÇİ — medyan")
+    show(slot_ozet(df_genel, hafta_sonu=0, olcu='medyan'))
+    print("HAFTA SONU — ortalama")
     show(slot_ozet(df_genel, hafta_sonu=1))
+    print("HAFTA SONU — medyan")
+    show(slot_ozet(df_genel, hafta_sonu=1, olcu='medyan'))
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
 
@@ -668,6 +682,9 @@ else:
 if 'df_genel' in globals():
     grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=False, y_adim=25)
     grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=True, y_adim=25)
+    # aynı grafiğin medyan hali — ortalamayla yan yana yorumlamak için
+    grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=False,
+                 olcu='medyan', y_adim=25)
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
 
