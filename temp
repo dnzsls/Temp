@@ -1865,13 +1865,6 @@ for _T, _uy in takimlar.items():
 
 _hint = {}                                         # y değişkeni → 0/1
 _hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
-_greedy_fazla = {}                                 # hafta → {tip: açgözlünün ürettiği FAZLA}
-# Açgözlü tahsis sadece AÇIĞI değil FAZLAYI da üretiyor: bir takım zirveyi
-# aşan bir tipe düştüğünde aradaki fark fazladır. H19D'nin SERT tip tavanı
-# bunu FİZİBİLİTE TANIĞI olarak kullanır — tavan asla bu değerin altına
-# inmez, dolayısıyla açgözlü çözüm her zaman tavanı sağlar ve kısıt
-# INFEASIBLE yapamaz. (Aynı desen bütçede de var; oradaki hata tanığı TEK
-# belirleyici yapmaktı, burada tanık sadece ALT SINIR.)
 if TAKIM_HINT and takim_tip:
     _boyut = {T: len(u) for T, u in takimlar.items()}   # ham boyut (yedek)
     for _wk in sorted(haftalar):
@@ -1908,8 +1901,6 @@ if TAKIM_HINT and takim_tip:
                 _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
         _hint_ozet.append((_wk, _acik_once,
                            sum(max(0, v) for v in _kalan.values())))
-        # _kalan[t] = ihtiyaç − atanan  →  negatifi FAZLA demek
-        _greedy_fazla[_wk] = {_t: max(0, -_v) for _t, _v in _kalan.items()}
     for _var, _val in _hint.items():
         model.AddHint(_var, _val)
 
@@ -1955,95 +1946,11 @@ else:
 # AĞIRLIK YOK — sert kısıt. Eksik cezası (W_EKSIK_HI) zaten x tarafında duruyor,
 # bu kısıt onu ARAMA için görünür kılıyor; amaç fonksiyonuna terim EKLENMİYOR.
 TIP_KAPASITE_SERT = True     # False → kısıt kurulmaz (eski davranış)
-# ── BÜTÇE FORMÜLÜ — v3'te HATALIYDI, burada düzeltildi ───────────────
-# v3: BÜTÇE = max(yapısal, açgözlü) + TOLERANS(0)
-#   Sorun: açgözlü MATEMATİKSEL OLARAK her zaman ≥ yapısal (bir sezgisel teorik
-#   minimumdan iyi olamaz) → max() hiçbir zaman yapısal'ı seçmiyor, o terim ÖLÜ.
-#   Bütçe %100 sezgiselin O GÜNKÜ performansına bağlanmış oluyordu.
-#   ÖLÇÜLDÜ (aynı ay, iki farklı pickle; talep/kapasite BİREBİR AYNI):
-#     yapısal  : 19 13  9 14 12   ← değişmedi (gerçek zorluk)
-#     açgözlü  : 24 27 17 32 25   → 22 20 15 25 28   ← sezgisel şansı
-#     BÜTÇE    : 125             → 110               ← 15 kişi-gün DARALDI
-#   Yani sezgisel daha iyi paketleyince kısıt SERTLEŞTİ. Model 2700 sn'de tek
-#   çözüm bile bulamadı; TIP_ACIK_TOLERANS=3 (eski seviyeye dönüş) çözdü.
-#   Kavram karışıklığı: "en az bir çözüm sığıyor" (fizibilite) ile "yeterince
-#   çözüm sığıyor" (çözücünün manevra alanı) aynı şey sanılmıştı.
-#
-# v4: BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS
-#   • açgözlü  → FİZİBİLİTE TANIĞI olarak KALIYOR (alt sınır): o çözüm bütçeyi
-#     sağladığı için kısıt asla INFEASIBLE yapamaz. Ama artık TEK belirleyici değil.
-#   • yapısal + PAY → ZORUNLULUK tabanı. Sezgiselden bağımsız, veriye dayalı.
-#     Sezgisel şanslı bir gün geçirse bile bütçe bunun altına düşemez.
-#   Artık max() gerçekten çalışıyor: bazen açgözlü, bazen taban seçiliyor.
-TIP_PAY_TIP_BASI = 2         # tip BAŞINA yuvarlama payı (kişi).
-                             # Gerekçe: takım bölünemez (H19) → her tipte bir
-                             # miktar israf KAÇINILMAZ. Ölçülen gerçek israf
-                             # (açgözlü − yapısal) hafta başına 6-16 arasında,
-                             # tip sayısı ~8 → tip başına ~1-2 kişi.
-                             # 0 → v3 davranışı (taban devre dışı, sadece açgözlü)
-TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay.
-                             # PAY devreye girdiği için artık 0 yeterli;
-                             # v3'te bu 3 yapılarak elle telafi ediliyordu.
-# ── TİP FAZLA TAVANI — "zirveyi çok aşma" (SERT) ─────────────────────
-# İSTEK (net hâli): bir tip, o haftanın EN YOĞUN günündeki ihtiyacından çok
-# fazla kişi almasın. Ölçülen: W32'de 09:00 zirve 175 iken 208 kişi (+33),
-# aynı hafta 10:30 26 istiyor 17 alıyor (−9) ve o hafta GÜNDE 27-28 kişi-gün
-# açık veriliyor. 14 kişilik bir takımı taşımak ~1125 kazandırıp ~500
-# kaybettirirdi (net +600) — model bunu masada bıraktı.
-#
-# ÖNCEKİ DENEME (YUMUŞAK CEZA) BAŞARISIZ OLDU, sebebi kayda geçsin:
-#   W_TIP_FAZLA=3, serbest 8 kişi ile kuruldu → eksik 329'dan 387'ye ÇIKTI.
-#   İki ayrı hata vardı:
-#   (a) Haftalık TOPLAM fazla aritmetikle ~sabit (herkes çalışmak zorunda,
-#       Σfazla − Σaçık = etkin üye − Σzirve). Sabit bir toplama DOĞRUSAL ceza
-#       koymak SABİT ekler → 33'ü tek yere yığmak ile 5'er dağıtmak AYNI fiyat.
-#       Ceza yığılmayı hiç caydırmıyordu.
-#   (b) Tek doğrusal-olmayan parça serbest bölgeydi (8 kişi) ve sinyali yuttu:
-#       terimin toplam katkısı ~210 puan, amacın %1.7'si.
-#   Kısıtlar değişmediği için eski çözüm hâlâ geçerliydi; yani 329→387 bir
-#   TAKAS değil, terimin aramayı bozmasıydı. Ders: y üzerinde YUMUŞAK terim
-#   bulunmuyor, SERT kısıt buduyor (H19D'nin alt sınırı da bu yüzden sert).
-#
-# YENİ KURGU — SERT TAVAN:
-#   kapasite(hafta,tip) ≤ zirve(hafta,tip) + TAVAN(hafta,tip)
-#   TAVAN = max( TIP_FAZLA_BUFFER , açgözlünün o tipte ürettiği fazla )
-#
-# TANIK NEDEN ŞART: kota SERT → 405 kişinin hepsi bir tipe yazılmak zorunda.
-# 09:00'dan çıkardığın 28 kişi buharlaşmıyor, başka tipe gidiyor. Tavanların
-# TOPLAMI herkesi almaya yetmezse model INFEASIBLE olur. Ayrıca takım
-# bölünemez: W34 gecesinde zirve 4, en küçük takım 10+ → sabit +5 tavanı
-# MATEMATİKSEL OLARAK imkânsız, ama gece kovasında sert band var (boş
-# bırakılamaz). Açgözlü (H19C) tahsisi geçerli bir dağılım olduğu için
-# tavan onun altına inmezse kısıt asla çözümsüz yapamaz; küçük tiplerde
-# tavan kendiliğinden takım boyuna çıkar.
-#   v3'teki BÜTÇE hatasının tersi: orada tanık TEK belirleyiciydi ve sertlik
-#   sezgiselin o günkü şansına bağlıydı. Burada tanık sadece ALT SINIR,
-#   sertlik BUFFER'dan geliyor.
-#
-# BİRİM UYARISI: buradaki `kapasite` ETKİN üye (izinli/kıdemsiz/sabahçı
-# düşülmüş, takim_etkin_tip). H25B [3] tablosu ise HAM takım boyu basıyor →
-# oradaki "+33" ile buradaki fazla AYNI SAYI DEĞİL, etkin taraf daha küçük.
-# Tavan bağlamazsa BUFFER'ı düşürmeden önce aşağıdaki tabloya bak: hangi
-# (hafta,tip) tavana dayanmış, kaçında tanık BUFFER'ı ezmiş.
-TIP_FAZLA_SERT   = True      # False → tavan kurulmaz (eski davranış)
-TIP_FAZLA_BUFFER = 5         # tip, haftanın zirve talebini en fazla bu kadar
-                             # aşabilir. Tanık bundan büyükse tanık geçerli.
-                             # Düşürmek yığılmayı kırar ama arama uzayını da
-                             # daraltır; 0 yapma (yuvarlama payı hiç kalmaz).
-W_TIP_FAZLA = 0              # ESKİ YUMUŞAK CEZA — KAPALI (yukarıdaki gerekçe).
-                             # 0 → terim kurulmaz. Sert tavanla birlikte
-                             # açmanın anlamı yok: tavan zaten üstünü kesiyor.
-TIP_FAZLA_SERBEST = None     # yumuşak ceza açıksa serbest bölge.
-                             # None → ortalama takım boyu / 2.
-
-# yumuşak ceza için serbest bölge (W_TIP_FAZLA=0 iken kullanılmaz)
-_tf_serbest = (TIP_FAZLA_SERBEST if TIP_FAZLA_SERBEST is not None
-               else max(1, round(len(AGENTS) / max(1, df_tam["takim"].nunique()) / 2)))
+TIP_ACIK_TOLERANS = 0        # bütçeye eklenen ek pay (hafta başına).
+                             # 0 güvenli: bütçe zaten açgözlü tanığı içeriyor.
+                             # INFEASIBLE gelirse 1-2 artır (yuvarlama payı).
 
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
-tip_fazla = {}                                     # (hafta, tip) → fazla IntVar (yumuşak)
-_n_fazla19d = 0                                    # kurulan fazla-ceza terimi sayısı
-_tavan19d = []                                     # (hafta, tip, zirve, tavan, kaynak)
 _19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
 if TIP_KAPASITE_SERT and takim_tip:
     # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
@@ -2075,11 +1982,7 @@ if TIP_KAPASITE_SERT and takim_tip:
         if not _zirve19d:
             continue
         _yapisal = max(0, sum(_zirve19d.values()) - _uye_top)
-        # PAY: takım bölünmezliğinden doğan KAÇINILMAZ yuvarlama israfı.
-        # Tip sayısına bağlı — sezgiselin performansına DEĞİL.
-        _pay19d = TIP_PAY_TIP_BASI * len(_zirve19d)
-        _butce = max(_greedy.get(_wk, 0), _yapisal + _pay19d) + TIP_ACIK_TOLERANS
-        _gf19d = _greedy_fazla.get(_wk, {})         # tanık: açgözlünün tip fazlaları
+        _butce = max(_yapisal, _greedy.get(_wk, 0)) + TIP_ACIK_TOLERANS
         _acik_var, _kt19 = [], []
         for _t, _z in _zirve19d.items():
             # TİPE DUYARLI kapasite: takımın o tipte FİİLEN çalışabilen üyesi
@@ -2090,91 +1993,24 @@ if TIP_KAPASITE_SERT and takim_tip:
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
             _acik_var.append(_av)
-            # ── SERT TAVAN: zirveyi TAVAN'dan fazla aşamaz ──────────────
-            # Tanık (açgözlü) tavanı belirlerse kısıt o tipte gevşer ama ASLA
-            # çözümsüz olmaz; BUFFER büyükse sertlik ondan gelir.
-            if TIP_FAZLA_SERT:
-                # ÜÇÜNCÜ ALT SINIR — "en az bir takım sığsın":
-                # Açgözlü o tipe hiç takım koymamışsa tanık 0 döner ve tavan
-                # BUFFER'da kalır. Zirve küçükse (gece: 4) hiçbir takım
-                # (en küçüğü 10+) 4+5=9'un altına sığmaz → o tipin kapasitesi
-                # ZORUNLU 0 olur. Gündüzde bu sadece açık demek (yumuşak), ama
-                # GECE kovasında H10'un SERT bandı var (talep ± GECE_BUFFER)
-                # → model INFEASIBLE olurdu. Tavan, o tipe girebilen EN KÜÇÜK
-                # takımı her zaman kabul edecek kadar geniş tutuluyor.
-                _kat19 = [takim_etkin_tip.get((T, _wk, _t), 0) for T in _sec_takim
-                          if (T, _wk, _t) in takim_tip
-                          and takim_etkin_tip.get((T, _wk, _t), 0) > 0]
-                _min_kat = min(_kat19) if _kat19 else 0
-                _tv = max(TIP_FAZLA_BUFFER, _gf19d.get(_t, 0),
-                          max(0, _min_kat - _z))
-                _kt19.append(model.Add(_kap <= _z + _tv))
-                _kay19 = ("buffer" if _tv == TIP_FAZLA_BUFFER else
-                          "tanık" if _tv == _gf19d.get(_t, 0) else "min takım")
-                _tavan19d.append((_wk, _t, _z, _tv, _kay19))
-            # ── FAZLA (eski, yumuşak): W_TIP_FAZLA=0 iken kurulmaz ──────
-            if W_TIP_FAZLA:
-                _fv = model.NewIntVar(0, len(AGENTS),
-                                      f"tipfazla_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
-                model.Add(_fv >= _kap - _z - _tf_serbest)   # ReLU
-                tip_fazla[(_wk, _t)] = _fv
-                amac.append(W_TIP_FAZLA * _fv)
-                _n_fazla19d += 1
         _kt19.append(model.Add(sum(_acik_var) <= _butce))   # açık SADECE kaçınılmaz kadar
         _tes_ekle(f"H19D_tip_kapasite_{_wk[0]}W{_wk[1]}", *_kt19)
         _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
-                          _yapisal, _greedy.get(_wk, 0), _butce, _pay19d))
+                          _yapisal, _greedy.get(_wk, 0), _butce))
 
 if _19d_ozet:
     print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
           f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
     print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} "
-          f"{'pay':>5} {'taban':>6} {'açgözlü':>8} {'BÜTÇE':>6}  seçilen")
+          f"{'açgözlü':>8} {'BÜTÇE':>6}")
     print(f"    (etkin üye = izin/off_t2 düşülmüş; KAPASİTE ayrıca TİPE DUYARLI: "
           f"kıdemsiz geceye, sabahçı geç tipe 0 sayılır)")
-    for _wk, _z, _u, _y, _g, _b, _p in _19d_ozet:
-        _sec = "TABAN" if (_y + _p) >= _g else "açgözlü"
+    for _wk, _z, _u, _y, _g, _b in _19d_ozet:
         _im = "  ← tip açığı YASAK" if _b == 0 else ""
         print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} "
-              f"{_p:>5} {_y + _p:>6} {_g:>8} {_b:>6}  {_sec}{_im}")
-    print(f"  BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS({TIP_ACIK_TOLERANS})")
-    print(f"  PAY = {TIP_PAY_TIP_BASI} × tip sayısı → sezgiselden BAĞIMSIZ taban.")
-    print(f"  açgözlü hâlâ ALT SINIR (fizibilite tanığı) → kısıt INFEASIBLE yapamaz;")
-    print(f"  ama artık tek belirleyici değil: sezgisel şanslıysa TABAN devreye girer.")
-    print(f"  (v3'te max(yapısal, açgözlü) idi; açgözlü her zaman büyük olduğu için")
-    print(f"   yapısal ÖLÜ terimdi ve bütçe tamamen sezgiselin performansına bağlıydı.)")
-    # ── TİP FAZLA TAVANI ─────────────────────────────────────────────
-    from collections import Counter as _Counter19d       # hücre tek başına koşsun
-    if _tavan19d:
-        _n_buf = sum(1 for *_r, _k in _tavan19d if _k == "buffer")
-        print(f"\n  TİP FAZLA TAVANI [SERT]: {len(_tavan19d)} (hafta,tip) kısıtı — "
-              f"kapasite ≤ zirve + TAVAN")
-        print(f"    TAVAN = max( BUFFER({TIP_FAZLA_BUFFER}) , açgözlü tanığı , "
-              f"en küçük takım − zirve )")
-        _kay_say = _Counter19d(_k for *_r, _k in _tavan19d)
-        print(f"    kaynak dağılımı: {dict(_kay_say)}")
-        print(f"    • buffer     → istenen sertlik burada devrede")
-        print(f"    • tanık      → açgözlü orada daha fazla yığmış; tavan onu "
-              f"kabul eder (fizibilite)")
-        print(f"    • min takım  → zirve küçük, tek takım bile taşmadan sığmıyor "
-              f"(ör. gece zirve 4,")
-        print(f"                   en küçük takım 12 → tavan 8). Sabit "
-              f"+{TIP_FAZLA_BUFFER} orada INFEASIBLE yapardı;")
-        print(f"                   gece kovasında H10'un SERT bandı var, boş "
-              f"bırakılamaz.")
-        print(f"    {'hafta':>10} {'tip':>7} {'zirve':>6} {'TAVAN':>6} {'üst sınır':>10}  kaynak")
-        for _wk_t, _t_t, _z_t, _tv_t, _kay in _tavan19d:
-            print(f"    {f'{_wk_t[0]}-W{_wk_t[1]}':>10} {_t_t:>7} {_z_t:>6} "
-                  f"{_tv_t:>6} {_z_t + _tv_t:>10}  {_kay}")
-        print(f"    NOT: buradaki kapasite ETKİN üye (izin/kıdem/sabahçı düşülmüş).")
-        print(f"    H25B [3] tablosu HAM takım boyu basar → oradaki fazla bu sayıdan")
-        print(f"    BÜYÜK görünür; ikisi aynı ölçü DEĞİL.")
-    else:
-        print(f"  tip fazla tavanı: KAPALI (TIP_FAZLA_SERT=False)")
-    if W_TIP_FAZLA:
-        print(f"  y-seviyesi YUMUŞAK fazla cezası: {_n_fazla19d} terim, "
-              f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest}  "
-              f"(sert tavan varken gereksiz)")
+              f"{_g:>8} {_b:>6}{_im}")
+    print(f"  BÜTÇE = max(yapısal, açgözlü) + TOLERANS({TIP_ACIK_TOLERANS}); açgözlü")
+    print(f"  H19C'nin bulduğu ÇÖZÜM → o çözüm bütçeyi sağlar, kısıt INFEASIBLE yapmaz.")
     if not _greedy:
         print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
         print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
@@ -4776,207 +4612,4 @@ elif _pay30 < 0.15 * max(1, _gereken_hs30):
 else:
     print(f"    ✓ rahat: pay +{_pay30} kişi-gün "
           f"(%{100*_pay30/max(1,_gereken_hs30):.0f})")
-print("=" * 78)
-
-
-# %% [HÜCRE 31] — INTERVAL BAZLI COVERAGE PICKLE (plan_vs_model girdisi) ─
-# NE İŞE YARAR: plan_vs_model_karsilastirma.py bugün İKİ kaynağı kıyaslıyor —
-#   build_plan_coverage(df_plan)        → elle yapılan vardiya planı (agent × gün)
-#   model_coverage_from_results(results)→ Stage-1 pickle'ı (kova/slot talebi)
-# EKSİK OLAN ÜÇÜNCÜ KAYNAK bu modelin ÇIKTISI: isimli agent ataması, yani
-# "coverage'dan izin/off düşüldükten sonra sahada FİİLEN kaç kişi var".
-# Stage-1 kaç kişi İSTEDİĞİNİ söylüyor, bu model kaç kişi KOYABİLDİĞİNİ.
-# Bu hücre o farkı gün × 30dk interval bazında çıkarıp pickle'a yazar.
-#
-# İKİ TABLO BİRDEN yazılıyor (ikisi de aynı çözümden, tutarlı):
-#   [A] agent_plan — agent × gün × vardiya, build_plan_coverage()'ın BİREBİR
-#       beklediği kolon adlarıyla. Karşılaştırma tarafında yeni kod yazmadan
-#       df_plan yerine bunu verip aynı fonksiyonu koşabilirsin.
-#   [B] interval   — gün × interval hazır tablo: talep / atanan / fark.
-#       Sadece merge edip bakmak istiyorsan bu yeter.
-#
-# SLOT KONVANSİYONU — plan_vs_model_karsilastirma.py ile BİREBİR aynı:
-#   • 30 dakikalık slot, etiket slotun BAŞLANGICI ("09:00" = 09:00-09:30)
-#   • '…-24:00' ve '…-00:00' gün sonu sayılır (48. slota kadar)
-#   • GECEYİ AŞAN vardiya slotları AYNI GÜNE yazılır (00:00-08:00 → 3 Ağustos
-#     kaydıysa 3 Ağustos'un ilk 16 slotu). Ertesi güne KAYDIRILMAZ — o taraftaki
-#     shift_slots() de böyle yapıyor; iki tablo merge edilecekse aynı olmalı.
-#     Gerçek çağrı verisiyle gece analizi yapılacaksa bu kaydırma İKİ TARAFTA
-#     BİRDEN düzeltilmeli, tek tarafta değil.
-COV_PKL_PATH = f"agent_cov_{QUEUE}_{AY_YIL}_{AY_AY:02d}.pkl"
-ARIFE_SAY    = True     # arife yarım vardiyası (09:00-13:00) sahada sayılsın mı.
-                        # Modelin coverage'ına GİRMİYOR (talep'e eklenmiyor, H8)
-                        # ama o kişi fiilen telefonda → gerçek çağrıyla kıyasta
-                        # sayılmalı. Ayrı kolonda da tutuluyor (arife_*), böylece
-                        # "coverage ölçüsü" ile "sahadaki kişi" karışmıyor.
-
-_SLOTS   = [f"{_h:02d}:{_m:02d}" for _h in range(24) for _m in (0, 30)]
-_SLOT_IX = {_s: _i for _i, _s in enumerate(_SLOTS)}
-
-
-def _slotlar(bas, bit):
-    """('15:00','24:00') → kapsadığı 30dk slot listesi (geceyi aşan dahil).
-    plan_vs_model_karsilastirma.shift_slots() ile aynı mantık."""
-    _bh, _bm = (int(_t) for _t in str(bas).split(":"))
-    _eh, _em = (int(_t) for _t in str(bit).split(":"))
-    _i = _SLOT_IX[f"{_bh % 24:02d}:{(_bm // 30) * 30:02d}"]
-    if _eh == 24 or (_eh % 24) * 60 + _em == 0:      # '…-24:00' / '…-00:00' → gün sonu
-        _j = len(_SLOTS)
-    else:
-        _j = (_eh % 24) * 2 + _em // 30
-    if _j <= _i:                                     # geceyi aşıyor → bir tur ekle
-        _j += len(_SLOTS)
-    return [_SLOTS[_k % len(_SLOTS)] for _k in range(_i, _j)]
-
-
-def _mesai_mi(a, ds):
-    """O gün ÜCRETLİ MESAİ mi? (Excel LEJANT'ındaki kategorilerle birebir)
-    mesai  = resmi tatilde çalışma | arife tam gün | hafta sonu (norm/telafi DEĞİL)
-    norm   = aynı hafta hafta içi off'unun karşılığı → kota İÇİNDE, mesai değil
-    telafi = başka haftadaki fazla off'un karşılığı → ücretli mesai DEĞİL"""
-    _d = dt.date.fromisoformat(ds)
-    if _d in TATIL:
-        return 1
-    if _d in ARIFE and a not in arife_kisitli:       # LEJANT: 'ARİFE MESAİ'
-        return 1
-    if _d.weekday() < 5:
-        return 0
-    return int((a, ds) not in _norm_hucre and (a, ds) not in _telafi_hucre)
-
-
-# ── [A] AGENT × GÜN TABLOSU (build_plan_coverage() girdisi) ───────────
-# Sadece ÇALIŞILAN günler; off/izin satırı yok (o fonksiyon zaten vardiya
-# olarak okuyamadığı satırı düşürüyor, boşuna şişirmeyelim).
-# Flag kuralları o taraftaki DEFAULT_FLAG_RULES ile uyumlu:
-#   kismi_flg / egitim_flg → bu modelde ZATEN elenmiş (H5) → hep 0
-#   vob_flg                → bu modelde karşılığı yok      → hep 0
-#   kidem_1_ay_flg         → junior_agents (kıdem < MIN_KIDEM_AY, H14B).
-#                            İsim '1 ay' diyor, eşik burada MIN_KIDEM_AY;
-#                            o tarafta 'include' olduğu için sayımı etkilemiyor,
-#                            sadece bilgi kolonu.
-_ap = []
-for _r31 in df_sonuc.itertuples():
-    _a31, _ds31, _sa31 = _r31.agent, _r31.tarih, _r31.saat
-    _ap.append({
-        "agent_user_code":       _a31,
-        "agent_name":            _ad.get(_a31, _a31),
-        "date":                  _ds31,
-        "vardiya":               _sa31,
-        "line_based_main_group": f"{QUEUE}_cagrilar",
-        "mesai_mi_calisti":      _mesai_mi(_a31, _ds31),
-        "arife_yarim":           int(_r31.vardiya == ARIFE_YARIM),
-        "takim":                 agent_takim.get(_a31, ""),
-        "kismi_flg":             0,                  # H5'te elendi
-        "egitim_flg":            0,                  # H5'te elendi
-        "vob_flg":               0,                  # bu modelde yok
-        "hamile_flg":            int(_a31 in hamile_set),
-        "sut_izni_flg":          int(_a31 in sut_set),
-        "kidem_1_ay_flg":        int(_a31 in junior_agents),
-    })
-df_agent_plan = pd.DataFrame(_ap).sort_values(["date", "agent_user_code"]) \
-                                 .reset_index(drop=True)
-
-# ── [B] GÜN × INTERVAL: TALEP vs ATANAN ──────────────────────────────
-# talep  : Stage-1'in inhouse kova talebi (ARIFE_YARIM talep'te YOK → girmez)
-# atanan : bu modelin fiilen atadığı kişi (arife hariç → coverage ile aynı ölçü)
-# arife  : arife yarım vardiyası (coverage dışı ek kişi, ayrı kolonda)
-# fark   : atanan − talep   ← istediğin "+ / −"
-_tal_slot, _at_slot, _ar_slot = {}, {}, {}
-for (_ds31, _v31), _k31 in talep.items():
-    for _s31 in _slotlar(*saat[(_ds31, _v31)]):
-        _tal_slot[(_ds31, _s31)] = _tal_slot.get((_ds31, _s31), 0) + _k31
-for _r31 in df_sonuc.itertuples():
-    _hedef = _ar_slot if _r31.vardiya == ARIFE_YARIM else _at_slot
-    _b31, _e31 = str(_r31.saat).split("-")
-    for _s31 in _slotlar(_b31, _e31):
-        _hedef[(_r31.tarih, _s31)] = _hedef.get((_r31.tarih, _s31), 0) + 1
-
-_ilk31 = pd.Timestamp(year=AY_YIL, month=AY_AY, day=1)
-_gunler31 = pd.date_range(_ilk31, _ilk31 + pd.offsets.MonthEnd(1), freq="D")
-df_cov_interval = pd.MultiIndex.from_product(
-    [_gunler31, _SLOTS], names=["data_date", "interval"]).to_frame(index=False)
-_ds_str = df_cov_interval["data_date"].dt.strftime("%Y-%m-%d")
-_anahtar = list(zip(_ds_str, df_cov_interval["interval"]))
-df_cov_interval[f"talep_{QUEUE}"]  = [_tal_slot.get(_k, 0) for _k in _anahtar]
-df_cov_interval[f"atanan_{QUEUE}"] = [_at_slot.get(_k, 0) for _k in _anahtar]
-df_cov_interval[f"arife_{QUEUE}"]  = [_ar_slot.get(_k, 0) for _k in _anahtar]
-df_cov_interval[f"fark_{QUEUE}"] = (df_cov_interval[f"atanan_{QUEUE}"]
-                                    - df_cov_interval[f"talep_{QUEUE}"])
-if ARIFE_SAY:                                        # sahadaki gerçek kişi
-    df_cov_interval[f"sahada_{QUEUE}"] = (df_cov_interval[f"atanan_{QUEUE}"]
-                                          + df_cov_interval[f"arife_{QUEUE}"])
-df_cov_interval["gun"] = df_cov_interval["data_date"].dt.weekday.map(
-    lambda _w: DAY_TR[_w])
-df_cov_interval["hafta_sonu"] = (df_cov_interval["data_date"].dt.weekday >= 5).astype(int)
-df_cov_interval["plani_var"] = _ds_str.isin(set(PLAN_GUNLER)).astype(int)
-
-# ── [C] GÜN ÖZETİ (interval'lerin gün toplamı — kişi-saat/2) ─────────
-df_cov_gun = (df_cov_interval[df_cov_interval["plani_var"] == 1]
-              .groupby(["data_date", "gun"], as_index=False)
-              [[f"talep_{QUEUE}", f"atanan_{QUEUE}", f"arife_{QUEUE}",
-                f"fark_{QUEUE}"]].sum())
-
-# ── PICKLE ───────────────────────────────────────────────────────────
-_paket31 = {
-    "meta": {
-        "kuyruk": QUEUE, "yil": AY_YIL, "ay": AY_AY,
-        "kaynak_pickle": PKL_PATH,
-        "uretim": dt.datetime.now().isoformat(timespec="seconds"),
-        "durum": solver.StatusName(status),
-        "amac": (None if FIZIBILITE_MODU else float(solver.ObjectiveValue())),
-        "agent_sayisi": len(AGENTS), "takim_sayisi": len(takimlar),
-        "slot_dk": 30, "arife_sayildi": ARIFE_SAY,
-        "gece_slotlari_ayni_gune": True,             # shift_slots() konvansiyonu
-        "kolonlar": {
-            "talep":  "Stage-1 inhouse kova talebi (arife hariç)",
-            "atanan": "modelin fiilen atadığı kişi (arife hariç, coverage ölçüsü)",
-            "arife":  "arife yarım vardiyası — coverage'a girmeyen ek kişi",
-            "fark":   "atanan − talep  (eksi = açık)",
-            "sahada": "atanan + arife (gerçek çağrıyla kıyas için)",
-        },
-    },
-    "interval":   df_cov_interval,      # gün × 30dk × talep/atanan/fark
-    "gun":        df_cov_gun,           # gün toplamı
-    "agent_plan": df_agent_plan,        # build_plan_coverage() girdisi
-    "atama":      df_sonuc,             # ham atama (agent × gün × vardiya)
-}
-with open(COV_PKL_PATH, "wb") as _f31:
-    pickle.dump(_paket31, _f31)
-
-# ── ÖZET ─────────────────────────────────────────────────────────────
-_pl = df_cov_interval[df_cov_interval["plani_var"] == 1]
-_t31 = int(_pl[f"talep_{QUEUE}"].sum())
-_a31s = int(_pl[f"atanan_{QUEUE}"].sum())
-_ar31 = int(_pl[f"arife_{QUEUE}"].sum())
-print("=" * 78)
-print(f"H31 — INTERVAL COVERAGE PICKLE: {COV_PKL_PATH}")
-print("=" * 78)
-print(f"  interval tablosu : {len(df_cov_interval):,} satır "
-      f"({len(_gunler31)} gün × {len(_SLOTS)} slot), planı olan {len(_pl):,}")
-print(f"  agent_plan       : {len(df_agent_plan):,} satır "
-      f"({df_agent_plan['agent_user_code'].nunique()} agent, "
-      f"{int(df_agent_plan['mesai_mi_calisti'].sum())} mesai günü, "
-      f"{int(df_agent_plan['arife_yarim'].sum())} arife yarım)")
-print(f"  slot toplamı (kişi-slot, 30dk): talep {_t31:,}  atanan {_a31s:,}  "
-      f"fark {_a31s - _t31:+,}  |  arife ek {_ar31:,}")
-print(f"  → kişi-SAATE çevirmek için ÷2 (her slot yarım saat)")
-print(f"\n  EN ÇOK AÇIK VEREN 10 (gün, interval):")
-_kot31 = _pl.nsmallest(10, f"fark_{QUEUE}")
-for _r31 in _kot31.itertuples():
-    print(f"    {_r31.data_date.date()} {_r31.gun} {_r31.interval}: "
-          f"talep {getattr(_r31, f'talep_{QUEUE}'):>4}  "
-          f"atanan {getattr(_r31, f'atanan_{QUEUE}'):>4}  "
-          f"fark {getattr(_r31, f'fark_{QUEUE}'):>+4}")
-print(f"\n  SAAT BAZINDA ORTALAMA FARK (planı olan günler, en kötü 8 slot):")
-_slot_ort = (_pl.groupby("interval")[f"fark_{QUEUE}"].mean()
-             .sort_values().head(8).round(1))
-for _s31, _v31 in _slot_ort.items():
-    print(f"    {_s31}: {_v31:+.1f} kişi (ay ortalaması)")
-print(f"\n  KARŞILAŞTIRMA TARAFINDA KULLANIM:")
-print(f"    import pickle")
-print(f"    p = pickle.load(open('{COV_PKL_PATH}','rb'))")
-print(f"    df_ag = build_plan_coverage(p['agent_plan'], year={AY_YIL}, month={AY_AY})")
-print(f"    #   → data_date, interval, plan_{QUEUE}, mesai_{QUEUE}  (aynı fonksiyon)")
-print(f"    # ya da hazır tabloyu doğrudan merge et:")
-print(f"    df = df_cmp.merge(p['interval'], on=['data_date','interval'], how='left')")
 print("=" * 78)
