@@ -4450,7 +4450,6 @@ def _gorunum(a, c):
         kat = "offt_kars"                               # etiket kalır, renk KIRMIZI olur
     return metin, kat
 
-a
 def _onceki_gorunum(a, d):
     """ÖNCEKİ AY hücresi (salt okunur) → (metin, kategori). d = date."""
     v = onceki_gunluk.get(a, {}).get(d)
@@ -4698,4 +4697,207 @@ elif _pay30 < 0.15 * max(1, _gereken_hs30):
 else:
     print(f"    ✓ rahat: pay +{_pay30} kişi-gün "
           f"(%{100*_pay30/max(1,_gereken_hs30):.0f})")
+print("=" * 78)
+
+
+# %% [HÜCRE 31] — INTERVAL BAZLI COVERAGE PICKLE (plan_vs_model girdisi) ─
+# NE İŞE YARAR: plan_vs_model_karsilastirma.py bugün İKİ kaynağı kıyaslıyor —
+#   build_plan_coverage(df_plan)        → elle yapılan vardiya planı (agent × gün)
+#   model_coverage_from_results(results)→ Stage-1 pickle'ı (kova/slot talebi)
+# EKSİK OLAN ÜÇÜNCÜ KAYNAK bu modelin ÇIKTISI: isimli agent ataması, yani
+# "coverage'dan izin/off düşüldükten sonra sahada FİİLEN kaç kişi var".
+# Stage-1 kaç kişi İSTEDİĞİNİ söylüyor, bu model kaç kişi KOYABİLDİĞİNİ.
+# Bu hücre o farkı gün × 30dk interval bazında çıkarıp pickle'a yazar.
+#
+# İKİ TABLO BİRDEN yazılıyor (ikisi de aynı çözümden, tutarlı):
+#   [A] agent_plan — agent × gün × vardiya, build_plan_coverage()'ın BİREBİR
+#       beklediği kolon adlarıyla. Karşılaştırma tarafında yeni kod yazmadan
+#       df_plan yerine bunu verip aynı fonksiyonu koşabilirsin.
+#   [B] interval   — gün × interval hazır tablo: talep / atanan / fark.
+#       Sadece merge edip bakmak istiyorsan bu yeter.
+#
+# SLOT KONVANSİYONU — plan_vs_model_karsilastirma.py ile BİREBİR aynı:
+#   • 30 dakikalık slot, etiket slotun BAŞLANGICI ("09:00" = 09:00-09:30)
+#   • '…-24:00' ve '…-00:00' gün sonu sayılır (48. slota kadar)
+#   • GECEYİ AŞAN vardiya slotları AYNI GÜNE yazılır (00:00-08:00 → 3 Ağustos
+#     kaydıysa 3 Ağustos'un ilk 16 slotu). Ertesi güne KAYDIRILMAZ — o taraftaki
+#     shift_slots() de böyle yapıyor; iki tablo merge edilecekse aynı olmalı.
+#     Gerçek çağrı verisiyle gece analizi yapılacaksa bu kaydırma İKİ TARAFTA
+#     BİRDEN düzeltilmeli, tek tarafta değil.
+COV_PKL_PATH = f"agent_cov_{QUEUE}_{AY_YIL}_{AY_AY:02d}.pkl"
+ARIFE_SAY    = True     # arife yarım vardiyası (09:00-13:00) sahada sayılsın mı.
+                        # Modelin coverage'ına GİRMİYOR (talep'e eklenmiyor, H8)
+                        # ama o kişi fiilen telefonda → gerçek çağrıyla kıyasta
+                        # sayılmalı. Ayrı kolonda da tutuluyor (arife_*), böylece
+                        # "coverage ölçüsü" ile "sahadaki kişi" karışmıyor.
+
+_SLOTS   = [f"{_h:02d}:{_m:02d}" for _h in range(24) for _m in (0, 30)]
+_SLOT_IX = {_s: _i for _i, _s in enumerate(_SLOTS)}
+
+
+def _slotlar(bas, bit):
+    """('15:00','24:00') → kapsadığı 30dk slot listesi (geceyi aşan dahil).
+    plan_vs_model_karsilastirma.shift_slots() ile aynı mantık."""
+    _bh, _bm = (int(_t) for _t in str(bas).split(":"))
+    _eh, _em = (int(_t) for _t in str(bit).split(":"))
+    _i = _SLOT_IX[f"{_bh % 24:02d}:{(_bm // 30) * 30:02d}"]
+    if _eh == 24 or (_eh % 24) * 60 + _em == 0:      # '…-24:00' / '…-00:00' → gün sonu
+        _j = len(_SLOTS)
+    else:
+        _j = (_eh % 24) * 2 + _em // 30
+    if _j <= _i:                                     # geceyi aşıyor → bir tur ekle
+        _j += len(_SLOTS)
+    return [_SLOTS[_k % len(_SLOTS)] for _k in range(_i, _j)]
+
+
+def _mesai_mi(a, ds):
+    """O gün ÜCRETLİ MESAİ mi? (Excel LEJANT'ındaki kategorilerle birebir)
+    mesai  = resmi tatilde çalışma | arife tam gün | hafta sonu (norm/telafi DEĞİL)
+    norm   = aynı hafta hafta içi off'unun karşılığı → kota İÇİNDE, mesai değil
+    telafi = başka haftadaki fazla off'un karşılığı → ücretli mesai DEĞİL"""
+    _d = dt.date.fromisoformat(ds)
+    if _d in TATIL:
+        return 1
+    if _d in ARIFE and a not in arife_kisitli:       # LEJANT: 'ARİFE MESAİ'
+        return 1
+    if _d.weekday() < 5:
+        return 0
+    return int((a, ds) not in _norm_hucre and (a, ds) not in _telafi_hucre)
+
+
+# ── [A] AGENT × GÜN TABLOSU (build_plan_coverage() girdisi) ───────────
+# Sadece ÇALIŞILAN günler; off/izin satırı yok (o fonksiyon zaten vardiya
+# olarak okuyamadığı satırı düşürüyor, boşuna şişirmeyelim).
+# Flag kuralları o taraftaki DEFAULT_FLAG_RULES ile uyumlu:
+#   kismi_flg / egitim_flg → bu modelde ZATEN elenmiş (H5) → hep 0
+#   vob_flg                → bu modelde karşılığı yok      → hep 0
+#   kidem_1_ay_flg         → junior_agents (kıdem < MIN_KIDEM_AY, H14B).
+#                            İsim '1 ay' diyor, eşik burada MIN_KIDEM_AY;
+#                            o tarafta 'include' olduğu için sayımı etkilemiyor,
+#                            sadece bilgi kolonu.
+_ap = []
+for _r31 in df_sonuc.itertuples():
+    _a31, _ds31, _sa31 = _r31.agent, _r31.tarih, _r31.saat
+    _ap.append({
+        "agent_user_code":       _a31,
+        "agent_name":            _ad.get(_a31, _a31),
+        "date":                  _ds31,
+        "vardiya":               _sa31,
+        "line_based_main_group": f"{QUEUE}_cagrilar",
+        "mesai_mi_calisti":      _mesai_mi(_a31, _ds31),
+        "arife_yarim":           int(_r31.vardiya == ARIFE_YARIM),
+        "takim":                 agent_takim.get(_a31, ""),
+        "kismi_flg":             0,                  # H5'te elendi
+        "egitim_flg":            0,                  # H5'te elendi
+        "vob_flg":               0,                  # bu modelde yok
+        "hamile_flg":            int(_a31 in hamile_set),
+        "sut_izni_flg":          int(_a31 in sut_set),
+        "kidem_1_ay_flg":        int(_a31 in junior_agents),
+    })
+df_agent_plan = pd.DataFrame(_ap).sort_values(["date", "agent_user_code"]) \
+                                 .reset_index(drop=True)
+
+# ── [B] GÜN × INTERVAL: TALEP vs ATANAN ──────────────────────────────
+# talep  : Stage-1'in inhouse kova talebi (ARIFE_YARIM talep'te YOK → girmez)
+# atanan : bu modelin fiilen atadığı kişi (arife hariç → coverage ile aynı ölçü)
+# arife  : arife yarım vardiyası (coverage dışı ek kişi, ayrı kolonda)
+# fark   : atanan − talep   ← istediğin "+ / −"
+_tal_slot, _at_slot, _ar_slot = {}, {}, {}
+for (_ds31, _v31), _k31 in talep.items():
+    for _s31 in _slotlar(*saat[(_ds31, _v31)]):
+        _tal_slot[(_ds31, _s31)] = _tal_slot.get((_ds31, _s31), 0) + _k31
+for _r31 in df_sonuc.itertuples():
+    _hedef = _ar_slot if _r31.vardiya == ARIFE_YARIM else _at_slot
+    _b31, _e31 = str(_r31.saat).split("-")
+    for _s31 in _slotlar(_b31, _e31):
+        _hedef[(_r31.tarih, _s31)] = _hedef.get((_r31.tarih, _s31), 0) + 1
+
+_ilk31 = pd.Timestamp(year=AY_YIL, month=AY_AY, day=1)
+_gunler31 = pd.date_range(_ilk31, _ilk31 + pd.offsets.MonthEnd(1), freq="D")
+df_cov_interval = pd.MultiIndex.from_product(
+    [_gunler31, _SLOTS], names=["data_date", "interval"]).to_frame(index=False)
+_ds_str = df_cov_interval["data_date"].dt.strftime("%Y-%m-%d")
+_anahtar = list(zip(_ds_str, df_cov_interval["interval"]))
+df_cov_interval[f"talep_{QUEUE}"]  = [_tal_slot.get(_k, 0) for _k in _anahtar]
+df_cov_interval[f"atanan_{QUEUE}"] = [_at_slot.get(_k, 0) for _k in _anahtar]
+df_cov_interval[f"arife_{QUEUE}"]  = [_ar_slot.get(_k, 0) for _k in _anahtar]
+df_cov_interval[f"fark_{QUEUE}"] = (df_cov_interval[f"atanan_{QUEUE}"]
+                                    - df_cov_interval[f"talep_{QUEUE}"])
+if ARIFE_SAY:                                        # sahadaki gerçek kişi
+    df_cov_interval[f"sahada_{QUEUE}"] = (df_cov_interval[f"atanan_{QUEUE}"]
+                                          + df_cov_interval[f"arife_{QUEUE}"])
+df_cov_interval["gun"] = df_cov_interval["data_date"].dt.weekday.map(
+    lambda _w: DAY_TR[_w])
+df_cov_interval["hafta_sonu"] = (df_cov_interval["data_date"].dt.weekday >= 5).astype(int)
+df_cov_interval["plani_var"] = _ds_str.isin(set(PLAN_GUNLER)).astype(int)
+
+# ── [C] GÜN ÖZETİ (interval'lerin gün toplamı — kişi-saat/2) ─────────
+df_cov_gun = (df_cov_interval[df_cov_interval["plani_var"] == 1]
+              .groupby(["data_date", "gun"], as_index=False)
+              [[f"talep_{QUEUE}", f"atanan_{QUEUE}", f"arife_{QUEUE}",
+                f"fark_{QUEUE}"]].sum())
+
+# ── PICKLE ───────────────────────────────────────────────────────────
+_paket31 = {
+    "meta": {
+        "kuyruk": QUEUE, "yil": AY_YIL, "ay": AY_AY,
+        "kaynak_pickle": PKL_PATH,
+        "uretim": dt.datetime.now().isoformat(timespec="seconds"),
+        "durum": solver.StatusName(status),
+        "amac": (None if FIZIBILITE_MODU else float(solver.ObjectiveValue())),
+        "agent_sayisi": len(AGENTS), "takim_sayisi": len(takimlar),
+        "slot_dk": 30, "arife_sayildi": ARIFE_SAY,
+        "gece_slotlari_ayni_gune": True,             # shift_slots() konvansiyonu
+        "kolonlar": {
+            "talep":  "Stage-1 inhouse kova talebi (arife hariç)",
+            "atanan": "modelin fiilen atadığı kişi (arife hariç, coverage ölçüsü)",
+            "arife":  "arife yarım vardiyası — coverage'a girmeyen ek kişi",
+            "fark":   "atanan − talep  (eksi = açık)",
+            "sahada": "atanan + arife (gerçek çağrıyla kıyas için)",
+        },
+    },
+    "interval":   df_cov_interval,      # gün × 30dk × talep/atanan/fark
+    "gun":        df_cov_gun,           # gün toplamı
+    "agent_plan": df_agent_plan,        # build_plan_coverage() girdisi
+    "atama":      df_sonuc,             # ham atama (agent × gün × vardiya)
+}
+with open(COV_PKL_PATH, "wb") as _f31:
+    pickle.dump(_paket31, _f31)
+
+# ── ÖZET ─────────────────────────────────────────────────────────────
+_pl = df_cov_interval[df_cov_interval["plani_var"] == 1]
+_t31 = int(_pl[f"talep_{QUEUE}"].sum())
+_a31s = int(_pl[f"atanan_{QUEUE}"].sum())
+_ar31 = int(_pl[f"arife_{QUEUE}"].sum())
+print("=" * 78)
+print(f"H31 — INTERVAL COVERAGE PICKLE: {COV_PKL_PATH}")
+print("=" * 78)
+print(f"  interval tablosu : {len(df_cov_interval):,} satır "
+      f"({len(_gunler31)} gün × {len(_SLOTS)} slot), planı olan {len(_pl):,}")
+print(f"  agent_plan       : {len(df_agent_plan):,} satır "
+      f"({df_agent_plan['agent_user_code'].nunique()} agent, "
+      f"{int(df_agent_plan['mesai_mi_calisti'].sum())} mesai günü, "
+      f"{int(df_agent_plan['arife_yarim'].sum())} arife yarım)")
+print(f"  slot toplamı (kişi-slot, 30dk): talep {_t31:,}  atanan {_a31s:,}  "
+      f"fark {_a31s - _t31:+,}  |  arife ek {_ar31:,}")
+print(f"  → kişi-SAATE çevirmek için ÷2 (her slot yarım saat)")
+print(f"\n  EN ÇOK AÇIK VEREN 10 (gün, interval):")
+_kot31 = _pl.nsmallest(10, f"fark_{QUEUE}")
+for _r31 in _kot31.itertuples():
+    print(f"    {_r31.data_date.date()} {_r31.gun} {_r31.interval}: "
+          f"talep {getattr(_r31, f'talep_{QUEUE}'):>4}  "
+          f"atanan {getattr(_r31, f'atanan_{QUEUE}'):>4}  "
+          f"fark {getattr(_r31, f'fark_{QUEUE}'):>+4}")
+print(f"\n  SAAT BAZINDA ORTALAMA FARK (planı olan günler, en kötü 8 slot):")
+_slot_ort = (_pl.groupby("interval")[f"fark_{QUEUE}"].mean()
+             .sort_values().head(8).round(1))
+for _s31, _v31 in _slot_ort.items():
+    print(f"    {_s31}: {_v31:+.1f} kişi (ay ortalaması)")
+print(f"\n  KARŞILAŞTIRMA TARAFINDA KULLANIM:")
+print(f"    import pickle")
+print(f"    p = pickle.load(open('{COV_PKL_PATH}','rb'))")
+print(f"    df_ag = build_plan_coverage(p['agent_plan'], year={AY_YIL}, month={AY_AY})")
+print(f"    #   → data_date, interval, plan_{QUEUE}, mesai_{QUEUE}  (aynı fonksiyon)")
+print(f"    # ya da hazır tabloyu doğrudan merge et:")
+print(f"    df = df_cmp.merge(p['interval'], on=['data_date','interval'], how='left')")
 print("=" * 78)
