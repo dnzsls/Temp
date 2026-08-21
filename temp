@@ -534,14 +534,8 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
     return fig
 
 
-def grafik_gun_egrisi(df, queue='KİTLE', sifirdan=True, kaydet=None):
-    """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir.
-
-    sifirdan=True (varsayılan): her iki eksen de 0'dan başlar. Böylece
-      çizgilerin birbirine yakınlığı/uzaklığı göz yanılgısı yaratmaz.
-      False yaparsan matplotlib eksenleri otomatik kırpar — düşüşler
-      olduğundan daha dramatik görünür.
-    """
+def grafik_gun_egrisi(df, queue='KİTLE', kaydet=None):
+    """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir."""
     import matplotlib.pyplot as plt
 
     g = gun_ozet(df)
@@ -556,8 +550,6 @@ def grafik_gun_egrisi(df, queue='KİTLE', sifirdan=True, kaydet=None):
     ax.plot(x, g['kisi_saat'], color=RENK['kapasite'], lw=2, marker='o', ms=4,
             zorder=3, label='Kapasite (kişi-saat)')
     ax.set_ylabel('kişi-saat', fontsize=9, color=RENK['metin2'])
-    if sifirdan:
-        ax.set_ylim(bottom=0)
 
     ax2 = ax.twinx()
     ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--', zorder=4,
@@ -568,8 +560,6 @@ def grafik_gun_egrisi(df, queue='KİTLE', sifirdan=True, kaydet=None):
         ax2.spines[k].set_visible(False)
     ax2.spines['right'].set_color(RENK['cagri'])
     ax2.grid(False)
-    if sifirdan:
-        ax2.set_ylim(bottom=0)
 
     ax.set_xticks(list(x))
     ax.set_xticklabels([f"{d.day}\n{gg}" for d, gg in zip(g['data_date'], g['gun'])],
@@ -578,10 +568,7 @@ def grafik_gun_egrisi(df, queue='KİTLE', sifirdan=True, kaydet=None):
     ax.set_axisbelow(True)
     for k in ('top', 'right'):
         ax.spines[k].set_visible(False)
-    ax.set_title(f"{queue} — gün gün kapasite ve çağrı\n"
-                 f"sol eksen kişi-saat · sağ eksen çağrı adedi "
-                 f"(ölçekler bağımsız, çizgilerin kesişmesi anlam taşımaz)",
-                 fontsize=11,
+    ax.set_title(f"{queue} — gün gün kapasite ve çağrı", fontsize=11,
                  fontweight='bold', color=RENK['metin'], loc='left', pad=10)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
