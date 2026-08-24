@@ -548,9 +548,9 @@ RENK = {
     'outsource': '#f7d774',     # yumuşak sarı
     'kismi':     '#1baf7a',     # yeşil
     'cagri':     '#4a3aa7',     # mor
-    'eksik':     '#d1495b',     # kırmızı — kapasite ihtiyacın altında
-    'karsilanan':'#cfe9d4',     # açık yeşil — karşılanan ihtiyaç (taban)
-    'fazla':     '#5aa2e0',     # mavi — kapasite ihtiyacın üstünde
+    'eksik':     '#F94449',     # kırmızı — kapasite ihtiyacın altında
+    'karsilanan':'#F3F6D6',     # iç dolgu — karşılanan ihtiyaç (taban)
+    'fazla':     '#B5E4F6',     # açık mavi — kapasite ihtiyacın üstünde
     'dolgu':     '#cfe0f5',
     'izgara':    '#e8e7e3',
     'metin':     '#0b0b0b',
@@ -1501,8 +1501,7 @@ def ihtiyac_ozeti(df, cagri_adedi=CAGRI_ADEDI):
 
 
 def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
-                   olcu='ortalama', yontem='kapasite', kirilim=False,
-                   y_adim=50, kaydet=None):
+                   olcu='ortalama', yontem='kapasite', y_adim=50, kaydet=None):
     """TEK EKSEN: kapasite vs gereken kişi. Sağ eksen YOK.
 
     Üst satır PLAN, alt satır MODEL. Sol sütun hafta içi, sağ sütun hafta sonu.
@@ -1516,7 +1515,8 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
       'erlang'   → ihtiyaç = Erlang-C (erlang_ekle ile hesaplanmış olmalı)
       'ikisi'    → alanlar Erlang'a göre, 15 kuralı ince gri çizgi olarak da
                    gösterilir
-    kirilim=True → kapasite ayrıca inhouse/outsource/kısmi olarak yığılır.
+
+    İnhouse/outsource kırılımı YOK — sadece toplam kapasite ve +/− alanları.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1551,25 +1551,14 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
             kap = g['kapasite_toplam'].values
             ger = g[ana_kol].values
 
-            if kirilim:
-                kin, kout = g['kapasite_in'].values, g['kapasite_out'].values
-                ax.fill_between(x, 0, kin, color=RENK['inhouse'], alpha=0.30,
-                                zorder=1, label='inhouse')
-                ax.fill_between(x, kin, kin + kout, color=RENK['outsource'],
-                                alpha=0.35, zorder=1, label='outsource')
-                if g['kapasite_pt'].sum() > 0:
-                    ax.fill_between(x, kin + kout, kap, color=RENK['kismi'],
-                                    alpha=0.40, zorder=1, label='kısmi')
-
             # TABAN — karşılanan ihtiyaç (ihtiyaç çizgisinin altı)
             ax.fill_between(x, 0, ger, color=RENK['karsilanan'], zorder=1,
                             label='Karşılanan ihtiyaç')
             # FAZLA / EKSİK — ihtiyaç ile kapasite arasındaki bant
             ax.fill_between(x, ger, kap, where=(kap >= ger), interpolate=True,
-                            color=RENK['fazla'], alpha=0.80, zorder=2,
-                            label='FAZLA kapasite')
+                            color=RENK['fazla'], zorder=2, label='FAZLA kapasite')
             ax.fill_between(x, ger, kap, where=(kap < ger), interpolate=True,
-                            color=RENK['eksik'], alpha=0.80, zorder=3,
+                            color=RENK['eksik'], alpha=0.85, zorder=3,
                             label='EKSİK kapasite')
 
             ax.plot(x, kap, color=RENK['kapasite'], lw=2.4, zorder=4,
