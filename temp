@@ -157,10 +157,24 @@ ACTUAL_KOL = {
 
 OUTSOURCE_EK_SLOT = 1        # outsource inhouse'dan 30 dk fazla çalışıyor
 
+# (şirket_adı, kolon_soneki) — kapasite_in / kapasite_out / kapasite_pt
+SIRKETLER = (('inhouse', 'in'), ('outsource', 'out'), ('part_time', 'pt'))
+OLCU_KOL = [f"{o}_{s}" for o in ('kapasite', 'baslangic')
+            for s in ('in', 'out', 'pt', 'toplam')]
+
 # Kısmi (part-time) vardiya etiketleri. PLAN tarafında hafta içi HARİÇ tutulur,
 # hafta sonu DAHİL edilir. Kendi listeni buraya yaz ya da fonksiyona parametre
 # olarak geç. SQL'de zaten filtreliyorsan boş bırak.
 KISMI_VARDIYALAR = []
+
+
+def _vardiya_anahtar(v):
+    """'08:00 - 12:00' ve '08:00-12:00' aynı sayılsın diye normalize eder."""
+    m = _SHIFT_RE.search(str(v))
+    if not m:
+        return re.sub(r'\s+', '', str(v)).lower()
+    sh, sm, eh, em = (int(g) for g in m.groups())
+    return f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
 
 
 def _company(s):
@@ -234,17 +248,25 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
     d['_vardiya'] = d[r['shift']].astype(str)
 
     kismi = list(kismi_vardiyalar if kismi_vardiyalar is not None else KISMI_VARDIYALAR)
-    if kismi and kismi_haftaici_haric:
-        hafta_ici = d['data_date'].dt.weekday < 5
-        at = hafta_ici & d['_vardiya'].isin(kismi)
-        bulunmayan = [v for v in kismi if v not in set(d['_vardiya'])]
+    if kismi:
+        norm = {_vardiya_anahtar(v) for v in kismi}
+        kismi_mi = d['_vardiya'].map(_vardiya_anahtar).isin(norm)
+        veri_anahtar = set(d['_vardiya'].map(_vardiya_anahtar))
+        bulunmayan = [v for v in kismi if _vardiya_anahtar(v) not in veri_anahtar]
+        if kismi_haftaici_haric:
+            at = (d['data_date'].dt.weekday < 5) & kismi_mi
+            if verbose:
+                print(f"  ℹ kısmi vardiya: hafta içi {int(at.sum()):,} satır "
+                      f"({int(d.loc[at, 'kisi'].sum()):,} kişi) çıkarıldı, "
+                      f"hafta sonu korundu.")
+            d = d[~at]
+            kismi_mi = kismi_mi[~at]
+        d.loc[kismi_mi, 'company'] = 'part_time'
         if verbose:
-            print(f"  ℹ kısmi vardiya: hafta içi {int(at.sum()):,} satır "
-                  f"({int(d.loc[at, 'kisi'].sum()):,} kişi) çıkarıldı, "
-                  f"hafta sonu korundu.")
+            print(f"  ℹ kalan kısmi satır 'part_time' olarak ayrıldı "
+                  f"({int(d.loc[kismi_mi, 'kisi'].sum()):,} kişi).")
             if bulunmayan:
                 print(f"  ⚠ listede olup veride bulunmayan etiket: {bulunmayan}")
-        d = d[~at]
 
     ay_bas = pd.Timestamp(year=year, month=month, day=1)
     ay_son = ay_bas + pd.offsets.MonthEnd(1)
@@ -300,21 +322,22 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
     b = b.groupby(['data_date', 'interval', 'company'], as_index=False)['kisi'].sum()
 
     for kaynak, onek in ((k, 'kapasite'), (b, 'baslangic')):
-        for sirket, sonek in (('inhouse', 'in'), ('outsource', 'out')):
+        for sirket, sonek in SIRKETLER:
             alt = kaynak[kaynak['company'] == sirket][['data_date', 'interval', 'kisi']]
             out = out.merge(alt.rename(columns={'kisi': f"{onek}_{sonek}"}),
                             on=['data_date', 'interval'], how='left')
 
-    deger = [f"{o}_{s}" for o in ('kapasite', 'baslangic') for s in ('in', 'out')]
+    deger = [f"{o}_{s}" for o in ('kapasite', 'baslangic') for _, s in SIRKETLER]
     out[deger] = out[deger].fillna(0).round().astype(int)
-    out['kapasite_toplam'] = out['kapasite_in'] + out['kapasite_out']
-    out['baslangic_toplam'] = out['baslangic_in'] + out['baslangic_out']
+    out['kapasite_toplam'] = out[[f"kapasite_{s}" for _, s in SIRKETLER]].sum(axis=1)
+    out['baslangic_toplam'] = out[[f"baslangic_{s}" for _, s in SIRKETLER]].sum(axis=1)
     out = out.sort_values(['data_date', 'interval']).reset_index(drop=True)
 
     if verbose:
         print(f"VARDİYA — {d_ay['data_date'].nunique()}/{len(gunler)} gün  |  "
               f"tepe kapasite: inhouse {int(out['kapasite_in'].max())} "
-              f"outsource {int(out['kapasite_out'].max())}  |  "
+              f"outsource {int(out['kapasite_out'].max())} "
+              f"kısmi {int(out['kapasite_pt'].max())}  |  "
               f"tepe başlangıç: {int(out['baslangic_toplam'].max())} kişi")
     return out
 
@@ -424,9 +447,7 @@ def genel_bakis(df_vard, df_cagri, sadece_dolu_gun=True, verbose=True):
 
     df['gun'] = pd.to_datetime(df['data_date']).dt.weekday.map(lambda i: GUN_TR[i])
     df['hafta_sonu'] = (pd.to_datetime(df['data_date']).dt.weekday >= 5).astype(int)
-    kol = (['data_date', 'gun', 'hafta_sonu', 'interval']
-           + [f"{o}_{s}" for o in ('kapasite', 'baslangic')
-              for s in ('in', 'out', 'toplam')] + ['cagri'])
+    kol = ['data_date', 'gun', 'hafta_sonu', 'interval'] + OLCU_KOL + ['cagri']
     return df[kol].sort_values(['data_date', 'interval']).reset_index(drop=True)
 
 
@@ -442,8 +463,7 @@ def slot_ozet(df, hafta_sonu=None, olcu='ortalama'):
     d = df if hafta_sonu is None else df[df['hafta_sonu'] == hafta_sonu]
     if d.empty:
         return pd.DataFrame()
-    kol = [f"{o}_{s}" for o in ('kapasite', 'baslangic')
-           for s in ('in', 'out', 'toplam')] + ['cagri']
+    kol = OLCU_KOL + ['cagri']
     gb = d.groupby('interval', as_index=False)[kol]
     g = (gb.mean() if olcu == 'ortalama' else gb.median()).round(1)
     g['gun_sayisi'] = d['data_date'].nunique()
@@ -452,8 +472,7 @@ def slot_ozet(df, hafta_sonu=None, olcu='ortalama'):
 
 def gun_ozet(df):
     """Gün bazında toplam — kapasite kişi-slot, çağrı adet."""
-    kol = [f"{o}_{s}" for o in ('kapasite', 'baslangic')
-           for s in ('in', 'out', 'toplam')] + ['cagri']
+    kol = OLCU_KOL + ['cagri']
     g = df.groupby(['data_date', 'gun', 'hafta_sonu'], as_index=False)[kol].sum()
     g['kisi_saat'] = (g['kapasite_toplam'] / 2).round(1)     # slot = yarım saat
     g['cagri_kisi_basi'] = (g['cagri'] / g['kisi_saat'].replace(0, pd.NA)).round(1)
@@ -469,6 +488,7 @@ RENK = {
     'baslangic': '#eb6834',     # turuncu
     'inhouse':   '#2a78d6',
     'outsource': '#eda100',     # sarı
+    'kismi':     '#1baf7a',     # yeşil
     'cagri':     '#4a3aa7',     # mor
     'dolgu':     '#cfe0f5',
     'izgara':    '#e8e7e3',
@@ -528,11 +548,16 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
         x = range(len(g))
 
         if kirilim:
-            ax.fill_between(x, g['kapasite_in'], color=RENK['inhouse'],
+            ust_in = g['kapasite_in']
+            ust_out = ust_in + g['kapasite_out']
+            ax.fill_between(x, ust_in, color=RENK['inhouse'],
                             alpha=0.25, zorder=1, label='Kapasite — inhouse')
-            ax.fill_between(x, g['kapasite_in'], g['kapasite_toplam'],
-                            color=RENK['outsource'], alpha=0.35, zorder=1,
-                            label='Kapasite — outsource')
+            ax.fill_between(x, ust_in, ust_out, color=RENK['outsource'],
+                            alpha=0.35, zorder=1, label='Kapasite — outsource')
+            if g['kapasite_pt'].sum() > 0:
+                ax.fill_between(x, ust_out, g['kapasite_toplam'],
+                                color=RENK['kismi'], alpha=0.45, zorder=1,
+                                label='Kapasite — kısmi')
             ax.plot(x, g['kapasite_toplam'], color=RENK['kapasite'], lw=2, zorder=3)
         else:
             ax.fill_between(x, g['kapasite_toplam'], color=RENK['dolgu'],
@@ -744,15 +769,17 @@ def yogunluk_tablosu(df, min_kapasite=5):
 # MODEL TARAFI — monthly run pickle'ı
 # ---------------------------------------------------------------------------
 
-def model_vardiya_tablosu(results, year, month, queue='kitle', pt_inhouse=True,
-                          verbose=True):
+def model_vardiya_tablosu(results, year, month, queue='kitle', verbose=True):
     """Monthly run pickle'ından df_vardiya ile AYNI şemada tablo üretir.
 
     Kaynak: results[tarih][queue]['mip_info']
-      kapasite  ← mip_in_by_slot / mip_out_by_slot  (slot bazında hazır)
+      kapasite  ← mip_in_by_slot / mip_out_by_slot / mip_pt_by_slot
       başlangıç ← assignments + shift_coverage['start'|'company']
 
-    pt_inhouse=True → part_time vardiyalar inhouse sayılır.
+    ÖNEMLİ: mip_in_by_slot part_time'ı İÇERMEZ (weekend modelinde in_shifts
+    yalnız company==inhouse). Kısmiler ayrı 'mip_pt_by_slot' sözlüğünde ve
+    burada kapasite_pt kolonuna yazılır. Hafta içi pipeline'da bu anahtar
+    yoktur → kapasite_pt 0 kalır.
 
     NOT: outsource +30 dk kuralı burada UYGULANMAZ — modelin kendi vardiya
     tanımları pickle'da zaten yerleşik.
@@ -766,11 +793,11 @@ def model_vardiya_tablosu(results, year, month, queue='kitle', pt_inhouse=True,
         if 'outsource' in ad:
             return 'outsource'
         if 'part' in ad:
-            return 'inhouse' if pt_inhouse else 'outsource'
+            return 'part_time'
         return 'inhouse'
 
     kap, bas, aylar = [], [], set()
-    infeasible = []
+    infeasible, kacaklar = [], []
     for date_str, day in (results or {}).items():
         d = pd.to_datetime(date_str).normalize()
         aylar.add((d.year, d.month))
@@ -784,12 +811,20 @@ def model_vardiya_tablosu(results, year, month, queue='kitle', pt_inhouse=True,
 
         inn = mi.get('mip_in_by_slot', {}) or {}
         out = mi.get('mip_out_by_slot', {}) or {}
+        pt = mi.get('mip_pt_by_slot', {}) or {}
+        tot = mi.get('mip_by_slot', {}) or {}
         if not inn and not out:
-            inn = mi.get('mip_by_slot', {}) or {}
-        for slot in set(inn) | set(out):
+            inn = dict(tot)
+        for slot in set(inn) | set(out) | set(pt):
             kap.append({'data_date': d, 'interval': _to_slot_30(slot),
                         'kapasite_in': inn.get(slot, 0),
-                        'kapasite_out': out.get(slot, 0)})
+                        'kapasite_out': out.get(slot, 0),
+                        'kapasite_pt': pt.get(slot, 0)})
+        if tot:                                   # in+out+pt = toplam mı?
+            kacak = sum(tot.get(sl, 0) - inn.get(sl, 0) - out.get(sl, 0) - pt.get(sl, 0)
+                        for sl in tot)
+            if kacak:
+                kacaklar.append((d, kacak))
 
         sc = mi.get('shift_coverage', {}) or {}
         for sh, adet in (mi.get('assignments', {}) or {}).items():
@@ -819,28 +854,37 @@ def model_vardiya_tablosu(results, year, month, queue='kitle', pt_inhouse=True,
     if bas:
         b = pd.DataFrame(bas).groupby(['data_date', 'interval', 'sirket'],
                                       as_index=False)['kisi'].sum()
-        for sirket, sonek in (('inhouse', 'in'), ('outsource', 'out')):
+        for sirket, sonek in SIRKETLER:
             alt = b[b['sirket'] == sirket][['data_date', 'interval', 'kisi']]
             out_df = out_df.merge(alt.rename(columns={'kisi': f"baslangic_{sonek}"}),
                                   on=['data_date', 'interval'], how='left')
     else:
-        out_df['baslangic_in'] = 0
-        out_df['baslangic_out'] = 0
+        for _, sonek in SIRKETLER:
+            out_df[f"baslangic_{sonek}"] = 0
         if verbose:
             print("  ⚠ pickle'da 'assignments' yok — vardiya başlangıcı 0 kalacak.")
 
-    deger = [f"{o}_{s}" for o in ('kapasite', 'baslangic') for s in ('in', 'out')]
+    deger = [f"{o}_{s}" for o in ('kapasite', 'baslangic') for _, s in SIRKETLER]
+    for kol in deger:
+        if kol not in out_df:
+            out_df[kol] = 0
     out_df[deger] = out_df[deger].fillna(0).round().astype(int)
-    out_df['kapasite_toplam'] = out_df['kapasite_in'] + out_df['kapasite_out']
-    out_df['baslangic_toplam'] = out_df['baslangic_in'] + out_df['baslangic_out']
+    out_df['kapasite_toplam'] = out_df[[f"kapasite_{s}" for _, s in SIRKETLER]].sum(axis=1)
+    out_df['baslangic_toplam'] = out_df[[f"baslangic_{s}" for _, s in SIRKETLER]].sum(axis=1)
     out_df = out_df.sort_values(['data_date', 'interval']).reset_index(drop=True)
 
     if verbose:
         dolu = (out_df.groupby('data_date')['kapasite_toplam'].sum() > 0).sum()
+        pt_gun = (out_df.groupby('data_date')['kapasite_pt'].sum() > 0).sum()
         print(f"MODEL ({queue}) — {dolu}/{len(gunler)} gün planlı  |  "
               f"tepe kapasite: inhouse {int(out_df['kapasite_in'].max())} "
-              f"outsource {int(out_df['kapasite_out'].max())}  |  "
+              f"outsource {int(out_df['kapasite_out'].max())} "
+              f"kısmi {int(out_df['kapasite_pt'].max())} ({pt_gun} günde)  |  "
               f"tepe başlangıç: {int(out_df['baslangic_toplam'].max())} kişi")
+        if kacaklar:
+            print(f"  ⚠ {len(kacaklar)} günde in+out+pt ≠ mip_by_slot "
+                  f"(ilk: {kacaklar[0][0]:%d.%m}, fark {kacaklar[0][1]}) — "
+                  f"bilinmeyen bir company türü olabilir.")
         if infeasible:
             print(f"  ⚠ planı olmayan/INFEASIBLE {len(infeasible)} gün: "
                   f"{', '.join(d.strftime('%d.%m') for d in infeasible[:8])}")
@@ -1207,3 +1251,4 @@ if 'df_model' in globals() and 'df_genel' in globals():
     show(fark_tablosu(df_genel, df_model))
 else:
     print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
+
