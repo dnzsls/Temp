@@ -1960,3 +1960,4 @@ if all(k in globals() for k in ('df_vardiya_tum', 'results', 'df_actual')):
     show(h.reindex(GUN_TR).reset_index())
 else:
     print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
+
