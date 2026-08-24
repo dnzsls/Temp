@@ -585,28 +585,73 @@ def _kutu(ax, metin, konum=(0.98, 0.95), renk='#fff7d6'):
                       edgecolor='#d9d2a8', linewidth=0.8))
 
 
+def _cagri_paneli(ax, g, etiket='Gerçekleşen çağrı', adim=None):
+    """Üstteki ince çağrı paneli — alttaki grafikle AYNI x ekseni."""
+    x = range(len(g))
+    ax.fill_between(x, g['cagri'], color=RENK['cagri'], alpha=0.18, zorder=1)
+    ax.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, zorder=3, label=etiket)
+    ax.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
+    ax.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+    ax.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
+    ax.set_axisbelow(True)
+    for k in ('top', 'right'):
+        ax.spines[k].set_visible(False)
+    for k in ('left', 'bottom'):
+        ax.spines[k].set_color(RENK['izgara'])
+    ax.set_facecolor(RENK['yuzey'])
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(-0.5, len(g) - 0.5)
+    if adim:
+        from matplotlib.ticker import MultipleLocator
+        ax.yaxis.set_major_locator(MultipleLocator(adim))
+    i_tepe = int(g['cagri'].idxmax())
+    ax.annotate(f"tepe {g['cagri'].iloc[i_tepe]:,.0f} @ {g['interval'].iloc[i_tepe]}",
+                xy=(i_tepe, g['cagri'].iloc[i_tepe]), xytext=(0, 4),
+                textcoords='offset points', ha='center', fontsize=7.5,
+                color=RENK['cagri'])
+    return ax
+
+
 def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
-                 cagri_adim=None, kaydet=None):
+                 cagri_adim=None, cagri_ust=True, kaydet=None):
     """Hafta içi / hafta sonu: slot kapasitesi + vardiya başlangıcı + çağrı.
 
     kirilim=True  → kapasite inhouse/outsource ayrı çizilir
     olcu          → 'ortalama' (varsayılan) veya 'medyan'
-    y_adim        → sol (kişi) ekseninde tick aralığı; None = otomatik
-    cagri_adim    → sağ (çağrı) ekseninde tick aralığı; None = otomatik
-    Çağrı SAĞ eksende (kesikli mor).
+    y_adim        → kişi ekseninde tick aralığı; None = otomatik
+    cagri_adim    → çağrı ekseninde tick aralığı; None = otomatik
+    cagri_ust=True → çağrı ÜSTTE ayrı panelde, x ekseni ortak (çift eksen yok)
+    cagri_ust=False → eski hal: çağrı sağ eksende kesikli
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5.5))
+    if cagri_ust:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 7.5), sharex='col',
+                                 gridspec_kw={'height_ratios': [1, 2.8]})
+        ust, alt = axes[0], axes[1]
+    else:
+        fig, alt = plt.subplots(1, 2, figsize=(16, 5.5))
+        ust = [None, None]
     fig.patch.set_facecolor(RENK['yuzey'])
 
     for j, (hs, ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
-        ax = axes[j]
+        ax = alt[j]
         g = slot_ozet(df, hafta_sonu=hs, olcu=olcu)
         if g.empty:
             ax.set_visible(False)
+            if ust[j] is not None:
+                ust[j].set_visible(False)
             continue
         x = range(len(g))
+
+        if cagri_ust:
+            _cagri_paneli(ust[j], g, adim=cagri_adim)
+            ust[j].set_title(f"{queue} — {ad} ({olcu})", fontsize=11,
+                             fontweight='bold', color=RENK['metin'],
+                             loc='left', pad=8)
+            if j == 0:
+                ust[j].legend(loc='upper left', frameon=False, fontsize=8,
+                              labelcolor=RENK['metin2'])
 
         if kirilim:
             ust_in = g['kapasite_in']
@@ -630,25 +675,27 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
                 marker='o', ms=3.5, zorder=4, label='Vardiya başlangıcı (kaç kişi başlıyor)')
 
         ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
-        ax.set_title(f"{queue} — {ad} ({olcu})\n"
-                     f"Slot kapasitesi vs vardiya başlangıcı",
-                     fontsize=11, fontweight='bold', color=RENK['metin'],
-                     loc='left', pad=10)
+        if not cagri_ust:
+            ax.set_title(f"{queue} — {ad} ({olcu})\n"
+                         f"Slot kapasitesi vs vardiya başlangıcı",
+                         fontsize=11, fontweight='bold', color=RENK['metin'],
+                         loc='left', pad=10)
         _eksen(ax, g, y_adim=y_adim)
 
-        ax2 = ax.twinx()                                  # çağrı: SAĞ eksen
-        ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--', zorder=5,
-                 label='Çağrı adedi')
-        ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
-        ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
-        for k in ('top', 'left'):
-            ax2.spines[k].set_visible(False)
-        ax2.spines['right'].set_color(RENK['cagri'])
-        ax2.grid(False)
-        ax2.set_ylim(bottom=0)
-        if cagri_adim:
-            from matplotlib.ticker import MultipleLocator
-            ax2.yaxis.set_major_locator(MultipleLocator(cagri_adim))
+        if not cagri_ust:                                 # eski hal: sağ eksen
+            ax2 = ax.twinx()
+            ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--',
+                     zorder=5, label='Çağrı adedi')
+            ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
+            ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+            for k in ('top', 'left'):
+                ax2.spines[k].set_visible(False)
+            ax2.spines['right'].set_color(RENK['cagri'])
+            ax2.grid(False)
+            ax2.set_ylim(bottom=0)
+            if cagri_adim:
+                from matplotlib.ticker import MultipleLocator
+                ax2.yaxis.set_major_locator(MultipleLocator(cagri_adim))
 
         i_tepe = int(g['kapasite_toplam'].idxmax())
         _kutu(ax, f"Tepe kapasite\n{g['kapasite_toplam'].iloc[i_tepe]:.0f} kişi "
@@ -657,10 +704,14 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
         _kutu(ax, f"{int(g['gun_sayisi'].iloc[0])} gün {etiket}",
               konum=(0.98, 0.72), renk='#eaf1fb')
 
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False,
-                  fontsize=8, labelcolor=RENK['metin2'])
+        if cagri_ust:
+            ax.legend(loc='upper left', frameon=False, fontsize=8,
+                      labelcolor=RENK['metin2'])
+        else:
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False,
+                      fontsize=8, labelcolor=RENK['metin2'])
 
     fig.tight_layout()
     if kaydet:
@@ -669,13 +720,21 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
     return fig
 
 
-def grafik_gun_egrisi(df, queue='KİTLE', kaydet=None):
-    """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir."""
+def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
+    """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir.
+
+    cagri_ust=True → çağrı ÜSTTE ayrı panelde, x ekseni ortak (çift eksen yok).
+    """
     import matplotlib.pyplot as plt
 
     g = gun_ozet(df)
     x = range(len(g))
-    fig, ax = plt.subplots(figsize=(14, 5))
+    if cagri_ust:
+        fig, (ax_u, ax) = plt.subplots(2, 1, figsize=(14, 7), sharex=True,
+                                       gridspec_kw={'height_ratios': [1, 2.4]})
+    else:
+        fig, ax = plt.subplots(figsize=(14, 5))
+        ax_u = None
     fig.patch.set_facecolor(RENK['yuzey'])
     ax.set_facecolor(RENK['yuzey'])
 
@@ -686,15 +745,32 @@ def grafik_gun_egrisi(df, queue='KİTLE', kaydet=None):
             zorder=3, label='Kapasite (kişi-saat)')
     ax.set_ylabel('kişi-saat', fontsize=9, color=RENK['metin2'])
 
-    ax2 = ax.twinx()
-    ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--', zorder=4,
-             marker='o', ms=3, label='Çağrı adedi')
-    ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
-    ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
-    for k in ('top', 'left'):
-        ax2.spines[k].set_visible(False)
-    ax2.spines['right'].set_color(RENK['cagri'])
-    ax2.grid(False)
+    if cagri_ust:
+        ax_u.set_facecolor(RENK['yuzey'])
+        ax_u.fill_between(x, g['cagri'], color=RENK['cagri'], alpha=0.18, zorder=1)
+        ax_u.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, marker='o', ms=3,
+                  zorder=3, label='Çağrı adedi')
+        ax_u.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
+        ax_u.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+        ax_u.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
+        ax_u.set_axisbelow(True)
+        for k in ('top', 'right'):
+            ax_u.spines[k].set_visible(False)
+        ax_u.set_ylim(bottom=0)
+        ax_u.set_title(f"{queue} — gün gün çağrı ve kapasite", fontsize=11,
+                       fontweight='bold', color=RENK['metin'], loc='left', pad=10)
+        ax_u.legend(loc='upper left', frameon=False, fontsize=8,
+                    labelcolor=RENK['metin2'])
+    else:
+        ax2 = ax.twinx()
+        ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--', zorder=4,
+                 marker='o', ms=3, label='Çağrı adedi')
+        ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
+        ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+        for k in ('top', 'left'):
+            ax2.spines[k].set_visible(False)
+        ax2.spines['right'].set_color(RENK['cagri'])
+        ax2.grid(False)
 
     ax.set_xticks(list(x))
     ax.set_xticklabels([f"{d.day}\n{gg}" for d, gg in zip(g['data_date'], g['gun'])],
@@ -703,12 +779,16 @@ def grafik_gun_egrisi(df, queue='KİTLE', kaydet=None):
     ax.set_axisbelow(True)
     for k in ('top', 'right'):
         ax.spines[k].set_visible(False)
-    ax.set_title(f"{queue} — gün gün kapasite ve çağrı", fontsize=11,
-                 fontweight='bold', color=RENK['metin'], loc='left', pad=10)
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False, fontsize=8,
-              labelcolor=RENK['metin2'], ncol=3)
+    if cagri_ust:
+        ax.legend(loc='upper left', frameon=False, fontsize=8,
+                  labelcolor=RENK['metin2'], ncol=2)
+    else:
+        ax.set_title(f"{queue} — gün gün kapasite ve çağrı", fontsize=11,
+                     fontweight='bold', color=RENK['metin'], loc='left', pad=10)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False, fontsize=8,
+                  labelcolor=RENK['metin2'], ncol=3)
 
     fig.tight_layout()
     if kaydet:
@@ -1033,13 +1113,15 @@ def grafik_fark_haritasi(df_plan, df_model, queue='KİTLE', olcu='kisi',
 
 
 def grafik_plan_model(df_plan, df_model, queue='KİTLE', olcu='ortalama',
-                      y_adim=25, cagri_adim=None, kaydet=None):
+                      y_adim=25, cagri_adim=None, cagri_ust=True, kaydet=None):
     """ALT ALTA: PLAN vs gerçekleşen (üst) · MODEL vs gerçekleşen (alt).
 
-    Sol sütun hafta içi, sağ sütun hafta sonu. Dört panelin y eksenleri
-    ORTAK — üst ve alt satır doğrudan karşılaştırılabilir.
+    Sol sütun hafta içi, sağ sütun hafta sonu. PLAN ve MODEL panellerinin
+    y eksenleri ORTAK — doğrudan karşılaştırılabilir.
 
-    Çağrı her iki satırda da GERÇEKLEŞEN çağrıdır (df_actual'dan gelir).
+    cagri_ust=True  → gerçekleşen çağrı EN ÜSTTE ayrı panelde, x ekseni ortak
+                      (çift eksen yok; plan ve model aynı çağrıya bakıyor)
+    cagri_ust=False → eski hal: her panelde sağ eksende kesikli çağrı
     """
     import matplotlib.pyplot as plt
 
@@ -1056,12 +1138,27 @@ def grafik_plan_model(df_plan, df_model, queue='KİTLE', olcu='ortalama',
                    for g in dolu) * 1.12
     cagri_max = max(g['cagri'].max() for g in dolu) * 1.12
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
+    if cagri_ust:
+        fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex='col',
+                                 gridspec_kw={'height_ratios': [0.9, 2.4, 2.4]})
+        for j, hs in enumerate((0, 1)):
+            g = veri[('PLAN', hs)]
+            if g.empty:
+                axes[0][j].set_visible(False)
+                continue
+            _cagri_paneli(axes[0][j], g, adim=cagri_adim)
+            axes[0][j].set_title(
+                f"GERÇEKLEŞEN ÇAĞRI — {'HAFTA İÇİ' if hs == 0 else 'HAFTA SONU'}",
+                fontsize=11, fontweight='bold', color=RENK['metin'],
+                loc='left', pad=8)
+        panel = axes[1:]
+    else:
+        fig, panel = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
     fig.patch.set_facecolor(RENK['yuzey'])
 
     for i, (ad, _) in enumerate(kaynaklar):
         for j, (hs, gun_ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
-            ax = axes[i][j]
+            ax = panel[i][j]
             g = veri[(ad, hs)]
             if g.empty:
                 ax.set_visible(False)
@@ -1082,19 +1179,20 @@ def grafik_plan_model(df_plan, df_model, queue='KİTLE', olcu='ortalama',
             _eksen(ax, g, y_adim=y_adim)
             ax.set_ylim(0, kisi_max)
 
-            ax2 = ax.twinx()
-            ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--',
-                     zorder=5, label='Gerçekleşen çağrı')
-            ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
-            ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
-            for k in ('top', 'left'):
-                ax2.spines[k].set_visible(False)
-            ax2.spines['right'].set_color(RENK['cagri'])
-            ax2.grid(False)
-            ax2.set_ylim(0, cagri_max)
-            if cagri_adim:
-                from matplotlib.ticker import MultipleLocator
-                ax2.yaxis.set_major_locator(MultipleLocator(cagri_adim))
+            if not cagri_ust:
+                ax2 = ax.twinx()
+                ax2.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, ls='--',
+                         zorder=5, label='Gerçekleşen çağrı')
+                ax2.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
+                ax2.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+                for k in ('top', 'left'):
+                    ax2.spines[k].set_visible(False)
+                ax2.spines['right'].set_color(RENK['cagri'])
+                ax2.grid(False)
+                ax2.set_ylim(0, cagri_max)
+                if cagri_adim:
+                    from matplotlib.ticker import MultipleLocator
+                    ax2.yaxis.set_major_locator(MultipleLocator(cagri_adim))
 
             i_tepe = int(g['kapasite_toplam'].idxmax())
             _kutu(ax, f"Tepe {g['kapasite_toplam'].iloc[i_tepe]:.0f} kişi "
@@ -1102,10 +1200,14 @@ def grafik_plan_model(df_plan, df_model, queue='KİTLE', olcu='ortalama',
                       f"{int(g['gun_sayisi'].iloc[0])} gün {olcu}")
 
             if i == 0 and j == 0:
-                h1, l1 = ax.get_legend_handles_labels()
-                h2, l2 = ax2.get_legend_handles_labels()
-                ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False,
-                          fontsize=8, labelcolor=RENK['metin2'])
+                if cagri_ust:
+                    ax.legend(loc='upper left', frameon=False, fontsize=8,
+                              labelcolor=RENK['metin2'])
+                else:
+                    h1, l1 = ax.get_legend_handles_labels()
+                    h2, l2 = ax2.get_legend_handles_labels()
+                    ax.legend(h1 + h2, l1 + l2, loc='upper left', frameon=False,
+                              fontsize=8, labelcolor=RENK['metin2'])
 
     fig.suptitle(f"{queue} — plan ve model, gerçekleşen çağrıya karşı",
                  fontsize=13, fontweight='bold', color=RENK['metin'],
