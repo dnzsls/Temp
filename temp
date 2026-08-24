@@ -1,25 +1,36 @@
-# PLAN — günlük kişi sayısı (slot değil, kişi)
-p = df_vardiya.copy()
-p['d'] = _to_date_series(p['DATA_DATE'])
-p = p[(p.d.dt.year==YEAR) & (p.d.dt.month==MONTH)]
-p['hi'] = p.d.dt.weekday < 5
-print("PLAN günlük kişi:")
-print(p.groupby(['hi'])['KISI_SAYISI'].sum() / p.groupby('hi')['d'].nunique())
+# --- PLAN — günlük kişi sayısı (slot değil, kişi) ---
+r = {k: _resolve_col(df_vardiya, v) for k, v in VARDIYA_KOL.items()}
+print("çözülen kolonlar:", r)          # hangi kolonu bulduğunu göster
 
-# MODEL — günlük kişi sayısı
-import numpy as np
+p = df_vardiya.copy()
+p['d']    = _to_date_series(p[r['date']]).dt.normalize()
+p['kisi'] = pd.to_numeric(p[r['kisi']], errors='coerce').fillna(0)
+p['sirket'] = _company(p[r['group']])
+p['hi']   = p['d'].dt.weekday < 5
+p = p[(p.d.dt.year == YEAR) & (p.d.dt.month == MONTH)]
+
+gunluk = (p.groupby(['hi', 'sirket'])['kisi'].sum()
+          / p.groupby('hi')['d'].nunique()).round(1)
+print("\nPLAN — gün başına ortalama kişi:")
+show(gunluk.reset_index().rename(columns={0: 'kisi_gun', 'hi': 'hafta_ici'}))
+print("PLAN toplam:", (p.groupby('hi')['kisi'].sum()
+                       / p.groupby('hi')['d'].nunique()).round(1).to_dict())
+
+# --- MODEL — günlük kişi sayısı ---
 sat = []
 for ds, day in results.items():
     d = pd.to_datetime(ds)
-    if d.year != MODEL_YEAR or d.month != MODEL_MONTH: continue
-    r = (day or {}).get(QUEUE)
-    if not r: continue
-    mi = r['mip_info']
-    sat.append({'d': d, 'hi': d.weekday() < 5,
-                'in': mi.get('total_inhouse_kisi', 0),
+    if d.year != MODEL_YEAR or d.month != MODEL_MONTH:
+        continue
+    q = (day or {}).get(QUEUE)
+    if not q:
+        continue
+    mi = q.get('mip_info', {})
+    sat.append({'d': d, 'hafta_ici': d.weekday() < 5,
+                'in':  mi.get('total_inhouse_kisi', 0),
                 'out': mi.get('total_outsource_kisi', 0),
-                'pt': mi.get('total_part_time_kisi', 0),
+                'pt':  mi.get('total_part_time_kisi', 0),
                 'toplam': mi.get('total_kisi', 0)})
 m = pd.DataFrame(sat)
-print("\nMODEL günlük kişi:")
-show(m.groupby('hi')[['in','out','pt','toplam']].mean().round(1).reset_index())
+print("\nMODEL — gün başına ortalama kişi:")
+show(m.groupby('hafta_ici')[['in', 'out', 'pt', 'toplam']].mean().round(1).reset_index())
