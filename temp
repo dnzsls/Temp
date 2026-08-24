@@ -24,6 +24,7 @@
 # %% [HÜCRE 1] — FONKSİYONLAR
 
 import datetime as _dt
+import math
 import os
 import pickle
 import re
@@ -544,11 +545,12 @@ RENK = {
     'kapasite':  '#2a78d6',     # mavi
     'baslangic': '#eb6834',     # turuncu
     'inhouse':   '#2a78d6',
-    'outsource': '#eda100',     # sarı
+    'outsource': '#f7d774',     # yumuşak sarı
     'kismi':     '#1baf7a',     # yeşil
     'cagri':     '#4a3aa7',     # mor
     'eksik':     '#d1495b',     # kırmızı — kapasite ihtiyacın altında
-    'fazla':     '#7fb3e8',     # açık mavi — kapasite ihtiyacın üstünde
+    'karsilanan':'#cfe9d4',     # açık yeşil — karşılanan ihtiyaç (taban)
+    'fazla':     '#5aa2e0',     # mavi — kapasite ihtiyacın üstünde
     'dolgu':     '#cfe0f5',
     'izgara':    '#e8e7e3',
     'metin':     '#0b0b0b',
@@ -610,12 +612,12 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
             ust_in = g['kapasite_in']
             ust_out = ust_in + g['kapasite_out']
             ax.fill_between(x, ust_in, color=RENK['inhouse'],
-                            alpha=0.25, zorder=1, label='Kapasite — inhouse')
+                            alpha=0.45, zorder=1, label='Kapasite — inhouse')
             ax.fill_between(x, ust_in, ust_out, color=RENK['outsource'],
-                            alpha=0.35, zorder=1, label='Kapasite — outsource')
+                            alpha=0.85, zorder=1, label='Kapasite — outsource')
             if g['kapasite_pt'].sum() > 0:
                 ax.fill_between(x, ust_out, g['kapasite_toplam'],
-                                color=RENK['kismi'], alpha=0.45, zorder=1,
+                                color=RENK['kismi'], alpha=0.60, zorder=1,
                                 label='Kapasite — kısmi')
             ax.plot(x, g['kapasite_toplam'], color=RENK['kapasite'], lw=2, zorder=3)
         else:
@@ -1286,6 +1288,168 @@ def gunluk_kadro(df_vardiya, results, df_actual, year, month, queue='kitle',
     return out
 
 
+# ---------------------------------------------------------------------------
+# ERLANG-C İHTİYACI (monthly run ile aynı ayarlar)
+# ---------------------------------------------------------------------------
+
+TARGET_ASA = 30              # hedef ortalama cevaplama süresi (sn)
+INTERVAL_MIN = 30            # slot uzunluğu (dk)
+KITLE_SHRINKAGE = {          # CONFIG_WEEKDAY['queue_configs']['kitle']['erlang']
+    0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
+    7: 0.07, 8: 0.07, 9: 0.24, 10: 0.17, 11: 0.17, 12: 0.16,
+    13: 0.19, 14: 0.21, 15: 0.25, 16: 0.26, 17: 0.29, 18: 0.18,
+    19: 0.17, 20: 0.18, 21: 0.14, 22: 0.13, 23: 0.19, 'default': 0.0,
+}
+
+SQ_KOL = {
+    'date':      ['data_date', 'date', 'tarih'],
+    'time':      ['min_time_period_value', 'interval', 'saat_dilimi'],
+    'sub_queue': ['resource_group_key', 'sub_queue', 'alt_kuyruk'],
+    'calls':     ['nof_call', 'calls', 'cagri', 'call_count'],
+    'group':     ['line_based_main_group'],
+}
+
+
+def _erlang_c(agents, traffic):
+    if agents <= traffic or agents == 0:
+        return 1.0
+    eb = traffic / agents
+    for i in range(2, int(agents) + 1):
+        eb = (traffic * eb) / (i + traffic * eb)
+    return min(eb / (1 - (traffic / agents) * (1 - eb)), 1.0)
+
+
+def _asa(agents, traffic, aht):
+    if agents <= traffic or agents == 0:
+        return 999
+    return (_erlang_c(agents, traffic) * (aht / 60)) / (agents - traffic) * 60
+
+
+def gerekli_kisi(calls, aht, slot, shrinkage=None, target_asa=TARGET_ASA):
+    """Bir slot için Erlang-C ihtiyacı (shrinkage uygulanmış)."""
+    if calls <= 0 or aht <= 0:
+        return 0
+    traffic = (calls * (aht / 60)) / INTERVAL_MIN
+    if traffic == 0:
+        return 0
+    ham = math.ceil(traffic * 3) + 10
+    for a in range(math.ceil(traffic), ham + 1):
+        if _asa(a, traffic, aht) <= target_asa:
+            ham = a
+            break
+    shr_cfg = shrinkage if shrinkage is not None else KITLE_SHRINKAGE
+    shr = shr_cfg.get(int(slot[:2]), shr_cfg.get('default', 0.0))
+    return math.ceil(ham / (1 - shr))
+
+
+def aht_slot_bazli(df_actual_sq, df_aht, queue='kitle', sq_cols=None, verbose=True):
+    """Her (gün × slot) için alt-kuyruk çağrı payına göre AĞIRLIKLI AHT.
+
+    Modelin calculate_weighted_aht'i ile aynı:
+        aht_slot = Σ(çağrı_sq × aht_sq) / Σ(çağrı_sq)
+
+    df_actual_sq : uzun format actual — data_date, min_time_period_value,
+                   resource_group_key, line_based_main_group, nof_call
+    df_aht       : saat, sub_queue, line_based_main_group, weighted_avg_aht
+
+    Çıktı: data_date, interval, aht
+    """
+    cols = {**SQ_KOL, **(sq_cols or {})}
+    d_col = _resolve_col(df_actual_sq, cols['date'])
+    t_col = _resolve_col(df_actual_sq, cols['time'])
+    q_col = _resolve_col(df_actual_sq, cols['sub_queue'])
+    c_col = _resolve_col(df_actual_sq, cols['calls'])
+    eksik = [k for k, v in (('date', d_col), ('time', t_col),
+                            ('sub_queue', q_col), ('calls', c_col)) if v is None]
+    if eksik:
+        raise KeyError(f"ALT-KUYRUK: kolon yok: {eksik}  |  "
+                       f"mevcut: {list(df_actual_sq.columns)}")
+
+    kaynak = df_actual_sq
+    g_col = _resolve_col(kaynak, cols['group'])
+    if g_col is not None:
+        kaynak = kaynak[kaynak[g_col].astype(str).str.strip().str.lower()
+                        == f"{queue}_cagrilar"]
+        if kaynak.empty:
+            raise ValueError(f"ALT-KUYRUK: '{queue}_cagrilar' satırı yok.")
+
+    d = pd.DataFrame({
+        'data_date': _to_date_series(kaynak[d_col]).dt.normalize(),
+        'interval': kaynak[t_col].map(_to_slot_30),
+        'sub_queue': kaynak[q_col].astype(str).str.strip(),
+        'calls': pd.to_numeric(kaynak[c_col], errors='coerce').fillna(0),
+    })
+    d['saat'] = d['interval'].str[:2].astype(int)
+    d = d.groupby(['data_date', 'interval', 'saat', 'sub_queue'],
+                  as_index=False)['calls'].sum()
+
+    a = df_aht[df_aht['line_based_main_group'] == f"{queue}_cagrilar"].copy()
+    if a.empty:
+        raise ValueError(f"df_aht'de '{queue}_cagrilar' yok.")
+    a['saat'] = a['saat'].astype(int)
+    a['sub_queue'] = a['sub_queue'].astype(str).str.strip()
+    a['aht'] = pd.to_numeric(a['weighted_avg_aht'], errors='coerce')
+
+    m = d.merge(a[['saat', 'sub_queue', 'aht']], on=['saat', 'sub_queue'], how='left')
+    eslesmeyen = sorted(m[m['aht'].isna()]['sub_queue'].unique())
+    if eslesmeyen:
+        print(f"  ⚠ df_aht'de karşılığı olmayan alt-kuyruk (atlandı): {eslesmeyen[:8]}")
+    m = m.dropna(subset=['aht'])
+    m = m[m['calls'] > 0]
+
+    out = (m.assign(x=m['calls'] * m['aht'])
+             .groupby(['data_date', 'interval'], as_index=False)
+             .agg(x=('x', 'sum'), c=('calls', 'sum')))
+    out['aht'] = (out['x'] / out['c']).round(1)
+    out = out[['data_date', 'interval', 'aht']]
+    if verbose:
+        print(f"AHT (slot bazlı, çağrı ağırlıklı): {out['aht'].min():.0f}–"
+              f"{out['aht'].max():.0f} sn  |  ortalama {out['aht'].mean():.0f} sn  |  "
+              f"{len(out):,} slot")
+    return out
+
+
+def erlang_ekle(df, aht, shrinkage=None, verbose=True):
+    """genel_bakis tablosuna 'aht' ve 'gereken_erlang' kolonlarını ekler.
+
+    aht:
+      sayı            → tüm slotlarda sabit AHT (sn)
+      {saat: aht}     → saate göre
+      DataFrame       → aht_slot_bazli() çıktısı (data_date, interval, aht)
+
+    Erlang GÜN×SLOT bazında hesaplanır, ortalama sonra alınır — doğru sıra
+    budur (ortalama çağrının Erlang'ı ≠ Erlang'ların ortalaması).
+    """
+    d = df.copy()
+    if isinstance(aht, pd.DataFrame):
+        d = d.merge(aht[['data_date', 'interval', 'aht']],
+                    on=['data_date', 'interval'], how='left')
+        bos = int(d['aht'].isna().sum())
+        if bos and verbose:
+            print(f"  ⚠ {bos:,} slotta AHT yok → o slotlar için Erlang 0 sayıldı.")
+        d['aht'] = d['aht'].fillna(0)
+    elif isinstance(aht, dict):
+        d['aht'] = d['interval'].str[:2].astype(int).map(
+            lambda h: aht.get(h, aht.get('default', 0)))
+    else:
+        d['aht'] = float(aht)
+
+    onbellek = {}
+    def _hesap(c, a, sl):
+        k = (int(c), round(float(a)), sl)
+        if k not in onbellek:
+            onbellek[k] = gerekli_kisi(int(c), float(a), sl, shrinkage)
+        return onbellek[k]
+
+    d['gereken_erlang'] = [_hesap(c, a, sl) for c, a, sl
+                           in zip(d['cagri'], d['aht'], d['interval'])]
+    if verbose:
+        hi = d['hafta_sonu'] == 0
+        print(f"ERLANG — hafta içi tepe {int(d.loc[hi, 'gereken_erlang'].max())} kişi  |  "
+              f"toplam {int(d['gereken_erlang'].sum()/2):,} kişi-saat ihtiyaç")
+    return d
+
+
 def ihtiyac_profili(df, hafta_sonu=0, cagri_adedi=CAGRI_ADEDI, olcu='ortalama'):
     """Slot profiline 'gereken_kisi' kolonu ekler.
 
@@ -1298,7 +1462,17 @@ def ihtiyac_profili(df, hafta_sonu=0, cagri_adedi=CAGRI_ADEDI, olcu='ortalama'):
     if g.empty:
         return g
     g['gereken_kisi'] = (g['cagri'] / (cagri_adedi / 2)).round(1)
+
+    ek = [k for k in ('gereken_erlang', 'aht') if k in df.columns]
+    if ek:
+        d = df if hafta_sonu is None else df[df['hafta_sonu'] == hafta_sonu]
+        gb = d.groupby('interval', as_index=False)[ek]
+        a = (gb.mean() if olcu == 'ortalama' else gb.median()).round(1)
+        g = g.merge(a, on='interval', how='left')
+
     g['fark_kisi'] = (g['kapasite_toplam'] - g['gereken_kisi']).round(1)
+    if 'gereken_erlang' in g:
+        g['fark_erlang'] = (g['kapasite_toplam'] - g['gereken_erlang']).round(1)
     return g
 
 
@@ -1310,7 +1484,9 @@ def ihtiyac_ozeti(df, cagri_adedi=CAGRI_ADEDI):
         g = ihtiyac_profili(df, hafta_sonu=hs, cagri_adedi=cagri_adedi)
         if g.empty:
             continue
-        g = g[['interval', 'kapasite_toplam', 'cagri', 'gereken_kisi', 'fark_kisi']]
+        kol = ['interval', 'kapasite_toplam', 'cagri', 'gereken_kisi', 'fark_kisi']
+        kol += [k for k in ('aht', 'gereken_erlang', 'fark_erlang') if k in g]
+        g = g[kol]
         g.insert(0, 'gun_tipi', ad)
         parca.append(g)
     if not parca:
@@ -1318,20 +1494,29 @@ def ihtiyac_ozeti(df, cagri_adedi=CAGRI_ADEDI):
     out = pd.concat(parca, ignore_index=True)
     out['karsilama'] = (out['kapasite_toplam']
                         / out['gereken_kisi'].replace(0, np.nan)).round(2)
+    if 'gereken_erlang' in out:
+        out['karsilama_erlang'] = (out['kapasite_toplam']
+                                   / out['gereken_erlang'].replace(0, np.nan)).round(2)
     return out
 
 
 def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
-                   olcu='ortalama', kirilim=True, y_adim=50, kaydet=None):
-    """TEK EKSEN: kapasite (inhouse/outsource/kısmi yığılı) vs gereken kişi.
+                   olcu='ortalama', yontem='kapasite', kirilim=False,
+                   y_adim=50, kaydet=None):
+    """TEK EKSEN: kapasite vs gereken kişi. Sağ eksen YOK.
 
     Üst satır PLAN, alt satır MODEL. Sol sütun hafta içi, sağ sütun hafta sonu.
-    Çağrı 'gereken kişi'ye çevrilir (çağrı ÷ (cagri_adedi/2)) — sağ eksen YOK,
-    iki çizgi aynı birimde, kesişmeleri gerçek anlam taşır.
+    Çağrı 'gereken kişi'ye çevrilir (çağrı ÷ (cagri_adedi/2)) — iki çizgi aynı
+    birimde olur, kesişmeleri gerçek anlam taşır:
+      MAVİ alan    → kapasite ihtiyacın ÜSTÜNDE (fazla)
+      KIRMIZI alan → kapasite ihtiyacın ALTINDA (eksik)
 
-    kirilim=True  → kapasite mavi/sarı/yeşil olarak yığılı çizilir
-    kirilim=False → tek renk dolgu
-    KIRMIZI TARALI alan = kapasite ihtiyacın ALTINDA kalan kısım.
+    yontem:
+      'kapasite' → ihtiyaç = çağrı ÷ (cagri_adedi/2)   [15 çağrı/saat kuralı]
+      'erlang'   → ihtiyaç = Erlang-C (erlang_ekle ile hesaplanmış olmalı)
+      'ikisi'    → alanlar Erlang'a göre, 15 kuralı ince gri çizgi olarak da
+                   gösterilir
+    kirilim=True → kapasite ayrıca inhouse/outsource/kısmi olarak yığılır.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1342,8 +1527,15 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
     dolu = [g for g in veri.values() if not g.empty]
     if not dolu:
         raise ValueError("Çizilecek veri yok.")
-    y_max = max(max(g['kapasite_toplam'].max(), g['gereken_kisi'].max())
-                for g in dolu) * 1.10
+    if yontem in ('erlang', 'ikisi') and 'gereken_erlang' not in dolu[0]:
+        raise ValueError("'gereken_erlang' kolonu yok — önce erlang_ekle() çalıştır.")
+    ana_kol = 'gereken_kisi' if yontem == 'kapasite' else 'gereken_erlang'
+    ana_ad = (f'Gereken kişi ({cagri_adedi} çağrı/saat)' if yontem == 'kapasite'
+              else f'Gereken kişi (Erlang-C, ASA≤{TARGET_ASA}sn)')
+    y_max = max(max(g['kapasite_toplam'].max(),
+                    max(g[k].max() for k in ('gereken_kisi', 'gereken_erlang')
+                        if k in g))
+                for g in dolu) * 1.28          # kutulara tepede yer bırak
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True, sharey=True)
     fig.patch.set_facecolor(RENK['yuzey'])
@@ -1356,32 +1548,38 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
                 ax.set_visible(False)
                 continue
             x = np.arange(len(g))
-            kin = g['kapasite_in'].values
-            kout = g['kapasite_out'].values
-            kpt = g['kapasite_pt'].values
             kap = g['kapasite_toplam'].values
-            ger = g['gereken_kisi'].values
+            ger = g[ana_kol].values
 
             if kirilim:
-                ax.fill_between(x, 0, kin, color=RENK['inhouse'], alpha=0.55,
-                                zorder=1, label='Kapasite — inhouse')
+                kin, kout = g['kapasite_in'].values, g['kapasite_out'].values
+                ax.fill_between(x, 0, kin, color=RENK['inhouse'], alpha=0.30,
+                                zorder=1, label='inhouse')
                 ax.fill_between(x, kin, kin + kout, color=RENK['outsource'],
-                                alpha=0.65, zorder=1, label='Kapasite — outsource')
-                if kpt.sum() > 0:
+                                alpha=0.35, zorder=1, label='outsource')
+                if g['kapasite_pt'].sum() > 0:
                     ax.fill_between(x, kin + kout, kap, color=RENK['kismi'],
-                                    alpha=0.70, zorder=1, label='Kapasite — kısmi')
-            else:
-                ax.fill_between(x, 0, kap, color=RENK['dolgu'], zorder=1,
-                                label='Kapasite')
+                                    alpha=0.40, zorder=1, label='kısmi')
+
+            # TABAN — karşılanan ihtiyaç (ihtiyaç çizgisinin altı)
+            ax.fill_between(x, 0, ger, color=RENK['karsilanan'], zorder=1,
+                            label='Karşılanan ihtiyaç')
+            # FAZLA / EKSİK — ihtiyaç ile kapasite arasındaki bant
+            ax.fill_between(x, ger, kap, where=(kap >= ger), interpolate=True,
+                            color=RENK['fazla'], alpha=0.80, zorder=2,
+                            label='FAZLA kapasite')
+            ax.fill_between(x, ger, kap, where=(kap < ger), interpolate=True,
+                            color=RENK['eksik'], alpha=0.80, zorder=3,
+                            label='EKSİK kapasite')
 
             ax.plot(x, kap, color=RENK['kapasite'], lw=2.4, zorder=4,
-                    label='Toplam kapasite')
-            ax.fill_between(x, kap, ger, where=(ger > kap), interpolate=True,
-                            facecolor=RENK['eksik'], alpha=0.55, hatch='///',
-                            edgecolor=RENK['eksik'], linewidth=0.0, zorder=3,
-                            label='EKSİK kapasite')
+                    label='Kapasite (sahadaki kişi)')
             ax.plot(x, ger, color=RENK['metin'], lw=2.0, ls='--', zorder=5,
-                    label=f'Gereken kişi ({cagri_adedi} çağrı/saat)')
+                    label=ana_ad)
+            if yontem == 'ikisi':
+                ax.plot(x, g['gereken_kisi'].values, color=RENK['metin2'],
+                        lw=1.3, ls=':', zorder=5,
+                        label=f'Gereken kişi ({cagri_adedi} çağrı/saat)')
 
             ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
             ax.set_title(f"{ad} — {gun_ad}", fontsize=11, fontweight='bold',
@@ -1396,14 +1594,17 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
             _kutu(ax, f"Karşılama {oran:.0%}\n"
                       f"fazla {fazla:,.0f} · eksik {eksik:,.0f} kişi-saat\n"
                       f"en dar slot {g['interval'].iloc[i_dip]} "
-                      f"({kap[i_dip] - ger[i_dip]:+.0f} kişi)")
+                      f"({kap[i_dip] - ger[i_dip]:+.0f} kişi)",
+                  konum=(0.98, 0.97))
 
             if i == 0 and j == 0:
                 ax.legend(loc='upper left', frameon=False, fontsize=8,
-                          labelcolor=RENK['metin2'], ncol=2)
+                          labelcolor=RENK['metin2'])
 
-    fig.suptitle(f"{queue} — kapasite vs gereken kişi  "
-                 f"(çağrı, {cagri_adedi} çağrı/saat kuralıyla kişiye çevrildi)",
+    yontem_ad = {'kapasite': f'{cagri_adedi} çağrı/saat kuralı',
+                 'erlang': f'Erlang-C · ASA≤{TARGET_ASA}sn · shrinkage dahil',
+                 'ikisi': f'Erlang-C (alan) + {cagri_adedi} çağrı/saat (nokta)'}[yontem]
+    fig.suptitle(f"{queue} — kapasite vs gereken kişi  ({yontem_ad})",
                  fontsize=13, fontweight='bold', color=RENK['metin'],
                  x=0.01, ha='left', y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -1630,7 +1831,7 @@ else:
 
 if 'df_model' in globals() and 'df_genel' in globals():
     grafik_ihtiyac(df_genel, df_model, queue=QUEUE.upper(),
-                   cagri_adedi=CAGRI_ADEDI, kirilim=True, y_adim=50)
+                   cagri_adedi=CAGRI_ADEDI, y_adim=50)
 
     print("PLAN — slot bazında kapasite / gereken kişi")
     show(ihtiyac_ozeti(df_genel))
@@ -1638,6 +1839,37 @@ if 'df_model' in globals() and 'df_genel' in globals():
     show(ihtiyac_ozeti(df_model))
 else:
     print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
+
+
+# %% [HÜCRE 12B] — ERLANG İHTİYACI (AHT'li)
+# Girdi: df_aht  →  saat, sub_queue, line_based_main_group, weighted_avg_aht
+#        df_actual alt-kuyruk kırılımlı olmalı (resource_group_key)
+# AHT yoksa sabit bir sayı da verebilirsin: erlang_ekle(df_genel, 180)
+
+if all(k in globals() for k in ('df_genel', 'df_model', 'df_actual')):
+    if 'df_aht' in globals():
+        aht_slot = aht_slot_bazli(df_actual, df_aht, queue=QUEUE)
+    else:
+        aht_slot = 180          # sn — df_aht yoksa sabit varsayım
+        print("  ℹ df_aht yok — sabit 180 sn AHT kullanılıyor.")
+
+    df_genel_e = erlang_ekle(df_genel, aht_slot)
+    df_model_e = erlang_ekle(df_model, aht_slot)
+
+    # (1) Erlang'a göre — alanlar Erlang ihtiyacına göre
+    grafik_ihtiyac(df_genel_e, df_model_e, queue=QUEUE.upper(),
+                   yontem='erlang', y_adim=50)
+
+    # (2) İki yöntem bir arada — Erlang alan, 15 kuralı noktalı çizgi
+    grafik_ihtiyac(df_genel_e, df_model_e, queue=QUEUE.upper(),
+                   yontem='ikisi', y_adim=50)
+
+    print("PLAN — 15 kuralı vs Erlang")
+    show(ihtiyac_ozeti(df_genel_e))
+    print("\nMODEL — 15 kuralı vs Erlang")
+    show(ihtiyac_ozeti(df_model_e))
+else:
+    print("df_genel / df_model / df_actual eksik — HÜCRE 2 ve HÜCRE 10'u çalıştır.")
 
 
 # %% [HÜCRE 13] — GÜN GÜN KADRO TABLOSU
