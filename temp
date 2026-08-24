@@ -1129,13 +1129,9 @@ def fark_tablosu(df_plan, df_model, min_kapasite=5):
         plan_kisi=('plan_kisi', 'mean'), model_kisi=('model_kisi', 'mean'),
         cagri=('cagri', 'mean'))
     g['fark_kisi'] = (g['model_kisi'] - g['plan_kisi']).round(1)
-    for ad, kol in (('plan', 'plan_kisi'), ('model', 'model_kisi')):
-        ks = g[kol] / 2
-        g[f"{ad}_yogunluk"] = (g['cagri'] / ks.replace(0, np.nan)).round(1)
     g['gun_tipi'] = np.where(g['hafta_sonu'] == 1, 'hafta sonu', 'hafta içi')
     g[['plan_kisi', 'model_kisi', 'cagri']] = g[['plan_kisi', 'model_kisi', 'cagri']].round(1)
-    return g[['gun_tipi', 'interval', 'cagri', 'plan_kisi', 'model_kisi',
-              'fark_kisi', 'plan_yogunluk', 'model_yogunluk']]
+    return g[['gun_tipi', 'interval', 'cagri', 'plan_kisi', 'model_kisi', 'fark_kisi']]
 
 
 def tablo_ayni_mi(df_a, df_b, ad_a='A', ad_b='B', tolerans=0):
@@ -1721,9 +1717,7 @@ if 'df_genel' in globals():
     # (3) KISMİSİZ hafta içi — model karşılaştırmasıyla aynı taban
     grafik_genel(df_genel, queue=f"{QUEUE.upper()} (hafta içi kısmisiz)",
                  kirilim=True, y_adim=25)
-    # (4) medyan hali
-    grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=False,
-                 olcu='medyan', y_adim=25)
+    # medyan hali gerekirse: olcu='medyan' ekle (sayıları HÜCRE 3'te)
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
 
@@ -1747,10 +1741,10 @@ else:
 
 # %% [HÜCRE 7B] — GRAFİK: YOĞUNLUK (kişi-saat başına çağrı)
 # Kırmızı = kapasite dar · Mavi = kapasite bol · Gri = ölçülemez (kapasite yok)
+# Sayısal karşılığı HÜCRE 12'deki 'karsilama' kolonu (bu haritanın tersi).
 
 if 'df_genel' in globals():
     grafik_yogunluk_haritasi(df_genel, queue=QUEUE.upper())
-    show(yogunluk_tablosu(df_genel))
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
 
@@ -1788,9 +1782,9 @@ if 'results' in globals() and 'df_actual' in globals():
     df_model = genel_bakis(mv, mc)
     print(f"✓ df_model: {len(df_model):,} satır")
 
-    grafik_genel(df_model, queue=f"{QUEUE.upper()} · MODEL", y_adim=25)
+    # Modelin slot profili HÜCRE 11'in alt satırında zaten var — burada
+    # sadece gün × slot yoğunluk deseni gösteriliyor.
     grafik_yogunluk_haritasi(df_model, queue=f"{QUEUE.upper()} · MODEL")
-    show(yogunluk_tablosu(df_model))
 else:
     print("results / df_actual yok — HÜCRE 9 ve HÜCRE 2'yi çalıştır.")
 
