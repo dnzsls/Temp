@@ -1552,8 +1552,8 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
             ger = g[ana_kol].values
 
             # TABAN — karşılanan ihtiyaç (ihtiyaç çizgisinin altı)
-            ax.fill_between(x, 0, ger, color=RENK['karsilanan'], zorder=1,
-                            label='Karşılanan ihtiyaç')
+            ax.fill_between(x, 0, ger, color=RENK['karsilanan'], alpha=0.55,
+                            zorder=1, label='Karşılanan ihtiyaç')
             # FAZLA / EKSİK — ihtiyaç ile kapasite arasındaki bant
             ax.fill_between(x, ger, kap, where=(kap >= ger), interpolate=True,
                             color=RENK['fazla'], zorder=2, label='FAZLA kapasite')
@@ -1812,44 +1812,38 @@ else:
     print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
 
 
-# %% [HÜCRE 12] — TEK EKSEN: KAPASİTE vs GEREKEN KİŞİ
-# Çağrı adedi kişiye çevrilir: gereken_kisi = çağrı_slot / (CAGRI_ADEDI/2)
-# Sağ eksen YOK → iki çizgi aynı birimde, kesişmeleri gerçek anlam taşır.
-#   KIRMIZI alan = kapasite ihtiyacın ALTINDA
-#   MAVİ alan    = kapasite ihtiyacın ÜSTÜNDE
+# %% [HÜCRE 12] — KAPASİTE vs GEREKEN KİŞİ  (tek eksen, üç görünüm)
+# Çağrı 'gereken kişi'ye çevrilir → sağ eksen YOK, kesişmeler anlam taşır.
+#   yeşilimsi taban = karşılanan ihtiyaç
+#   MAVİ alan       = FAZLA kapasite
+#   KIRMIZI alan    = EKSİK kapasite
+#
+# İki ihtiyaç yöntemi:
+#   (a) 15 çağrı/saat kuralı  → çağrı ÷ 7,5          [karşı ekibin yöntemi]
+#   (b) Erlang-C · ASA≤30sn · shrinkage dahil        [modelin yöntemi]
+#       df_aht gerekir: saat · sub_queue · line_based_main_group ·
+#       weighted_avg_aht   (yoksa sabit 180 sn varsayılır)
 
 if 'df_model' in globals() and 'df_genel' in globals():
+    # (1) 15 ÇAĞRI/SAAT KURALI
     grafik_ihtiyac(df_genel, df_model, queue=QUEUE.upper(),
-                   cagri_adedi=CAGRI_ADEDI, y_adim=50)
+                   cagri_adedi=CAGRI_ADEDI, yontem='kapasite', y_adim=50)
 
-    print("PLAN — slot bazında kapasite / gereken kişi")
-    show(ihtiyac_ozeti(df_genel))
-    print("\nMODEL — slot bazında kapasite / gereken kişi")
-    show(ihtiyac_ozeti(df_model))
-else:
-    print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
-
-
-# %% [HÜCRE 12B] — ERLANG İHTİYACI (AHT'li)
-# Girdi: df_aht  →  saat, sub_queue, line_based_main_group, weighted_avg_aht
-#        df_actual alt-kuyruk kırılımlı olmalı (resource_group_key)
-# AHT yoksa sabit bir sayı da verebilirsin: erlang_ekle(df_genel, 180)
-
-if all(k in globals() for k in ('df_genel', 'df_model', 'df_actual')):
-    if 'df_aht' in globals():
+    # --- Erlang için AHT ---
+    if 'df_aht' in globals() and 'df_actual' in globals():
         aht_slot = aht_slot_bazli(df_actual, df_aht, queue=QUEUE)
     else:
-        aht_slot = 180          # sn — df_aht yoksa sabit varsayım
+        aht_slot = 180
         print("  ℹ df_aht yok — sabit 180 sn AHT kullanılıyor.")
 
     df_genel_e = erlang_ekle(df_genel, aht_slot)
     df_model_e = erlang_ekle(df_model, aht_slot)
 
-    # (1) Erlang'a göre — alanlar Erlang ihtiyacına göre
+    # (2) ERLANG-C
     grafik_ihtiyac(df_genel_e, df_model_e, queue=QUEUE.upper(),
                    yontem='erlang', y_adim=50)
 
-    # (2) İki yöntem bir arada — Erlang alan, 15 kuralı noktalı çizgi
+    # (3) İKİSİ BİR ARADA — alanlar Erlang, 15 kuralı noktalı çizgi
     grafik_ihtiyac(df_genel_e, df_model_e, queue=QUEUE.upper(),
                    yontem='ikisi', y_adim=50)
 
@@ -1858,7 +1852,7 @@ if all(k in globals() for k in ('df_genel', 'df_model', 'df_actual')):
     print("\nMODEL — 15 kuralı vs Erlang")
     show(ihtiyac_ozeti(df_model_e))
 else:
-    print("df_genel / df_model / df_actual eksik — HÜCRE 2 ve HÜCRE 10'u çalıştır.")
+    print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
 
 
 # %% [HÜCRE 13] — GÜN GÜN KADRO TABLOSU
