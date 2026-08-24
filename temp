@@ -1884,9 +1884,10 @@ if 'results' in globals() and 'df_actual' in globals():
     df_model = genel_bakis(mv, mc)
     print(f"✓ df_model: {len(df_model):,} satır")
 
-    # Modelin slot profili HÜCRE 11'in alt satırında zaten var — burada
-    # sadece gün × slot yoğunluk deseni gösteriliyor.
-    grafik_yogunluk_haritasi(df_model, queue=f"{QUEUE.upper()} · MODEL")
+    # inhouse / outsource / kısmi kırılımı — HÜCRE 5'in plan grafiğiyle
+    # aynı biçim, böylece yan yana okunabiliyor.
+    grafik_genel(df_model, queue=f"{QUEUE.upper()} · MODEL",
+                 kirilim=True, y_adim=25)
 else:
     print("results / df_actual yok — HÜCRE 9 ve HÜCRE 2'yi çalıştır.")
 
