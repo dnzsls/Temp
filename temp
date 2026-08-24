@@ -1104,12 +1104,24 @@ QUEUE = 'kitle'
 KISMI_VARDIYALAR = []
 
 if 'df_actual' in globals() and 'df_vardiya' in globals():
+    c = cagri_tablosu(df_actual, YEAR, MONTH, queue=QUEUE)
+
+    # (1) df_genel — kısmiler hafta içi HARİÇ (model karşılaştırmasında bu kullanılır)
     v = vardiya_tablosu(df_vardiya, YEAR, MONTH,
                         kismi_vardiyalar=KISMI_VARDIYALAR)
-    c = cagri_tablosu(df_actual, YEAR, MONTH, queue=QUEUE)
     df_genel = genel_bakis(v, c)
+
+    # (2) df_genel_kismili — kısmiler HER GÜN dahil (sahadaki gerçek tablo)
+    v2 = vardiya_tablosu(df_vardiya, YEAR, MONTH,
+                         kismi_vardiyalar=KISMI_VARDIYALAR,
+                         kismi_haftaici_haric=False, verbose=False)
+    df_genel_kismili = genel_bakis(v2, c, verbose=False)
+
     print(f"✓ df_genel: {len(df_genel):,} satır "
           f"({df_genel['data_date'].nunique()} gün × 48 slot)")
+    hi = df_genel['hafta_sonu'] == 0
+    print(f"  hafta içi kişi-slot — kısmisiz {int(df_genel.loc[hi, 'kapasite_toplam'].sum()):,} "
+          f"| kısmili {int(df_genel_kismili.loc[hi, 'kapasite_toplam'].sum()):,}")
     show(df_genel, 5)
 else:
     print("df_actual / df_vardiya yok — SQL'den çekip bu hücreyi çalıştır.")
@@ -1158,11 +1170,22 @@ else:
 
 
 # %% [HÜCRE 5] — GRAFİK: KAPASİTE + VARDİYA BAŞLANGICI + ÇAĞRI
+# df_genel_kismili → kısmiler hafta içi DE dahil (sahadaki gerçek kapasite)
+# df_genel         → kısmiler hafta içi hariç (model karşılaştırma tabanı)
+
+if 'df_genel_kismili' in globals():
+    # (1) KISMİLER DAHİL — toplam
+    grafik_genel(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                 kirilim=False, y_adim=25)
+    # (2) KISMİLER DAHİL — inhouse / outsource / kısmi kırılımı
+    grafik_genel(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                 kirilim=True, y_adim=25)
 
 if 'df_genel' in globals():
-    grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=False, y_adim=25)
-    grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=True, y_adim=25)
-    # aynı grafiğin medyan hali — ortalamayla yan yana yorumlamak için
+    # (3) KISMİSİZ hafta içi — model karşılaştırmasıyla aynı taban
+    grafik_genel(df_genel, queue=f"{QUEUE.upper()} (hafta içi kısmisiz)",
+                 kirilim=True, y_adim=25)
+    # (4) medyan hali
     grafik_genel(df_genel, queue=QUEUE.upper(), kirilim=False,
                  olcu='medyan', y_adim=25)
 else:
@@ -1251,4 +1274,3 @@ if 'df_model' in globals() and 'df_genel' in globals():
     show(fark_tablosu(df_genel, df_model))
 else:
     print("df_model / df_genel yok — HÜCRE 10 ve HÜCRE 2'yi çalıştır.")
-
