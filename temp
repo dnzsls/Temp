@@ -1335,12 +1335,19 @@ def gunluk_kadro(df_vardiya, results, df_actual, year, month, queue='kitle',
                     'model_in': mi.get('total_inhouse_kisi', 0),
                     'model_out': mi.get('total_outsource_kisi', 0),
                     'model_pt': mi.get('total_part_time_kisi', 0),
+                    'model_total_kisi': mi.get('total_kisi', 0),
                     'model_infeasible': int(q is None or not q)})
     model = pd.DataFrame(sat).set_index('data_date') if sat else pd.DataFrame()
     if len(model):
-        # V9'da total_inhouse_kisi part-time'ı içeriyorsa ayır
-        model['model_in'] = (model['model_in'] - model['model_pt']).clip(lower=0)
+        # total_inhouse_kisi / _outsource_ / _part_time_ AYRIK kümeler
+        # (weekend_forecast_final.py: in_shifts pt eklenmeden ÖNCE kuruluyor,
+        #  total = total_in + total_out + total_pt). Çıkarma YAPILMAZ.
         model['model_toplam'] = model[['model_in', 'model_out', 'model_pt']].sum(axis=1)
+        if 'model_total_kisi' in model:
+            sapan = model[model['model_total_kisi'] != model['model_toplam']]
+            if len(sapan):
+                print(f"  ⚠ {len(sapan)} günde in+out+pt ≠ total_kisi "
+                      f"(ilk: {sapan.index[0]:%d.%m}) — pickle şeması değişmiş olabilir.")
 
     # --- ÇAĞRI ---
     cg = cagri_tablosu(df_actual, year, month, queue=queue, cols=cols, verbose=False)
@@ -1960,4 +1967,3 @@ if all(k in globals() for k in ('df_vardiya_tum', 'results', 'df_actual')):
     show(h.reindex(GUN_TR).reset_index())
 else:
     print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
-
