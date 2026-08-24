@@ -8,9 +8,13 @@
 #       resource_group_key, nof_call
 #     (geniş format da olur: data_date, min_time_period_value, kitle_nof_call…)
 #
-#   df_vardiya — vardiya planı, INHOUSE + OUTSOURCE BİR ARADA
+#   df_vardiya — vardiya planı (güncel tablo), INHOUSE + OUTSOURCE BİR ARADA
 #       DATA_DATE, VARDIYA ('09:00-18:00'), WORKING_MAIN_GROUP, KISI_SAYISI
 #     'outsource' geçen grup → outsource, gerisi (izmir_kitle…) → inhouse
+#
+#   df_vardiya_onceki — OPSİYONEL. Önceki ayın son günü (örn. 30 Haziran)
+#     eski tablodan gelir. Tarih formatı farklı olabilir; HÜCRE 2 iki tabloyu
+#     vardiya_birlestir() ile birleştirip df_vardiya_tum üretir.
 #
 # İKİ FARKLI ÖLÇÜ — karıştırma:
 #   SLOT KAPASİTESİ  = o slotta telefonda KAÇ KİŞİ VAR (vardiya boyunca sayılır)
@@ -204,6 +208,58 @@ def vardiya_listesi(df_vardiya, cols=None):
     g['sure_slot'] = g['vardiya'].map(lambda v: len(shift_slots(v)))
     g['sure_saat'] = (g['sure_slot'] / 2).round(1)
     return g.sort_values('vardiya').reset_index(drop=True)
+
+
+def vardiya_birlestir(*tablolar, cols=None, verbose=True):
+    """Farklı kaynaklardan gelen vardiya tablolarını tek tabloya indirger.
+
+    Her tablonun tarih kolonu AYRI AYRI datetime'a çevrilir → biri
+    '2026-07-01', diğeri '01.07.2026' olsa bile karışmaz. SQL'de UNION ALL
+    yapmaya gerek kalmaz.
+
+    Kolon adları standartlaşır:
+        data_date · vardiya · working_main_group · kisi_sayisi
+
+    Çakışan (gün, vardiya, grup) satırında SONRAKİ tablo kazanır —
+    en güncel tabloyu en sona koy.
+    """
+    parca, kaynak_bilgi = [], []
+    for i, t in enumerate(tablolar, 1):
+        if t is None or not len(t):
+            continue
+        r = {k: _resolve_col(t, v) for k, v in {**VARDIYA_KOL, **(cols or {})}.items()}
+        eksik = [k for k, v in r.items() if v is None]
+        if eksik:
+            raise KeyError(f"{i}. tabloda kolon yok: {eksik}  |  "
+                           f"mevcut: {list(t.columns)}")
+        d = pd.DataFrame({
+            'data_date':          _to_date_series(t[r['date']]).dt.normalize(),
+            'vardiya':            t[r['shift']].astype(str),
+            'working_main_group': t[r['group']].astype(str),
+            'kisi_sayisi':        pd.to_numeric(t[r['kisi']], errors='coerce').fillna(0),
+        })
+        parca.append(d)
+        kaynak_bilgi.append((i, len(d), d['data_date'].min(), d['data_date'].max()))
+
+    if not parca:
+        raise ValueError("Birleştirilecek tablo yok.")
+
+    ham = pd.concat(parca, ignore_index=True)
+    out = (ham.drop_duplicates(subset=['data_date', 'vardiya', 'working_main_group'],
+                               keep='last')
+              .sort_values(['data_date', 'vardiya'])
+              .reset_index(drop=True))
+
+    if verbose:
+        for i, n, mn, mx in kaynak_bilgi:
+            print(f"  {i}. tablo: {n:,} satır  {mn:%d.%m.%Y} – {mx:%d.%m.%Y}")
+        if len(ham) > len(out):
+            print(f"  ℹ {len(ham) - len(out):,} çakışan satır elendi "
+                  f"(sonraki tablo kazandı).")
+        print(f"BİRLEŞTİ — {len(out):,} satır  |  "
+              f"{out.data_date.min():%d.%m.%Y} – {out.data_date.max():%d.%m.%Y}  |  "
+              f"{out.data_date.nunique()} gün")
+    return out
 
 
 def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
@@ -1266,14 +1322,16 @@ def ihtiyac_ozeti(df, cagri_adedi=CAGRI_ADEDI):
 
 
 def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
-                   olcu='ortalama', y_adim=50, kaydet=None):
-    """TEK EKSEN: kapasite vs gereken kişi. Sağ eksen YOK.
+                   olcu='ortalama', kirilim=True, y_adim=50, kaydet=None):
+    """TEK EKSEN: kapasite (inhouse/outsource/kısmi yığılı) vs gereken kişi.
 
     Üst satır PLAN, alt satır MODEL. Sol sütun hafta içi, sağ sütun hafta sonu.
-    Çağrı adedi 'gereken kişi'ye çevrilir (çağrı ÷ (cagri_adedi/2)), böylece
-    iki çizgi aynı birimde olur ve KESİŞMELERİ ANLAM TAŞIR:
-      KIRMIZI alan → kapasite ihtiyacın ALTINDA (eksik)
-      MAVİ alan    → kapasite ihtiyacın ÜSTÜNDE (fazla)
+    Çağrı 'gereken kişi'ye çevrilir (çağrı ÷ (cagri_adedi/2)) — sağ eksen YOK,
+    iki çizgi aynı birimde, kesişmeleri gerçek anlam taşır.
+
+    kirilim=True  → kapasite mavi/sarı/yeşil olarak yığılı çizilir
+    kirilim=False → tek renk dolgu
+    KIRMIZI TARALI alan = kapasite ihtiyacın ALTINDA kalan kısım.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1298,18 +1356,31 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
                 ax.set_visible(False)
                 continue
             x = np.arange(len(g))
+            kin = g['kapasite_in'].values
+            kout = g['kapasite_out'].values
+            kpt = g['kapasite_pt'].values
             kap = g['kapasite_toplam'].values
             ger = g['gereken_kisi'].values
 
-            ax.fill_between(x, kap, ger, where=(kap >= ger), interpolate=True,
-                            color=RENK['fazla'], alpha=0.45, zorder=1,
-                            label='Fazla kapasite')
-            ax.fill_between(x, kap, ger, where=(kap < ger), interpolate=True,
-                            color=RENK['eksik'], alpha=0.40, zorder=1,
-                            label='Eksik kapasite')
-            ax.plot(x, kap, color=RENK['kapasite'], lw=2.2, zorder=3,
-                    label='Kapasite (sahadaki kişi)')
-            ax.plot(x, ger, color=RENK['metin'], lw=1.8, ls='--', zorder=4,
+            if kirilim:
+                ax.fill_between(x, 0, kin, color=RENK['inhouse'], alpha=0.55,
+                                zorder=1, label='Kapasite — inhouse')
+                ax.fill_between(x, kin, kin + kout, color=RENK['outsource'],
+                                alpha=0.65, zorder=1, label='Kapasite — outsource')
+                if kpt.sum() > 0:
+                    ax.fill_between(x, kin + kout, kap, color=RENK['kismi'],
+                                    alpha=0.70, zorder=1, label='Kapasite — kısmi')
+            else:
+                ax.fill_between(x, 0, kap, color=RENK['dolgu'], zorder=1,
+                                label='Kapasite')
+
+            ax.plot(x, kap, color=RENK['kapasite'], lw=2.4, zorder=4,
+                    label='Toplam kapasite')
+            ax.fill_between(x, kap, ger, where=(ger > kap), interpolate=True,
+                            facecolor=RENK['eksik'], alpha=0.55, hatch='///',
+                            edgecolor=RENK['eksik'], linewidth=0.0, zorder=3,
+                            label='EKSİK kapasite')
+            ax.plot(x, ger, color=RENK['metin'], lw=2.0, ls='--', zorder=5,
                     label=f'Gereken kişi ({cagri_adedi} çağrı/saat)')
 
             ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
@@ -1329,7 +1400,7 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
 
             if i == 0 and j == 0:
                 ax.legend(loc='upper left', frameon=False, fontsize=8,
-                          labelcolor=RENK['metin2'])
+                          labelcolor=RENK['metin2'], ncol=2)
 
     fig.suptitle(f"{queue} — kapasite vs gereken kişi  "
                  f"(çağrı, {cagri_adedi} çağrı/saat kuralıyla kişiye çevrildi)",
@@ -1369,15 +1440,25 @@ QUEUE = 'kitle'
 KISMI_VARDIYALAR = []
 
 if 'df_actual' in globals() and 'df_vardiya' in globals():
+    # (0) df_vardiya (güncel tablo) + df_vardiya_onceki (30 Haziran, eski tablo)
+    #     Tarih formatları farklı olsa bile her tablo ayrı çözümlenir.
+    if 'df_vardiya_onceki' in globals():
+        df_vardiya_tum = vardiya_birlestir(df_vardiya_onceki, df_vardiya)
+    else:
+        df_vardiya_tum = df_vardiya
+        print("  ℹ df_vardiya_onceki yok — sadece güncel tablo kullanılıyor "
+              f"({(pd.Timestamp(YEAR, MONTH, 1) - pd.Timedelta(days=1)):%d.%m} "
+              "gecesi eksik kalabilir).")
+
     c = cagri_tablosu(df_actual, YEAR, MONTH, queue=QUEUE)
 
     # (1) df_genel — kısmiler hafta içi HARİÇ (model karşılaştırmasında bu kullanılır)
-    v = vardiya_tablosu(df_vardiya, YEAR, MONTH,
+    v = vardiya_tablosu(df_vardiya_tum, YEAR, MONTH,
                         kismi_vardiyalar=KISMI_VARDIYALAR)
     df_genel = genel_bakis(v, c)
 
     # (2) df_genel_kismili — kısmiler HER GÜN dahil (sahadaki gerçek tablo)
-    v2 = vardiya_tablosu(df_vardiya, YEAR, MONTH,
+    v2 = vardiya_tablosu(df_vardiya_tum, YEAR, MONTH,
                          kismi_vardiyalar=KISMI_VARDIYALAR,
                          kismi_haftaici_haric=False, verbose=False)
     df_genel_kismili = genel_bakis(v2, c, verbose=False)
@@ -1396,19 +1477,19 @@ else:
 # (a) hangi vardiyalar geceyi aşıyor
 # (b) belirli bir gün+slotun kapasitesine hangi satırlar giriyor
 
-if 'df_vardiya' in globals():
-    show(gece_asan_vardiyalar(df_vardiya))
-    show(slot_kaynagi(df_vardiya, f'{YEAR}-{MONTH:02d}-01', '00:00'))
+if 'df_vardiya_tum' in globals():
+    show(gece_asan_vardiyalar(df_vardiya_tum))
+    show(slot_kaynagi(df_vardiya_tum, f'{YEAR}-{MONTH:02d}-01', '00:00'))
 else:
-    print("df_vardiya yok.")
+    print("df_vardiya_tum yok — HÜCRE 2'yi çalıştır.")
 
 
 # %% [HÜCRE 2C] — VARDİYA LİSTESİ (kısmi etiketlerini buradan seç)
 
-if 'df_vardiya' in globals():
-    show(vardiya_listesi(df_vardiya))
+if 'df_vardiya_tum' in globals():
+    show(vardiya_listesi(df_vardiya_tum))
 else:
-    print("df_vardiya yok.")
+    print("df_vardiya_tum yok — HÜCRE 2'yi çalıştır.")
 
 
 # %% [HÜCRE 3] — SLOT ÖZETİ (aylık ortalama)
@@ -1549,7 +1630,7 @@ else:
 
 if 'df_model' in globals() and 'df_genel' in globals():
     grafik_ihtiyac(df_genel, df_model, queue=QUEUE.upper(),
-                   cagri_adedi=CAGRI_ADEDI, y_adim=50)
+                   cagri_adedi=CAGRI_ADEDI, kirilim=True, y_adim=50)
 
     print("PLAN — slot bazında kapasite / gereken kişi")
     show(ihtiyac_ozeti(df_genel))
@@ -1562,8 +1643,8 @@ else:
 # %% [HÜCRE 13] — GÜN GÜN KADRO TABLOSU
 # Birim KİŞİ. Çağrı gerçekleşen; model pickle'dan; plan df_vardiya'dan.
 
-if all(k in globals() for k in ('df_vardiya', 'results', 'df_actual')):
-    df_kadro = gunluk_kadro(df_vardiya, results, df_actual, YEAR, MONTH,
+if all(k in globals() for k in ('df_vardiya_tum', 'results', 'df_actual')):
+    df_kadro = gunluk_kadro(df_vardiya_tum, results, df_actual, YEAR, MONTH,
                             queue=QUEUE, kismi_vardiyalar=KISMI_VARDIYALAR,
                             model_year=MODEL_YEAR, model_month=MODEL_MONTH)
     show(df_kadro)
@@ -1581,4 +1662,4 @@ if all(k in globals() for k in ('df_vardiya', 'results', 'df_actual')):
                                  'fark_toplam']].mean().round(1)
     show(h.reindex(GUN_TR).reset_index())
 else:
-    print("df_vardiya / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
+    print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
