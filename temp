@@ -1908,9 +1908,24 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
 
             fazla = float(np.clip(kap - ger, 0, None).sum()) / 2      # kişi-saat
             eksik = float(np.clip(ger - kap, 0, None).sum()) / 2
-            oran = kap.sum() / ger.sum() if ger.sum() else float('nan')
+
+            # KARŞILANAN ÇAĞRI — fazlalık eksiği KAPATMAZ (mahsuplaşma yok).
+            # Bir slotta kadronun %x'i eksikse o slotun çağrısının %x'i açıkta.
+            #   açık_çağrı = Σ  çağrı_i × max(0, (gereken_i − kapasite_i)) / gereken_i
+            # 15 kuralında bu, (gereken−kapasite)×7,5 ile BİREBİR aynı sonucu
+            # verir; Erlang'da da aynı mantıkla çalışır (oran üzerinden).
+            cg = g['cagri'].values.astype(float)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                acik_pay = np.where(ger > 0, np.clip(ger - kap, 0, None) / ger, 0.0)
+            acik_cagri = float((cg * acik_pay).sum())
+            cagri_top = float(cg.sum())
+            oran = (1 - acik_cagri / cagri_top) if cagri_top else float('nan')
+            eksik_slot = int((kap < ger).sum())
+
             i_dip = int(np.argmin(kap - ger))
-            _kutu(ax, f"Karşılama {oran:.0%}\n"
+            _kutu(ax, f"Karşılanan çağrı {oran:.1%}\n"
+                      f"açıkta {acik_cagri:,.0f} çağrı "
+                      f"({eksik_slot}/{len(g)} slot)\n"
                       f"fazla {fazla:,.0f} · eksik {eksik:,.0f} kişi-saat\n"
                       f"en dar slot {g['interval'].iloc[i_dip]} "
                       f"({kap[i_dip] - ger[i_dip]:+.0f} kişi)",
