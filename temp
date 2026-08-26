@@ -840,6 +840,103 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
     return fig
 
 
+def grafik_olcekli(df, queue='KİTLE', olcu='ortalama', y_adim=25,
+                   olcek='ortak', kirilim=True, kaydet=None):
+    """TEK EKSEN: kapasite + vardiya başlangıcı + ÖLÇEKLENMİŞ çağrı.
+
+    Çağrı bir çarpanla kişi eksenine oturtulur:  k = tepe_kapasite / tepe_çağrı
+
+    ⚠ Amaç yalnızca ŞEKİL karşılaştırması. Eğrilerin kesişmesi HİÇBİR ŞEY
+      ifade etmez — çarpan keyfîdir. Anlamlı (birimli) karşılaştırma için
+      HÜCRE 12'ye bak: orada çağrı 'gereken kişi'ye çevriliyor.
+
+    olcek='ortak' (varsayılan) → hafta içi ve hafta sonu AYNI çarpanı kullanır;
+        iki panel birbiriyle kıyaslanabilir kalır.
+    olcek='panel' → her panel kendi çarpanını kullanır; şekil uyumu en iyi
+        olur ama paneller arası kıyas bozulur.
+    """
+    import matplotlib.pyplot as plt
+
+    veri = {hs: slot_ozet(df, hafta_sonu=hs, olcu=olcu) for hs in (0, 1)}
+    dolu = [g for g in veri.values() if not g.empty]
+    if not dolu:
+        raise ValueError("Çizilecek veri yok.")
+    if olcek not in ('ortak', 'panel'):
+        raise ValueError("olcek: 'ortak' veya 'panel'")
+
+    k_ortak = (max(g['kapasite_toplam'].max() for g in dolu)
+               / max(g['cagri'].max() for g in dolu))
+    y_max = max(g['kapasite_toplam'].max() for g in dolu) * 1.30
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=(olcek == 'ortak'))
+    fig.patch.set_facecolor(RENK['yuzey'])
+
+    for j, (hs, ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
+        ax = axes[j]
+        g = veri[hs]
+        if g.empty:
+            ax.set_visible(False)
+            continue
+        x = range(len(g))
+        k = k_ortak if olcek == 'ortak' else (g['kapasite_toplam'].max()
+                                              / max(g['cagri'].max(), 1))
+        cagri_olcekli = g['cagri'] * k
+
+        if kirilim:
+            ust_in = g['kapasite_in']
+            ust_out = ust_in + g['kapasite_out']
+            ax.fill_between(x, ust_in, color=RENK['inhouse'], alpha=0.45,
+                            zorder=1, label='Kapasite — inhouse')
+            ax.fill_between(x, ust_in, ust_out, color=RENK['outsource'],
+                            alpha=0.85, zorder=1, label='Kapasite — outsource')
+            if g['kapasite_pt'].sum() > 0:
+                ax.fill_between(x, ust_out, g['kapasite_toplam'],
+                                color=RENK['kismi'], alpha=0.60, zorder=1,
+                                label='Kapasite — kısmi')
+        else:
+            ax.fill_between(x, g['kapasite_toplam'], color=RENK['dolgu'],
+                            zorder=1, label='Slot kapasitesi')
+        ax.plot(x, g['kapasite_toplam'], color=RENK['kapasite'], lw=2.4,
+                zorder=4, label='Kapasite (sahadaki kişi)')
+        ax.plot(x, g['baslangic_toplam'], color=RENK['baslangic'], lw=2,
+                marker='o', ms=3, zorder=5, label='Vardiya başlangıcı')
+        ax.plot(x, cagri_olcekli, color=RENK['cagri'], lw=2.4, ls='--',
+                zorder=6, label=f'Gerçekleşen çağrı (×{k:.3f} ölçekli)')
+
+        ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
+        ax.set_title(f"{queue} — {ad}{_kismi_notu(g)}", fontsize=11,
+                     fontweight='bold', color=RENK['metin'], loc='left', pad=8)
+        _eksen(ax, g, y_adim=y_adim)
+        if olcek == 'ortak':
+            ax.set_ylim(0, y_max)
+        else:
+            ax.set_ylim(0, g['kapasite_toplam'].max() * 1.30)
+
+        i_tepe = int(g['cagri'].idxmax())
+        _kutu(ax, f"Çağrı ölçeği ×{k:.3f}\n"
+                  f"grafikteki 1 kişi ≈ {1 / k:,.0f} çağrı\n"
+                  f"tepe çağrı {g['cagri'].iloc[i_tepe]:,.0f} @ "
+                  f"{g['interval'].iloc[i_tepe]}\n"
+                  f"{int(g['gun_sayisi'].iloc[0])} gün {olcu}",
+              konum=(0.98, 0.97))
+        if j == 0:
+            ax.legend(loc='upper left', frameon=False, fontsize=8,
+                      labelcolor=RENK['metin2'])
+
+    kap = ('ortak çarpan — paneller kıyaslanabilir' if olcek == 'ortak'
+           else 'panel başına çarpan — paneller kıyaslanamaz')
+    fig.suptitle(f"{queue} — kapasite ve çağrı, tek eksende  ({kap})\n"
+                 f"⚠ çağrı eğrisi ölçeklenmiştir; eğrilerin KESİŞMESİ anlam "
+                 f"taşımaz — birimli karşılaştırma için HÜCRE 12",
+                 fontsize=12, fontweight='bold', color=RENK['metin'],
+                 x=0.01, ha='left', y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    if kaydet:
+        fig.savefig(kaydet, dpi=150, facecolor=fig.get_facecolor())
+        print(f"✓ {kaydet}")
+    return fig
+
+
 def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
     """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir.
 
@@ -1969,6 +2066,23 @@ if 'df_genel' in globals():
     # medyan hali gerekirse: olcu='medyan' ekle (sayıları HÜCRE 3'te)
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
+
+
+# %% [HÜCRE 5B] — TEK EKSEN: çağrı, kişi eksenine ÖLÇEKLENMİŞ
+# Çağrı k = tepe_kapasite / tepe_çağrı çarpanıyla kişi eksenine oturtulur.
+# Sadece ŞEKİL karşılaştırması içindir — eğrilerin kesişmesi anlam taşımaz.
+# Birimli (anlamlı) karşılaştırma HÜCRE 12'de.
+
+if 'df_genel_kismili' in globals():
+    # (1) ORTAK ÇARPAN — hafta içi ve hafta sonu aynı ölçekte, kıyaslanabilir
+    grafik_olcekli(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                   olcek='ortak', y_adim=25)
+
+    # (2) PANEL BAŞINA ÇARPAN — her panelde şekil uyumu en iyi hâlde
+    grafik_olcekli(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                   olcek='panel', y_adim=25)
+else:
+    print("df_genel_kismili yok — HÜCRE 2'yi çalıştır.")
 
 
 # %% [HÜCRE 6] — GRAFİK: GÜN GÜN SEYİR
