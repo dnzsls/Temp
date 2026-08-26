@@ -674,7 +674,8 @@ def _eksen(ax, g, adim=4, y_adim=None):
     for k in ('left', 'bottom'):
         ax.spines[k].set_color(RENK['izgara'])
     ax.tick_params(colors=RENK['metin2'], labelsize=8)
-    ax.tick_params(axis='x', labelbottom=True)   # sharex olsa da her panelde saat yazsın
+    # sharex/sharey olsa bile HER panel kendi sayısal değerlerini yazsın
+    ax.tick_params(labelbottom=True, labelleft=True)
     ax.set_xlim(-0.5, len(g) - 0.5)
     ax.set_facecolor(RENK['yuzey'])
     if y_adim:
@@ -708,8 +709,11 @@ def _cagri_paneli(ax, g, etiket='Gerçekleşen çağrı', adim=None):
     ax.fill_between(x, g['cagri'], color=RENK['cagri'], alpha=0.18, zorder=1)
     ax.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, zorder=3, label=etiket)
     ax.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
-    ax.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+    ax.tick_params(axis='y', colors=RENK['cagri'], labelsize=8, labelleft=True)
     ax.set_xticks(range(0, len(g), 4))
+    ax.set_xticklabels([g['interval'].iloc[i] for i in range(0, len(g), 4)],
+                       fontsize=7.5, color=RENK['metin2'])
+    ax.tick_params(axis='x', labelbottom=True)   # sharex olsa da yazsın
     ax.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
     ax.set_axisbelow(True)
     for i in range(0, len(g), 4):
@@ -971,6 +975,10 @@ def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
         ax_u.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
         ax_u.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
         ax_u.set_axisbelow(True)
+        ax_u.set_xticks(list(x))
+        ax_u.set_xticklabels([str(d.day) for d in g['data_date']],
+                             fontsize=7, color=RENK['metin2'])
+        ax_u.tick_params(axis='x', labelbottom=True)
         for i in x:
             ax_u.axvline(i, color=RENK['metin2'], lw=0.5, alpha=0.13, zorder=2)
         for k in ('top', 'right'):
