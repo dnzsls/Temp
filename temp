@@ -433,7 +433,13 @@ def gunluk_kisi(df_uzun, results, year, month, queue='kitle', verbose=True):
     p['data_date'] = _to_date_series(p['data_date']).dt.normalize()
     p['sirket'] = _company(p['working_main_group'])
     p['kisi'] = pd.to_numeric(p['kisi_sayisi'], errors='coerce').fillna(0)
+    tum_aralik = (p['data_date'].min(), p['data_date'].max()) if len(p) else (None, None)
     p = p[(p['data_date'].dt.year == year) & (p['data_date'].dt.month == month)]
+    if p.empty and verbose:
+        print(f"  ⚠ PLAN: {year}/{month:02d} için satır YOK. "
+              f"Vardiya verisi {tum_aralik[0]:%d.%m.%Y}–{tum_aralik[1]:%d.%m.%Y} "
+              f"aralığında — YEAR/MONTH'u kontrol et."
+              if tum_aralik[0] is not None else "  ⚠ PLAN: vardiya tablosu boş.")
     plan = p.pivot_table(index='data_date', columns='sirket', values='kisi',
                          aggfunc='sum', fill_value=0)
     plan = plan.rename(columns={'inhouse': 'plan_in', 'outsource': 'plan_out',
@@ -455,6 +461,10 @@ def gunluk_kisi(df_uzun, results, year, month, queue='kitle', verbose=True):
                     'model_pt': mi.get('total_part_time_kisi', 0),
                     'model_total_kisi': mi.get('total_kisi', 0)})
     model = pd.DataFrame(sat).set_index('data_date') if sat else pd.DataFrame()
+    if not sat and verbose:
+        _a = sorted({pd.to_datetime(ds).strftime('%Y-%m') for ds in (results or {})})
+        print(f"  ⚠ MODEL: {year}/{month:02d} için gün YOK. "
+              f"Pickle'daki aylar: {_a}")
     if len(model):
         # total_inhouse_kisi / _outsource_ / _part_time_ AYRIK kümeler — ÇIKARMA YOK
         model['model_toplam'] = model[['model_in', 'model_out', 'model_pt']].sum(axis=1)
@@ -473,9 +483,14 @@ def gunluk_kisi(df_uzun, results, year, month, queue='kitle', verbose=True):
     out = out.reset_index()
     out['gun'] = out['data_date'].dt.weekday.map(lambda i: GUN_TR[i])
     out['hafta_sonu'] = (out['data_date'].dt.weekday >= 5).astype(int)
+    # Taraflardan biri boşsa kolonlar hiç oluşmaz → KeyError. Hep 0 ile kur.
+    for k in ('model_in', 'model_out', 'model_pt', 'model_toplam',
+              'plan_in', 'plan_out', 'plan_pt', 'plan_toplam'):
+        if k not in out:
+            out[k] = 0
     sayisal = [k for k in out.columns if k.startswith(('plan_', 'model_'))]
     out[sayisal] = out[sayisal].fillna(0).round().astype(int)
-    out['fark'] = out.get('model_toplam', 0) - out.get('plan_toplam', 0)
+    out['fark'] = out['model_toplam'] - out['plan_toplam']
 
     kol = ['data_date', 'gun', 'hafta_sonu'] + \
           [k for k in ('model_in', 'model_out', 'model_pt', 'model_toplam',
