@@ -293,56 +293,77 @@ def vardiya_genis_uzun(df, queue='kitle', cols=None, sifir_at=True, verbose=True
     return out
 
 
-def vardiya_profili(df_genis, year, month, queue='kitle', df_actual=None,
-                    kismi_haftaici_haric=True, olcu='ortalama', verbose=True):
-    """GENİŞ bir vardiya matrisinden TEK ADIMDA slot ortalaması.
+def kadro_ozeti(df_genis, year, month, queue='kitle',
+                kismi_haftaici_haric=False, verbose=True):
+    """GENİŞ vardiya matrisinden GÜN GÜN KİŞİ sayısı + ortalamalar.
 
-    HÜCRE 2 zincirinden BAĞIMSIZ — elindeki başka bir tabloyu buraya verip
-    kendi inhouse/outsource ortalamalarını alırsın.
+    HÜCRE 13'ün plan tarafıyla aynı ölçü: birim KİŞİ, slot hesabı YOK.
+    "O gün kaç kişi vardiyaya yazılmış" sorusunu cevaplar.
 
-    Kısmi kolonu ({queue}_kismi_kisi_sayisi) OLMASA DA çalışır; o zaman
-    kapasite_pt kolonu 0 kalır.
+    Kısmi kolonu ({queue}_kismi_kisi_sayisi) yoksa pt kolonu 0 kalır.
+    kismi_haftaici_haric=True → kısmiler hafta içi günlerde sayılmaz.
 
-    df_actual verilirse çağrı da eklenir; verilmezse cagri=0 olur
-    (kişi sayıları bundan etkilenmez).
-
-    Çıktı: (df_ham, ozet)
-      df_ham → gün × slot, genel_bakis() şemasında
-      ozet   → {0: hafta içi profili, 1: hafta sonu profili}
-               kolonlar: interval · kapasite_in/out/pt/toplam ·
-                         baslangic_in/out/pt/toplam · cagri · gun_sayisi
+    Çıktı: (gun_gun, gun_tipi, gun_adi)
+      gun_gun  → data_date · gun · hafta_sonu · in · out · pt · toplam
+      gun_tipi → hafta içi / hafta sonu ortalaması
+      gun_adi  → Pzt…Paz ortalaması
     """
     u = vardiya_genis_uzun(df_genis, queue=queue, verbose=verbose)
-    v = vardiya_tablosu(u, year, month,
-                        kismi_haftaici_haric=kismi_haftaici_haric,
-                        verbose=verbose)
+    u['sirket'] = _company(u['working_main_group'])
+    u = u[(u['data_date'].dt.year == year) & (u['data_date'].dt.month == month)]
+    if u.empty:
+        raise ValueError(f"{year}/{month:02d} için satır yok.")
 
-    if df_actual is not None:
-        c = cagri_tablosu(df_actual, year, month, queue=queue, verbose=verbose)
-    else:
-        c = v[['data_date', 'interval']].copy()
-        c['cagri'] = 0
-        if verbose:
-            print("  ℹ df_actual verilmedi — çağrı 0 sayıldı, kişi sayıları etkilenmez.")
+    if kismi_haftaici_haric:
+        at = (u['data_date'].dt.weekday < 5) & u['sirket'].eq('part_time')
+        if verbose and at.any():
+            print(f"  ℹ kısmi: hafta içi {int(u.loc[at, 'kisi_sayisi'].sum()):,} "
+                  f"kişi çıkarıldı.")
+        u = u[~at]
 
-    ham = genel_bakis(v, c, verbose=verbose)
-    ozet = {hs: slot_ozet(ham, hafta_sonu=hs, olcu=olcu) for hs in (0, 1)}
+    g = u.pivot_table(index='data_date', columns='sirket',
+                      values='kisi_sayisi', aggfunc='sum', fill_value=0)
+    g = g.rename(columns={'inhouse': 'in', 'outsource': 'out', 'part_time': 'pt'})
+    for k in ('in', 'out', 'pt'):
+        if k not in g:
+            g[k] = 0
+    g['toplam'] = g[['in', 'out', 'pt']].sum(axis=1)
+
+    gunler = pd.date_range(pd.Timestamp(year, month, 1),
+                           pd.Timestamp(year, month, 1) + pd.offsets.MonthEnd(1))
+    g = g.reindex(gunler).fillna(0).astype(int)
+    g.index.name = 'data_date'
+    g = g.reset_index()
+    g['gun'] = g['data_date'].dt.weekday.map(lambda i: GUN_TR[i])
+    g['hafta_sonu'] = (g['data_date'].dt.weekday >= 5).astype(int)
+    g = g[['data_date', 'gun', 'hafta_sonu', 'in', 'out', 'pt', 'toplam']]
+
+    dolu = g[g['toplam'] > 0]
+    gun_tipi = (dolu.groupby('hafta_sonu')[['in', 'out', 'pt', 'toplam']]
+                    .agg(['mean', 'count']).round(1))
+    gun_tipi = pd.DataFrame({
+        'gun_tipi': ['hafta içi', 'hafta sonu'],
+        'gun_sayisi': [int(dolu[dolu.hafta_sonu == h]['toplam'].count()) for h in (0, 1)],
+        **{k: [round(dolu[dolu.hafta_sonu == h][k].mean(), 1) if
+               len(dolu[dolu.hafta_sonu == h]) else 0 for h in (0, 1)]
+           for k in ('in', 'out', 'pt', 'toplam')},
+    })
+
+    gun_adi = (dolu.groupby('gun')[['in', 'out', 'pt', 'toplam']].mean()
+                   .round(1).reindex(GUN_TR).reset_index())
+    gun_adi.insert(1, 'gun_sayisi',
+                   dolu.groupby('gun')['toplam'].count().reindex(GUN_TR).values)
 
     if verbose:
-        onceki = pd.Timestamp(year, month, 1) - pd.Timedelta(days=1)
-        if not (u['data_date'] == onceki).any():
-            print(f"  ⚠ {onceki:%d.%m.%Y} bu matriste YOK → "
-                  f"{year}-{month:02d}-01 gece slotları eksik.")
-        for hs, ad in ((0, 'hafta içi'), (1, 'hafta sonu')):
-            g = ozet[hs]
-            if g.empty:
-                continue
-            print(f"  {ad:<10} {int(g['gun_sayisi'].iloc[0]):>2} gün {olcu}  |  "
-                  f"tepe kapasite {g['kapasite_toplam'].max():>6.1f} kişi  "
-                  f"(in {g['kapasite_in'].max():.1f} · "
-                  f"out {g['kapasite_out'].max():.1f} · "
-                  f"pt {g['kapasite_pt'].max():.1f})")
-    return ham, ozet
+        bos = g[g['toplam'] == 0]
+        if len(bos):
+            print(f"  ⚠ {len(bos)} günde kayıt yok: "
+                  f"{', '.join(bos['data_date'].dt.strftime('%d.%m'))}")
+        for _, r in gun_tipi.iterrows():
+            print(f"  {r['gun_tipi']:<10} {int(r['gun_sayisi']):>2} gün  |  "
+                  f"in {r['in']:>6.1f} · out {r['out']:>6.1f} · "
+                  f"pt {r['pt']:>5.1f}  →  toplam {r['toplam']:>6.1f} kişi")
+    return g, gun_tipi, gun_adi
 
 
 def vardiya_listesi(df_vardiya, cols=None):
@@ -2298,52 +2319,34 @@ else:
     print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
 
 
-# %% [HÜCRE 15] — BAŞKA BİR VARDİYA MATRİSİ (bağımsız profil)
-# Elindeki İKİNCİ geniş formatlı tabloyu buraya koy. HÜCRE 2'ye ve
-# df_genel'e HİÇ dokunmaz; kendi slot ortalamalarını üretir.
+# %% [HÜCRE 15] — BAŞKA BİR VARDİYA MATRİSİ: GÜN GÜN KİŞİ
+# HÜCRE 13'ün plan tarafıyla aynı ölçü — birim KİŞİ, slot hesabı YOK.
+# HÜCRE 2'ye ve df_genel'e hiç dokunmaz.
 #
 # Beklenen kolonlar (kısmi kolonu OLMASA DA çalışır):
 #     data_date · vardiya · {queue}_in_kisi_sayisi · {queue}_out_kisi_sayisi
 #
-# Sonuçlar:  df_genel_2  (gün × slot)   ·   ozet_2[0] / ozet_2[1]  (profil)
+# Sonuçlar: kadro_2 (gün gün) · kadro_2_tipi (h.içi/h.sonu) · kadro_2_gun (Pzt…Paz)
 
-VARDIYA_2  = 'df_vardiya_2'      # değişken ADI (string) — kendi adını yaz
-YEAR_2     = YEAR                # farklı ay ise değiştir
-MONTH_2    = MONTH
-QUEUE_2    = QUEUE
-CAGRI_2    = True                # df_actual varsa çağrı da eklensin mi
-GRAFIK_2   = True                # profil grafiği de çizilsin mi
+VARDIYA_2 = 'df_vardiya_2'      # değişken ADI (string)
+YEAR_2    = YEAR
+MONTH_2   = MONTH
+QUEUE_2   = QUEUE
+KISMI_HARIC_2 = False           # True → kısmiler hafta içi sayılmasın
 
 if VARDIYA_2 in globals():
-    df_genel_2, ozet_2 = vardiya_profili(
+    kadro_2, kadro_2_tipi, kadro_2_gun = kadro_ozeti(
         globals()[VARDIYA_2], YEAR_2, MONTH_2, queue=QUEUE_2,
-        df_actual=df_actual if (CAGRI_2 and 'df_actual' in globals()) else None)
+        kismi_haftaici_haric=KISMI_HARIC_2)
 
-    kol = ['interval', 'kapasite_in', 'kapasite_out', 'kapasite_pt',
-           'kapasite_toplam', 'baslangic_in', 'baslangic_out',
-           'baslangic_toplam', 'cagri']
-    for hs, ad in ((0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')):
-        g = ozet_2[hs]
-        if g.empty:
-            print(f"{ad} — veri yok")
-            continue
-        print(f"\n{ad} — {int(g['gun_sayisi'].iloc[0])} gün ortalaması")
-        show(g[[k for k in kol if k in g]])
+    print("\nGÜN GÜN")
+    show(kadro_2)
 
-    if GRAFIK_2:
-        grafik_genel(df_genel_2, queue=f"{QUEUE_2.upper()} · {VARDIYA_2}",
-                     kirilim=True, y_adim=25)
+    print("\nGÜN TİPİNE GÖRE ORTALAMA")
+    show(kadro_2_tipi)
+
+    print("\nGÜN ADINA GÖRE ORTALAMA")
+    show(kadro_2_gun)
 else:
     print(f"{VARDIYA_2} yok — geniş formatlı tabloyu okuyup bu hücreyi çalıştır.\n"
           f"  örn: df_vardiya_2 = pd.read_excel('...')")
-
-
-# %% [HÜCRE 15B] — İKİ MATRİSİ YAN YANA (opsiyonel)
-# df_genel (HÜCRE 2) ile df_genel_2 (HÜCRE 15) slot slot karşılaştırılır.
-
-if 'df_genel_2' in globals() and 'df_genel' in globals():
-    for hs, ad in ((0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')):
-        print(f"\n{ad}")
-        show(slot_yan_yana(hs, ana=df_genel, ikinci=df_genel_2))
-else:
-    print("df_genel_2 / df_genel yok — HÜCRE 15 ve HÜCRE 2'yi çalıştır.")
