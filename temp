@@ -399,7 +399,16 @@ def model_tablosu(results, year, month, queue='kitle', verbose=True):
 # --------------------------------------------------------------------------
 
 def slot_profili(df, hafta_sonu=None, olcu='ortalama'):
-    """Slot bazlı profil — günler ortalanır (veya medyanı alınır)."""
+    """Slot bazlı profil — günler ortalanır (veya medyanı alınır).
+
+    Girdi plan_tablosu() / model_tablosu() çıktısı OLMALI (df_uzun DEĞİL).
+    """
+    eksik = [k for k in ['hafta_sonu', 'interval'] + OLCU_KOL if k not in df.columns]
+    if eksik:
+        raise KeyError(
+            f"slot_profili: {eksik} kolonu yok. Bu fonksiyon plan_tablosu() / "
+            f"model_tablosu() çıktısı bekler — df_uzun ya da ham Excel değil.\n"
+            f"  Gelen kolonlar: {list(df.columns)[:12]}")
     d = df if hafta_sonu is None else df[df['hafta_sonu'] == hafta_sonu]
     if d.empty:
         return pd.DataFrame()
@@ -664,25 +673,42 @@ def grafik_fark(df_plan, df_model, queue='KİTLE', olcu='ortalama',
 
 
 # %% [HÜCRE 2] — KONFİG + PLAN
-# df_vardiya: geniş formatlı Excel. Ayın 1'inin gecesi için ÖNCEKİ AYIN SON
-# GÜNÜ de veride olmalı (yoksa uyarı basılır).
+# GİRDİ: ham geniş Excel. Değişken adı 'df_vardiya' VEYA 'df_plan' olabilir.
+# ÇIKTI: plan_slot (gün × slot)  ·  df_uzun (uzun şema)
+#
+# NOT: Ayın 1'inin GECE slotları için ÖNCEKİ AYIN SON GÜNÜ de Excel'de olmalı
+#      (örn. Eylül için 31 Ağustos). Yoksa uyarı basılır.
 
 YEAR  = 2026
 MONTH = 9
 QUEUE = 'kitle'
 
-if 'df_vardiya' in globals():
-    df_uzun = vardiya_genis_uzun(df_vardiya, queue=QUEUE)
-    df_plan = plan_tablosu(df_uzun, YEAR, MONTH)
-    print(f"✓ df_plan: {len(df_plan):,} satır "
-          f"({df_plan['data_date'].nunique()} gün × 48 slot)")
-    show(df_plan, 5)
+# --- ham Excel'i bul: df_vardiya veya df_plan ---
+_ham = None
+for _ad in ('df_vardiya', 'df_plan_ham', 'df_plan'):
+    _o = globals().get(_ad)
+    if isinstance(_o, pd.DataFrame) and _resolve_col(
+            _o, [f"{QUEUE}_in_kisi_sayisi", f"{QUEUE}_kisi_sayisi",
+                 f"{QUEUE}_out_kisi_sayisi"]):
+        _ham, _ham_ad = _o, _ad
+        break
+
+if _ham is not None:
+    print(f"ham Excel: {_ham_ad}  ({len(_ham):,} satır)")
+    df_uzun = vardiya_genis_uzun(_ham, queue=QUEUE)
+    plan_slot = plan_tablosu(df_uzun, YEAR, MONTH)
+    print(f"✓ plan_slot: {len(plan_slot):,} satır "
+          f"({plan_slot['data_date'].nunique()} gün × 48 slot)")
+    show(plan_slot, 5)
 else:
-    print("df_vardiya yok — Excel'i okuyup bu hücreyi çalıştır.\n"
-          "  örn: df_vardiya = pd.read_excel('...')")
+    print("Geniş formatlı Excel bulunamadı.\n"
+          f"  Aranan değişkenler: df_vardiya · df_plan_ham · df_plan\n"
+          f"  Aranan kolon: {QUEUE}_in_kisi_sayisi (veya {QUEUE}_kisi_sayisi)\n"
+          "  örn: df_vardiya = pd.read_excel('matris_duzenlenmis_099.xlsx')")
 
 
 # %% [HÜCRE 3] — MODEL (pickle)
+# ÇIKTI: model_slot (gün × slot)  ·  results (ham pickle)
 
 PKL_PATH = ""            # örn. "/opt/app-root/src/.../monthly_v9_2026_09.pkl"
 
@@ -695,26 +721,26 @@ else:
         results = pickle.load(f)
     print(f"pickle yüklendi: {len(results)} gün  |  aylar: "
           f"{sorted({pd.to_datetime(ds).strftime('%Y-%m') for ds in results})}")
-    df_model = model_tablosu(results, YEAR, MONTH, queue=QUEUE)
-    print(f"✓ df_model: {len(df_model):,} satır")
-    show(df_model, 5)
+    model_slot = model_tablosu(results, YEAR, MONTH, queue=QUEUE)
+    print(f"✓ model_slot: {len(model_slot):,} satır")
+    show(model_slot, 5)
 
 
 # %% [HÜCRE 4] — GRAFİK: PLAN vs MODEL
 
-if 'df_plan' in globals() and 'df_model' in globals():
-    grafik_plan_model(df_plan, df_model, queue=QUEUE.upper(), y_adim=25)
-    grafik_fark(df_plan, df_model, queue=QUEUE.upper(), y_adim=25)
+if 'plan_slot' in globals() and 'model_slot' in globals():
+    grafik_plan_model(plan_slot, model_slot, queue=QUEUE.upper(), y_adim=25)
+    grafik_fark(plan_slot, model_slot, queue=QUEUE.upper(), y_adim=25)
 else:
-    print("df_plan / df_model yok — HÜCRE 2 ve HÜCRE 3'ü çalıştır.")
+    print("plan_slot / model_slot yok — HÜCRE 2 ve HÜCRE 3'ü çalıştır.")
 
 
 # %% [HÜCRE 5] — SAYISAL: SLOT BAZINDA FARK
 
-if 'df_plan' in globals() and 'df_model' in globals():
-    show(slot_farki(df_plan, df_model))
+if 'plan_slot' in globals() and 'model_slot' in globals():
+    show(slot_farki(plan_slot, model_slot))
 else:
-    print("df_plan / df_model yok — HÜCRE 2 ve HÜCRE 3'ü çalıştır.")
+    print("plan_slot / model_slot yok — HÜCRE 2 ve HÜCRE 3'ü çalıştır.")
 
 
 # %% [HÜCRE 6] — GÜN GÜN KİŞİ  (slot değil, kişi sayısı)
