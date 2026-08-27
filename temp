@@ -2353,8 +2353,8 @@ else:
 #           kadro_2_tipi (ay geneli h.içi/h.sonu) · kadro_2_gun (Pzt…Paz)
 
 VARDIYA_2 = 'df_vardiya_2'      # değişken ADI (string)
-YEAR_2    = YEAR
-MONTH_2   = MONTH
+YEAR_2    = 2026
+MONTH_2   = 9                   # EYLÜL — HÜCRE 2'nin ayından bağımsız
 QUEUE_2   = QUEUE
 KISMI_HARIC_2 = False           # True → kısmiler hafta içi sayılmasın
 
