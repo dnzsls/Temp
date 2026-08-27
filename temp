@@ -2342,38 +2342,60 @@ else:
     print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
 
 
-# %% [HÜCRE 15] — BAŞKA BİR VARDİYA MATRİSİ: GÜN GÜN KİŞİ
+# %% [HÜCRE 15] — BAŞKA BİR VARDİYA MATRİSİ: GÜN GÜN KİŞİ  (çok kuyruklu)
 # HÜCRE 13'ün plan tarafıyla aynı ölçü — birim KİŞİ, slot hesabı YOK.
 # HÜCRE 2'ye ve df_genel'e hiç dokunmaz.
 #
-# Beklenen kolonlar (kısmi kolonu OLMASA DA çalışır):
-#     data_date · vardiya · {queue}_in_kisi_sayisi · {queue}_out_kisi_sayisi
+# Beklenen kolonlar (kuyruk başına; kısmi kolonu OLMASA DA çalışır):
+#     kitle    → kitle_in_kisi_sayisi · kitle_out_kisi_sayisi · kitle_kismi_kisi_sayisi
+#     gold     → gold_kisi_sayisi        (in/out ayrımı yok → hepsi 'in' sayılır)
+#     kurumsal → kurumsal_kisi_sayisi    (aynı)
 #
-# Sonuçlar: kadro_2 (gün gün) · kadro_2_hafta (ISO hafta × gün tipi)
-#           kadro_2_tipi (ay geneli h.içi/h.sonu) · kadro_2_gun (Pzt…Paz)
+# Sonuçlar SÖZLÜK olarak gelir, kuyruk adıyla:
+#     kadro_2['gold'] · kadro_2_hafta['gold'] · kadro_2_tipi['gold'] · kadro_2_gun['gold']
 
-VARDIYA_2 = 'df_vardiya_2'      # değişken ADI (string)
-YEAR_2    = 2026
-MONTH_2   = 9                   # EYLÜL — HÜCRE 2'nin ayından bağımsız
-QUEUE_2   = QUEUE
-KISMI_HARIC_2 = False           # True → kısmiler hafta içi sayılmasın
+VARDIYA_2     = 'df_vardiya_2'      # değişken ADI (string)
+YEAR_2        = 2026
+MONTH_2       = 9                   # EYLÜL — HÜCRE 2'nin ayından bağımsız
+KUYRUKLAR_2   = ['kitle', 'gold', 'kurumsal']
+KISMI_HARIC_2 = False               # True → kısmiler hafta içi sayılmasın
 
 if VARDIYA_2 in globals():
-    kadro_2, kadro_2_tipi, kadro_2_gun, kadro_2_hafta = kadro_ozeti(
-        globals()[VARDIYA_2], YEAR_2, MONTH_2, queue=QUEUE_2,
-        kismi_haftaici_haric=KISMI_HARIC_2)
+    kadro_2, kadro_2_tipi, kadro_2_gun, kadro_2_hafta = {}, {}, {}, {}
 
-    print("\nGÜN GÜN")
-    show(kadro_2)
+    for _q in KUYRUKLAR_2:
+        print(f"\n{'='*70}\n{_q.upper()}\n{'='*70}")
+        try:
+            kadro_2[_q], kadro_2_tipi[_q], kadro_2_gun[_q], kadro_2_hafta[_q] = \
+                kadro_ozeti(globals()[VARDIYA_2], YEAR_2, MONTH_2, queue=_q,
+                            kismi_haftaici_haric=KISMI_HARIC_2)
+        except (KeyError, ValueError) as e:
+            print(f"  ⚠ atlandı — {e}")
+            continue
 
-    print("\nISO HAFTA × GÜN TİPİ  (gün ortalaması + hafta toplamı)")
-    show(kadro_2_hafta)
+        print(f"\n[{_q}] GÜN GÜN")
+        show(kadro_2[_q])
+        print(f"\n[{_q}] ISO HAFTA × GÜN TİPİ  (gün ortalaması + hafta toplamı)")
+        show(kadro_2_hafta[_q])
+        print(f"\n[{_q}] AY GENELİ — GÜN TİPİNE GÖRE ORTALAMA")
+        show(kadro_2_tipi[_q])
+        print(f"\n[{_q}] GÜN ADINA GÖRE ORTALAMA")
+        show(kadro_2_gun[_q])
 
-    print("\nAY GENELİ — GÜN TİPİNE GÖRE ORTALAMA")
-    show(kadro_2_tipi)
+    # --- TÜM KUYRUKLAR YAN YANA ---
+    if kadro_2_tipi:
+        print(f"\n{'='*70}\nTÜM KUYRUKLAR — AY GENELİ (gün ortalaması, kişi)\n{'='*70}")
+        _t = pd.concat([t.assign(kuyruk=q) for q, t in kadro_2_tipi.items()],
+                       ignore_index=True)
+        show(_t[['kuyruk', 'gun_tipi', 'gun_sayisi', 'in', 'out', 'pt', 'toplam']])
 
-    print("\nGÜN ADINA GÖRE ORTALAMA")
-    show(kadro_2_gun)
+        print("\nTÜM KUYRUKLAR — ISO HAFTA × GÜN TİPİ (gün ortalaması, kişi)")
+        _h = pd.concat([h.assign(kuyruk=q) for q, h in kadro_2_hafta.items()],
+                       ignore_index=True)
+        show(_h.pivot_table(index=['iso_hafta', 'hafta_basi', 'gun_tipi'],
+                            columns='kuyruk', values='toplam')
+               .reindex(columns=KUYRUKLAR_2).reset_index()
+               .sort_values(['hafta_basi', 'gun_tipi']))
 else:
     print(f"{VARDIYA_2} yok — geniş formatlı tabloyu okuyup bu hücreyi çalıştır.\n"
           f"  örn: df_vardiya_2 = pd.read_excel('...')")
