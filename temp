@@ -303,10 +303,11 @@ def kadro_ozeti(df_genis, year, month, queue='kitle',
     Kısmi kolonu ({queue}_kismi_kisi_sayisi) yoksa pt kolonu 0 kalır.
     kismi_haftaici_haric=True → kısmiler hafta içi günlerde sayılmaz.
 
-    Çıktı: (gun_gun, gun_tipi, gun_adi)
+    Çıktı: (gun_gun, gun_tipi, gun_adi, hafta)
       gun_gun  → data_date · gun · hafta_sonu · in · out · pt · toplam
-      gun_tipi → hafta içi / hafta sonu ortalaması
+      gun_tipi → hafta içi / hafta sonu ortalaması (ay geneli)
       gun_adi  → Pzt…Paz ortalaması
+      hafta    → ISO HAFTA × gün tipi — hafta hafta seyir
     """
     u = vardiya_genis_uzun(df_genis, queue=queue, verbose=verbose)
     u['sirket'] = _company(u['working_main_group'])
@@ -336,7 +337,13 @@ def kadro_ozeti(df_genis, year, month, queue='kitle',
     g = g.reset_index()
     g['gun'] = g['data_date'].dt.weekday.map(lambda i: GUN_TR[i])
     g['hafta_sonu'] = (g['data_date'].dt.weekday >= 5).astype(int)
-    g = g[['data_date', 'gun', 'hafta_sonu', 'in', 'out', 'pt', 'toplam']]
+    iso = g['data_date'].dt.isocalendar()
+    g['iso_hafta'] = iso['year'].astype(int).astype(str) + '-H' + \
+                     iso['week'].astype(int).astype(str).str.zfill(2)
+    g['hafta_basi'] = g['data_date'] - pd.to_timedelta(
+        g['data_date'].dt.weekday, unit='D')
+    g = g[['data_date', 'gun', 'iso_hafta', 'hafta_basi', 'hafta_sonu',
+           'in', 'out', 'pt', 'toplam']]
 
     dolu = g[g['toplam'] > 0]
     gun_tipi = (dolu.groupby('hafta_sonu')[['in', 'out', 'pt', 'toplam']]
@@ -354,6 +361,17 @@ def kadro_ozeti(df_genis, year, month, queue='kitle',
     gun_adi.insert(1, 'gun_sayisi',
                    dolu.groupby('gun')['toplam'].count().reindex(GUN_TR).values)
 
+    # --- ISO HAFTA × GÜN TİPİ ---
+    hafta = (dolu.groupby(['iso_hafta', 'hafta_basi', 'hafta_sonu'])
+                 .agg(gun_sayisi=('toplam', 'count'),
+                      **{k: (k, 'mean') for k in ('in', 'out', 'pt', 'toplam')},
+                      kisi_gun=('toplam', 'sum'))
+                 .round(1).reset_index())
+    hafta['gun_tipi'] = hafta['hafta_sonu'].map({0: 'hafta içi', 1: 'hafta sonu'})
+    hafta = hafta[['iso_hafta', 'hafta_basi', 'gun_tipi', 'gun_sayisi',
+                   'in', 'out', 'pt', 'toplam', 'kisi_gun']]
+    hafta = hafta.sort_values(['hafta_basi', 'gun_tipi']).reset_index(drop=True)
+
     if verbose:
         bos = g[g['toplam'] == 0]
         if len(bos):
@@ -363,7 +381,12 @@ def kadro_ozeti(df_genis, year, month, queue='kitle',
             print(f"  {r['gun_tipi']:<10} {int(r['gun_sayisi']):>2} gün  |  "
                   f"in {r['in']:>6.1f} · out {r['out']:>6.1f} · "
                   f"pt {r['pt']:>5.1f}  →  toplam {r['toplam']:>6.1f} kişi")
-    return g, gun_tipi, gun_adi
+        eksik_h = hafta[hafta['gun_sayisi'] < hafta.groupby('gun_tipi')
+                        ['gun_sayisi'].transform('max')]
+        if len(eksik_h):
+            print(f"  ℹ {len(eksik_h)} hafta-satırı EKSİK GÜNLÜ (ay sınırında "
+                  f"kesilmiş): {', '.join(eksik_h['iso_hafta'].unique())}")
+    return g, gun_tipi, gun_adi, hafta
 
 
 def vardiya_listesi(df_vardiya, cols=None):
@@ -2326,7 +2349,8 @@ else:
 # Beklenen kolonlar (kısmi kolonu OLMASA DA çalışır):
 #     data_date · vardiya · {queue}_in_kisi_sayisi · {queue}_out_kisi_sayisi
 #
-# Sonuçlar: kadro_2 (gün gün) · kadro_2_tipi (h.içi/h.sonu) · kadro_2_gun (Pzt…Paz)
+# Sonuçlar: kadro_2 (gün gün) · kadro_2_hafta (ISO hafta × gün tipi)
+#           kadro_2_tipi (ay geneli h.içi/h.sonu) · kadro_2_gun (Pzt…Paz)
 
 VARDIYA_2 = 'df_vardiya_2'      # değişken ADI (string)
 YEAR_2    = YEAR
@@ -2335,14 +2359,17 @@ QUEUE_2   = QUEUE
 KISMI_HARIC_2 = False           # True → kısmiler hafta içi sayılmasın
 
 if VARDIYA_2 in globals():
-    kadro_2, kadro_2_tipi, kadro_2_gun = kadro_ozeti(
+    kadro_2, kadro_2_tipi, kadro_2_gun, kadro_2_hafta = kadro_ozeti(
         globals()[VARDIYA_2], YEAR_2, MONTH_2, queue=QUEUE_2,
         kismi_haftaici_haric=KISMI_HARIC_2)
 
     print("\nGÜN GÜN")
     show(kadro_2)
 
-    print("\nGÜN TİPİNE GÖRE ORTALAMA")
+    print("\nISO HAFTA × GÜN TİPİ  (gün ortalaması + hafta toplamı)")
+    show(kadro_2_hafta)
+
+    print("\nAY GENELİ — GÜN TİPİNE GÖRE ORTALAMA")
     show(kadro_2_tipi)
 
     print("\nGÜN ADINA GÖRE ORTALAMA")
