@@ -4328,26 +4328,106 @@ display(ozet_saat)
 # %% [HÜCRE 29] — EXCEL ÇIKTISI (roster + plan_vs_gerçekleşen) ──────────
 # Sheet1 "roster"           : roster_2 (agent × gün çizelge + flag + calisma/mesai/off özet)
 # Sheet2 "plan_vs_gerceklesen": her kova için PLANLANAN (Stage-1 talebi) vs
-#                              GERÇEKLEŞEN (kişi atamasından sonra) + fark.
+#                              GERÇEKLEŞEN (kişi atamasından sonra) + fark
+#                              + norm/telafi/mesai kırılımı (kovaya atananlar).
+# Sheet3 "gun_ozet"          : gün toplamı + o günün off/off_t/off_t2/izin kişi
+#                              sayısı + norm/telafi/mesai kişi sayısı.
 XLSX_PATH = f"roster_{QUEUE}_{AY_YIL}_{AY_AY:02d}.xlsx"     # çıktı dosyası (dilediğin yolu ver)
+
+# ── GÜN KATEGORİSİ: norm / telafi / mesai (Sheet2 + Sheet3 ortak) ─────
+# LEJANT'taki renklerle ve H31'in _mesai_mi() fonksiyonuyla BİREBİR aynı kural.
+# Ayrı ayrı yazılırsa Excel'deki renk ile buradaki sayı zamanla ayrışır.
+#   norm   = hafta sonu çalışma, AYNI HAFTA hafta içi off'unun karşılığı
+#            → kota İÇİNDE, ücretli mesai DEĞİL
+#   telafi = hafta sonu çalışma, BAŞKA haftadaki fazla off'un telafisi
+#            → o da ücretli mesai DEĞİL
+#   mesai  = ÜCRETLİ mesai — üç kaynak birden:
+#              hafta sonu (norm/telafi olmayan) + resmi tatilde çalışma
+#              + arife tam gün (kısıtlı OLMAYAN agent; kısıtlının 9-13'ü mesai değil)
+#   normal = sıradan hafta içi çalışma
+def _gun_kat29(a, ds):
+    """(agent, gün) → 'norm' | 'telafi' | 'mesai' | 'normal'"""
+    d = dt.date.fromisoformat(ds)
+    if d in TATIL:                                   # LEJANT: RESMİ TATİL MESAİ
+        return "mesai"
+    if d in ARIFE and a not in arife_kisitli:        # LEJANT: ARİFE MESAİ
+        return "mesai"
+    if d.weekday() < 5:
+        return "normal"
+    if (a, ds) in _norm_hucre:                       # H22'de hesaplandı
+        return "norm"
+    if (a, ds) in _telafi_hucre:
+        return "telafi"
+    return "mesai"
+
 
 # Sheet2 verisi: (gün, vardiya) → planlanan talep vs gerçekleşen atama
 # (ARIFE_YARIM talep'te olmadığı için otomatik hariç → sadece gerçek kovalar)
+# norm/telafi/mesai kolonları: O KOVAYA atanan kişiler arasındaki kırılım.
+# Hafta içi kovalarda üçü de 0 çıkar (norm/mesai hafta sonu kavramı) — resmi
+# tatil ve arife günleri istisna, orada hafta içi kovada da mesai görünür.
 _satir = []
 for (ds, v), kisi in talep.items():
-    atanan = sum(1 for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1)
+    _atananlar = [a for a in AGENTS
+                  if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1]
+    _k29 = {"norm": 0, "telafi": 0, "mesai": 0, "normal": 0}
+    for a in _atananlar:
+        _k29[_gun_kat29(a, ds)] += 1
     bas, bit = saat[(ds, v)]
     _satir.append({"tarih": ds,
                    "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
                    "vardiya": v, "saat": f"{bas}-{bit}",
-                   "planlanan": kisi, "gerceklesen": atanan, "fark": atanan - kisi})
+                   "planlanan": kisi, "gerceklesen": len(_atananlar),
+                   "fark": len(_atananlar) - kisi,
+                   "norm_kisi": _k29["norm"], "telafi_kisi": _k29["telafi"],
+                   "mesai_kisi": _k29["mesai"]})
 df_plan_gercek = pd.DataFrame(_satir).sort_values(["tarih", "saat"]).reset_index(drop=True)
 
 # Sheet3: GÜN SONU — her gün toplam ihtiyaç (planlanan) vs gerçekleşen + fark
+#         + o günün KİŞİ kırılımı (off/izin türleri, norm/telafi/mesai).
+# BİRİM UYARISI: planlanan/gerceklesen KOVA toplamıdır (kişi-slot); bir agent
+# günde 1 kovada olduğu için pratikte kişi sayısına eşit, ama kaynağı farklı.
+# off/izin kolonları doğrudan KİŞİ sayar (roster hücresinden).
+# norm/telafi/mesai kova toplamından gelir — H11 (günde ≤1 vardiya) sayesinde
+# aynı kişi iki kez sayılmaz.
 df_gun_ozet = (df_plan_gercek.groupby(["tarih", "gun"], as_index=False)
-               [["planlanan", "gerceklesen"]].sum())
+               [["planlanan", "gerceklesen",
+                 "norm_kisi", "telafi_kisi", "mesai_kisi"]].sum())
 df_gun_ozet["fark"] = df_gun_ozet["gerceklesen"] - df_gun_ozet["planlanan"]
+
+# o gün KAÇ KİŞİ off / off_t / off_t2 / izin — roster hücresinden birebir.
+# off_t_verilemeyen AYRI: o kişi o gün ÇALIŞTI (off kolonlarına girmez, çalışan
+# sayısına girer) — Excel'de KIRMIZI hücre olarak görünen gün.
+# calisan_kisi arife yarım vardiyasını DA sayar (roster'da saat yazıyor) →
+# aşağıdaki sağlama identitesi bu yüzden tutar.
+_gunluk29 = {}
+for _ds29 in df_gun_ozet["tarih"]:
+    _c29 = {"off": 0, "off_t": 0, "off_t2": 0, "izin": 0,
+            "off_t_verilemeyen": 0, "calisan_kisi": 0}
+    for a in AGENTS:
+        _h29 = roster.at[a, _ds29]
+        if _h29 in ("off", "off_t", "off_t2", "izin"):
+            _c29[_h29] += 1
+        else:
+            _c29["calisan_kisi"] += 1                # saat yazıyorsa çalışmış
+        if (a, _ds29) in offt_karsilanmadi:
+            _c29["off_t_verilemeyen"] += 1
+    _gunluk29[_ds29] = _c29
+for _k29 in ("calisan_kisi", "off", "off_t", "off_t_verilemeyen", "off_t2", "izin"):
+    df_gun_ozet[_k29] = [_gunluk29[_d29][_k29] for _d29 in df_gun_ozet["tarih"]]
 df_gun_ozet = df_gun_ozet.sort_values("tarih").reset_index(drop=True)
+
+# SAĞLAMA: calisan + off + off_t + off_t2 + izin = toplam agent (her gün).
+# Tutmuyorsa roster'da tanınmayan bir hücre değeri var demektir.
+_sag29 = (df_gun_ozet[["calisan_kisi", "off", "off_t", "off_t2", "izin"]].sum(axis=1)
+          != len(AGENTS))
+if _sag29.any():
+    print(f"  ⚠ gun_ozet sağlaması {int(_sag29.sum())} günde tutmadı "
+          f"(calisan+off+off_t+off_t2+izin ≠ {len(AGENTS)}): "
+          f"{df_gun_ozet.loc[_sag29, 'tarih'].tolist()[:5]}")
+else:
+    print(f"  ✓ gun_ozet sağlaması: her gün calisan+off+off_t+off_t2+izin = "
+          f"{len(AGENTS)} agent")
 
 # Sheet5: TAKIM × VARDİYA — vardiya başına TEK hücre: "geçmiş+bu ay"
 # "Bu takım 00:00'ı bugüne kadar kaç GÜN yapmış?" sorusunun tek tabloda cevabı.
@@ -4646,7 +4726,13 @@ print(f"  Sheet1 'roster': {roster_xl.shape[0]} agent × {roster_xl.shape[1]} ko
 print(f"  Sheet2 'plan_vs_gerceklesen': {df_plan_gercek.shape[0]} kova "
       f"(planlanan toplam {df_plan_gercek['planlanan'].sum()}, "
       f"gerçekleşen {df_plan_gercek['gerceklesen'].sum()})")
-print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen)")
+print(f"  Sheet3 'gun_ozet': {df_gun_ozet.shape[0]} gün (günlük ihtiyaç vs gerçekleşen "
+      f"+ off/izin kırılımı + norm/telafi/mesai)  |  ay toplamı: "
+      f"norm {int(df_gun_ozet['norm_kisi'].sum())}, "
+      f"telafi {int(df_gun_ozet['telafi_kisi'].sum())}, "
+      f"mesai {int(df_gun_ozet['mesai_kisi'].sum())} kişi-gün  |  "
+      f"off {int(df_gun_ozet['off'].sum())}, off_t {int(df_gun_ozet['off_t'].sum())}, "
+      f"off_t2 {int(df_gun_ozet['off_t2'].sum())}, izin {int(df_gun_ozet['izin'].sum())}")
 print(f"  Sheet4 'takim_vardiya': {len(takimlar)} takım × {len(_vardiya_kol)} vardiya "
       f"(hücre = 'geçmiş+bu ay', birim GÜN, bu ay hafta içi; "
       f"tavan {len({ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5})} gün)"
