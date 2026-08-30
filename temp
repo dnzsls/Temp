@@ -22,7 +22,7 @@
 #   VARDİYA BAŞLANGICI = o slotta KAÇ KİŞİ İŞE BAŞLIYOR (sadece ilk slot)
 #
 # Hücreler: 1 fonksiyonlar · 2 plan · 3 model · 4 grafik · 5 slot farkı ·
-#           6 gün gün kişi
+#           6 gün gün kişi · 7 hafta hafta kişi
 # =============================================================================
 
 # %% [HÜCRE 1] — FONKSİYONLAR
@@ -517,6 +517,87 @@ def gunluk_kisi(df_uzun, results, year, month, queue='kitle', verbose=True):
     return out
 
 
+def haftalik_kisi(df_kisi, verbose=True):
+    """Ardışık HAFTA İÇİ / HAFTA SONU BLOKLARINA göre plan-model ortalaması.
+
+    Girdi: gunluk_kisi() çıktısı (kişi bazında, slot hesabı yok).
+
+    Gruplama ISO haftası DEĞİL, BLOK bazlıdır: Pzt–Cum bir satır, onu izleyen
+    Cmt–Paz ayrı satır. ISO hafta numarası yalnızca etikete yazılır
+    ("1. hafta ici (ISO 36)"). Ay sınırında kesilen blok kısa kalır — kaç gün
+    olduğunu 'gun' kolonu söyler.
+
+    İki tarafta da 0 olan günler (model koşmamış / plan yok) ortalamaya
+    GİRMEZ; blok sırası yine tam takvim üzerinden sayılır.
+
+    Çıktı: etiket · _tur · aralik · gun · hafta_sonu ·
+           model_in/out/pt/toplam · plan_in/out/pt/toplam · fark
+    """
+    gerek = ['data_date', 'hafta_sonu', 'plan_toplam', 'model_toplam']
+    eksik = [k for k in gerek if k not in df_kisi.columns]
+    if eksik:
+        raise KeyError(f"haftalik_kisi: {eksik} kolonu yok. Bu fonksiyon "
+                       f"gunluk_kisi() çıktısı bekler.\n"
+                       f"  Gelen kolonlar: {list(df_kisi.columns)[:12]}")
+
+    d = df_kisi.copy()
+    d['data_date'] = pd.to_datetime(d['data_date'])
+    d = d.sort_values('data_date').reset_index(drop=True)
+
+    hs = d['data_date'].dt.weekday >= 5
+    d['_blok'] = (hs != hs.shift()).cumsum()
+    d['_tur'] = hs.map({False: 'hafta ici', True: 'hafta sonu'})
+    d['_iso'] = d['data_date'].dt.isocalendar().week.astype(int)
+
+    # blok sırası TAM takvimden — boş gün elemesi "2. hafta ici"yi kaydırmasın
+    _bt = d.groupby('_blok')['_tur'].first()
+    d['_sira'] = d['_blok'].map(_bt.groupby(_bt).cumcount() + 1)
+
+    dolu = d[(d['plan_toplam'] > 0) | (d['model_toplam'] > 0)]
+    if dolu.empty:
+        if verbose:
+            print("  ⚠ plan ve model her günde 0 — haftalık özet boş.")
+        return pd.DataFrame()
+    if verbose and len(dolu) < len(d):
+        bos = d.loc[d.index.difference(dolu.index), 'data_date']
+        print(f"  ℹ {len(bos)} gün iki tarafta da 0 — ortalamaya girmedi: "
+              f"{', '.join(bos.dt.strftime('%d.%m'))}")
+
+    sayisal = [c for c in dolu.columns
+               if c.startswith(('plan_', 'model_')) or c == 'fark']
+    ozet = (dolu.groupby(['_blok', '_tur'])
+                .agg(bas=('data_date', 'min'), bit=('data_date', 'max'),
+                     gun=('data_date', 'size'),
+                     iso=('_iso', 'min'), sira=('_sira', 'first'),
+                     hafta_sonu=('hafta_sonu', 'first'),
+                     **{c: (c, 'mean') for c in sayisal})
+                .reset_index().sort_values('bas'))
+
+    ozet['etiket'] = (ozet['sira'].astype(str) + '. ' + ozet['_tur']
+                      + ' (ISO ' + ozet['iso'].astype(str) + ')')
+    ozet['aralik'] = (ozet['bas'].dt.strftime('%d.%m') + '–'
+                      + ozet['bit'].dt.strftime('%d.%m'))
+    ozet[sayisal] = ozet[sayisal].round(1)
+    ozet = ozet.drop(columns=['_blok', 'bas', 'bit', 'iso', 'sira'])
+    on = ['etiket', '_tur', 'aralik', 'gun', 'hafta_sonu']
+    ozet = ozet[on + [c for c in ozet.columns if c not in on]]
+    ozet = ozet.reset_index(drop=True)
+
+    if verbose:
+        for tur in ('hafta ici', 'hafta sonu'):
+            a = ozet[ozet['_tur'] == tur]
+            if len(a):
+                print(f"  {tur:<10} {len(a)} blok  |  "
+                      f"model {a['model_toplam'].mean():>6.1f} kişi  |  "
+                      f"plan {a['plan_toplam'].mean():>6.1f} kişi  |  "
+                      f"fark {a['fark'].mean():>+6.1f}")
+        kisa = ozet[ozet['gun'] < ozet.groupby('_tur')['gun'].transform('max')]
+        if len(kisa):
+            print(f"  ℹ {len(kisa)} blok EKSİK GÜNLÜ (ay sınırında kesilmiş): "
+                  f"{', '.join(kisa['etiket'])}")
+    return ozet
+
+
 # --------------------------------------------------------------------------
 # GRAFİK
 # --------------------------------------------------------------------------
@@ -757,3 +838,14 @@ if all(k in globals() for k in ('df_uzun', 'results')):
     show(ozet)
 else:
     print("df_uzun / results yok — HÜCRE 2 ve HÜCRE 3'ü çalıştır.")
+
+
+# %% [HÜCRE 7] — HAFTA HAFTA KİŞİ  (blok bazlı: hafta içi / hafta sonu)
+# Gün gün tabloyu ardışık hafta içi ve hafta sonu bloklarına böler.
+# Etikette ISO hafta numarası var ama gruplama blok bazlı.
+
+if 'df_kisi' in globals():
+    df_hafta = haftalik_kisi(df_kisi)
+    show(df_hafta)
+else:
+    print("df_kisi yok — HÜCRE 6'yı çalıştır.")
