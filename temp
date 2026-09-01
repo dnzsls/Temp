@@ -634,7 +634,16 @@ def run_month_forecast(year, month, df_forecast, df_shifts_dict,
         cfg_weekday = copy.deepcopy(cfg_weekday)
         _tk = cfg_weekday.setdefault('surplus_distribution', {}).setdefault('total_kadro', {})
         for _q, _per_week in kadro_turetilen.items():
-            _tk.setdefault(_q, {})['outsource'] = _per_week
+            _q_cfg = _tk.setdefault(_q, {})
+            _eski = _q_cfg.get('outsource')
+            # MEVCUT girişi KORU, türetilen haftaları ÜZERİNE yaz — doğrudan ATAMA DEĞİL.
+            # Sebep: türetilen sözlükte yalnızca hesaplanabilen hafta_N'ler var, 'default'
+            # YOK. Düz atasaydık, adam-günü girilmemiş bir hafta _resolve_kadro'da
+            # 'default'a düşer, onu da bulamayıp 0 dönerdi → o hafta outsource kadro
+            # tavanı ve surplus doldurması SESSİZCE kapanırdı. Birleştirince elle
+            # girilmiş 'default' (ve türetilemeyen haftalar) yedek olarak kalır.
+            _q_cfg['outsource'] = ({**_eski, **_per_week} if isinstance(_eski, dict)
+                                   else dict(_per_week))
 
     # ---- 3) HAFTAİÇİ BLOKLARI ----
     for block in weekday_blocks:
@@ -729,56 +738,10 @@ else:
     print(f"\nKaydedildi: {CACHE_FILE}")
 
 
-# %% [HÜCRE 8] — Haftasonu İnhouse Bütçe Kontrolü (part-time HARİÇ)
-WEEKEND_BUDGET = {
-    'kitle':    1200,
-    'gold':     300,
-    'kurumsal': 120,
-}
-
-weekend_days = []
-for date_str in sorted(results.keys()):
-    d = pd.to_datetime(date_str)
-    if d.weekday() >= 5:
-        weekend_days.append((date_str, d.weekday()))
-
-print(f"\n{'='*100}")
-print(f"HAFTA SONU İNHOUSE BÜTÇE KONTROLÜ — {YEAR}/{MONTH:02d}  (part-time HARİÇ)")
-print(f"{'='*100}")
-
-print(f"{'Kuyruk':<10} ", end='')
-for date_str, wd in weekend_days:
-    label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
-    print(f"{label:>7}", end=' ')
-print(f"{'Toplam':>8} {'Bütçe':>7} {'Durum':>12}")
-print('-' * 100)
-
-for queue, budget in WEEKEND_BUDGET.items():
-    inhouse_per_day = []
-    for date_str, _ in weekend_days:
-        r = results.get(date_str)
-        if r and queue in r and r[queue] is not None:
-            mi = r[queue]['mip_info']
-            inhouse_ft = mi.get('total_inhouse_kisi', 0) - mi.get('total_part_time_kisi', 0)
-            inhouse_ft = max(0, inhouse_ft)
-        else:
-            inhouse_ft = 0
-        inhouse_per_day.append(inhouse_ft)
-
-    total = sum(inhouse_per_day)
-    diff = total - budget
-    if diff > 0:
-        status = f"+{diff} AŞIM ✗"
-    else:
-        status = f"{diff:+d} OK ✓"
-
-    print(f"{queue:<10} ", end='')
-    for v in inhouse_per_day:
-        print(f"{v:>7}", end=' ')
-    print(f"{total:>8} {budget:>7} {status:>12}")
-
-print('-' * 100)
-print("Not: total_inhouse_kisi'den total_part_time_kisi çıkarılarak hesaplandı.")
+# %% [HÜCRE 8] — Plan özet + vardiya planı (ortak fonksiyon)
+# V10: 'Haftasonu İnhouse Bütçe Kontrolü' KALDIRILDI (operasyon kararı,
+# 2026-09-01): WEEKEND_BUDGET sabitleri (kitle 1200 / gold 300 / kurumsal 120)
+# doğru bir ölçü değildi. Excel'deki 'Bütçe' sheet'i de aynı gerekçeyle kaldırıldı.
 
 
 # =============================================================================
@@ -952,11 +915,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 
 
-def export_monthly_plan_to_excel(results, year, month, weekend_budget,
+def export_monthly_plan_to_excel(results, year, month,
                                   cfg_weekday=None, cfg_weekend=None,
                                   queues=('kitle', 'gold', 'kurumsal'),
                                   output_path=None):
-    """Aylık vardiya planını + haftasonu bütçesini Excel'e yazar (forecast).
+    """Aylık vardiya planını Excel'e yazar (forecast).
 
     cfg_weekday / cfg_weekend: RR hesabı için hourly_report config'i gerekli
     (rapor_etkisi, kapasite_kaybi, cagri_adedi). Verilmezse Kap_RR çalışmaz.
@@ -1249,56 +1212,6 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
         col_letter = ws.cell(row=2, column=PT_SECTION_START + j).column_letter
         ws.column_dimensions[col_letter].width = pt_widths[j]
 
-    # Sheet 2: Haftasonu Bütçe
-    ws2 = wb.create_sheet('Bütçe')
-    weekend_days = [(d, pd.to_datetime(d).weekday()) for d in all_dates
-                    if pd.to_datetime(d).weekday() >= 5]
-
-    headers = ['Kuyruk']
-    for date_str, wd in weekend_days:
-        label = ('Cmt' if wd == 5 else 'Pzr') + date_str[-2:]
-        headers.append(label)
-    headers += ['Toplam', 'Bütçe', 'Fark', 'Durum']
-    for j, h in enumerate(headers, 1):
-        cell = ws2.cell(row=1, column=j, value=h)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
-        cell.border = border
-
-    row_idx = 2
-    for queue, budget in weekend_budget.items():
-        ws2.cell(row=row_idx, column=1, value=queue).border = border
-        total = 0
-        for j, (date_str, _) in enumerate(weekend_days, 2):
-            r = results.get(date_str)
-            if r and queue in r and r[queue]:
-                mi = r[queue]['mip_info']
-                inhouse_ft = max(0, mi.get('total_inhouse_kisi', 0)
-                                  - mi.get('total_part_time_kisi', 0))
-            else:
-                inhouse_ft = 0
-            cell = ws2.cell(row=row_idx, column=j, value=inhouse_ft)
-            cell.alignment = center
-            cell.border = border
-            total += inhouse_ft
-        diff = total - budget
-        status = 'AŞIM' if diff > 0 else 'OK'
-        last_cols = [total, budget, diff, status]
-        start_j = 2 + len(weekend_days)
-        for k, v in enumerate(last_cols):
-            cell = ws2.cell(row=row_idx, column=start_j + k, value=v)
-            cell.alignment = center
-            cell.border = border
-            if k == 3:
-                cell.font = Font(bold=True,
-                                  color='C00000' if status == 'AŞIM' else '006100')
-        row_idx += 1
-
-    ws2.column_dimensions['A'].width = 12
-    for j in range(2, len(headers) + 1):
-        col_letter = ws2.cell(row=1, column=j).column_letter
-        ws2.column_dimensions[col_letter].width = 9
 
     # =========================================================================
     # Sheet 3+: Haftalık detay sheet'leri (Hafta 1, Hafta 2, ...)
@@ -1333,8 +1246,6 @@ def export_monthly_plan_to_excel(results, year, month, weekend_budget,
     n_rows_plan = ws.max_row
     print(f"✓ Excel kaydedildi: {output_path}")
     print(f"  Sheet 'Vardiya Planı': {len(weeks)} hafta, {n_rows_plan} satır")
-    print(f"  Sheet 'Bütçe': {len(weekend_budget)} kuyruk, "
-          f"{len(weekend_days)} hafta sonu günü")
     print(f"  Haftalık detay sheet'leri: {n_weekly_sheets}")
     print(f"  Sheet 'RR Raporu': aylık")
     return output_path
@@ -1925,7 +1836,6 @@ export_monthly_plan_to_excel(
     results=results,
     year=YEAR,
     month=MONTH,
-    weekend_budget=WEEKEND_BUDGET,
     cfg_weekday=CONFIG_WEEKDAY,    # Kap_RR için hourly_report config'i
     cfg_weekend=CONFIG_WEEKEND,
     queues=('kitle', 'gold', 'kurumsal'),
