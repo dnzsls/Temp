@@ -338,9 +338,21 @@ CONFIG_WEEKDAY = {
         # Hafta anahtarı `_week_of_month` ile aynı (ay sınırına saygılı, Pzt başlangıçlı).
         # 2026 Eylül: hafta_1=1-6(4 h.içi) hafta_2=7-13(5) hafta_3=14-20(5)
         #             hafta_4=21-27(5) hafta_5=28-30(3)
-        # Bu anahtar VARSA total_kadro[queue]['outsource'] ELLE GİRİLMEZ — üzerine yazılır.
+        # ÖNCELİK: burada hafta_N VARSA total_kadro[...]['outsource'] üzerine YAZILIR.
+        # MANUEL kişi sayısına dönmek istersen (3 seviye):
+        #   tek hafta → o hafta_N'i buradan SİL ya da None yap
+        #   kuyruk    → o kuyruğu buradan sil
+        #   tamamen   → 'outsource_adam_gun' anahtarını hiç yazma (V9 davranışı)
+        # Türetilmeyen haftalar total_kadro'daki elle girilen değeri KORUR.
         # kurumsal/gold: outsource agent çalışmıyor → giriş yok.
         'outsource_adam_gun': {
+            # AÇMA/KAPAMA — hangi girişin kullanılacağını BU belirler:
+            #   True  → ADAM-GÜN girişi kullanılır, günlük kişi KODDA türetilir
+            #           ve total_kadro[...]['outsource'] üzerine yazılır.
+            #   False → türetme HİÇ çalışmaz; günlük KİŞİ SAYISI doğrudan
+            #           total_kadro[kuyruk]['outsource']'tan okunur (hafta_N/default).
+            # Anahtar yoksa True kabul edilir (geriye uyumlu).
+            'enabled': True,
             'kitle': {
                 'hafta_1': 1613,
                 'hafta_2': 1978,
@@ -356,9 +368,45 @@ CONFIG_WEEKDAY = {
         'outsource_adam_gun_pt_dahil': False,
 
         'total_kadro': {
-            'kitle':    {'inhouse': 380, 'outsource': 450},
-            'kurumsal': {'inhouse': 47},
-            'gold':     {'inhouse': 130},
+            'kitle':    {
+                'inhouse': {
+                    'hafta_1': 412,
+                    'hafta_2': 413,
+                    'hafta_3': 414,
+                    'hafta_4': 420,
+                    'hafta_5': 428,
+                    'default': 420,      # diğer haftalar
+                },
+                # OUTSOURCE — günlük KİŞİ sayısı. SÖZLÜK olmalı (düz sayı YAZMA):
+                #   enabled=True  → adam-günden türetilen bu değerlerin ÜZERİNE yazar;
+                #                   burası yalnızca adam-günü GİRİLMEMİŞ haftalar için
+                #                   yedektir. 'default' olmazsa o hafta 0'a düşer.
+                #   enabled=False → kişi sayısı DOĞRUDAN buradan okunur; hafta hafta
+                #                   gir, ör: 'hafta_1': 274, 'hafta_2': 287, ...
+                'outsource': {
+                    'default': 450,      # tüm haftalar (hafta_N yazılmadıkça)
+                },
+            },
+            'kurumsal': {
+                'inhouse': {
+                    'hafta_1': 47,
+                    'hafta_2': 49,
+                    'hafta_3': 46,
+                    'hafta_4': 44,
+                    'hafta_5': 48,
+                    'default': 52,       # diğer haftalar
+                },
+            },
+            'gold':     {
+                'inhouse': {
+                    'hafta_1': 115,
+                    'hafta_2': 112,
+                    'hafta_3': 112,
+                    'hafta_4': 116,
+                    'hafta_5': 124,
+                    'default': 129,      # diğer haftalar
+                },
+            },
         },
         'windows': [
             {'name': 'sabah', 'start': '09:00', 'end': '11:00', 'ratio': 2/3},
@@ -467,10 +515,34 @@ def _derive_outsource_kadro(results, weekday_blocks, config, queues, verbose=Tru
     dahil) — operasyonla teyit edildi (2026-09-01): outsource o gün de çalışıyor,
     ayrı bir ele alma gerekmiyor. Ör. 29 Ekim'de bölen 5 kalır.
 
+    AÇMA/KAPAMA — `outsource_adam_gun['enabled']`:
+      True  (varsayılan) → adam-günden TÜRET; total_kadro'daki outsource üzerine yazılır
+      False              → türetme hiç çalışmaz; günlük KİŞİ SAYISI doğrudan
+                           `total_kadro[queue]['outsource']`dan okunur (hafta_N / default)
+    Anahtar yoksa True kabul edilir (geriye uyumlu).
+
+    enabled=True iken ARA SEVİYELER (tek hafta / tek kuyruk manuel):
+      • tek hafta manuel : o `hafta_N`'i `outsource_adam_gun`dan sil ya da None yap
+      • kuyruk manuel    : o kuyruğu `outsource_adam_gun`dan sil
+    Türetilen değerler elle girilenin ÜZERİNE BİRLEŞTİRİLİR (atanmaz) — böylece
+    'default' ve türetilemeyen haftalar yedek olarak ayakta kalır. Bu yüzden
+    total_kadro[...]['outsource'] SÖZLÜK olmalı ve 'default' içermeli; düz sayı
+    yazılırsa birleşme olmaz, türetilemeyen hafta 0'a düşer.
+
     Returns: {queue: {'hafta_N': kadro, ...}} — boşsa {} (config yoksa no-op).
     """
     sd = config.get('surplus_distribution', {})
-    adam_gun_cfg = sd.get('outsource_adam_gun', {})
+    # KOPYA + pop: 'enabled' bir kuyruk adı DEĞİL, ayıklanmalı. Kopya alınıyor ki
+    # çağıranın config'i değişmesin.
+    adam_gun_cfg = dict(sd.get('outsource_adam_gun', {}) or {})
+    enabled = adam_gun_cfg.pop('enabled', True)   # anahtar yoksa AÇIK (geriye uyumlu)
+    if not enabled:
+        if verbose:
+            print("\n▶ OUTSOURCE KADRO TÜRETİMİ: KAPALI "
+                  "(surplus_distribution.outsource_adam_gun.enabled = False)")
+            print("  → günlük kişi sayısı total_kadro[kuyruk]['outsource'] içinden "
+                  "ELLE okunacak; adam-gün girişleri yok sayıldı.")
+        return {}
     if not adam_gun_cfg:
         return {}
     pt_dahil = sd.get('outsource_adam_gun_pt_dahil', False)
@@ -495,7 +567,10 @@ def _derive_outsource_kadro(results, weekday_blocks, config, queues, verbose=Tru
             gun = len(block)
             adam_gun = q_cfg.get(key)
             if adam_gun is None:
-                uyarilar.append(f"{queue}/{key}: adam-gün GİRİLMEMİŞ → kadro türetilmedi")
+                # Hafta yok ya da None → O HAFTA MANUEL. Türetme atlanır, config'e
+                # elle girilmiş total_kadro[queue]['outsource'] değeri aynen kalır.
+                uyarilar.append(f"{queue}/{key}: adam-gün yok/None → MANUEL "
+                                f"(elle girilen total_kadro değeri kullanılacak)")
                 continue
 
             hs_out = hs_pt = 0
