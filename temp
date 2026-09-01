@@ -1,24 +1,42 @@
 # =============================================================================
-# AYLIK GENEL BAKIŞ — kapasite / vardiya başlangıcı / çağrı  (30 DK)
+# AYLIK GENEL BAKIŞ v2 — kapasite / vardiya başlangıcı / çağrı  (30 DK)
 # =============================================================================
-# Sunum görselleri için. Karşılaştırma akışından BAĞIMSIZ, sadece iki girdi:
+# v1'den TEK FARK: vardiya planı GENİŞ formatta geliyor (iş birimi Excel'i).
+# inhouse/outsource ayrı SATIR değil, ayrı KOLON.
 #
-#   df_actual  — gerçekleşen çağrı (uzun format)
+#   df_vardiya — iş biriminden gelen Excel  [GENİŞ FORMAT]
+#       data_date              01.07.2026  (gün.ay.yıl)
+#       vardiya                '07:00-16:00'
+#       kitle_in_kisi_sayisi     inhouse kişi
+#       kitle_out_kisi_sayisi    outsource kişi
+#       kitle_kismi_kisi_sayisi  part-time kişi  (opsiyonel)
+#       gold_kisi_sayisi         (kullanılmıyor)
+#       kurumsal_kisi_sayisi     (kullanılmıyor)
+#
+#     KISMİLER kendi vardiya satırında olmalı (örn. '08:00-12:00' satırında
+#     in=0, out=0, kismi=27). Tam zamanlının satırına yazılırsa kapasite
+#     yanlış slotlara yayılır.
+#     Kısmi tespiti tamamen bu kolondan gelir — elle etiket listesi YOK.
+#
+#     HÜCRE 2'de vardiya_genis_uzun() ile standart uzun şemaya çevrilir:
+#       data_date · vardiya · working_main_group · kisi_sayisi
+#     Sonrasındaki her şey v1 ile BİREBİR aynı.
+#
+#   df_vardiya_onceki — 30 HAZİRAN. Yeni Excel'de yok, eski tablodan gelir.
+#       [UZUN FORMAT] DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
+#     Olmazsa 1 Temmuz'un gece slotları eksik kalır (uyarı basılır).
+#
+#   df_actual — gerçekleşen çağrı (uzun format)
 #       data_date, min_time_period_value, line_based_main_group,
 #       resource_group_key, nof_call
-#     (geniş format da olur: data_date, min_time_period_value, kitle_nof_call…)
 #
-#   df_vardiya — vardiya planı (güncel tablo), INHOUSE + OUTSOURCE BİR ARADA
-#       DATA_DATE, VARDIYA ('09:00-18:00'), WORKING_MAIN_GROUP, KISI_SAYISI
-#     'outsource' geçen grup → outsource, gerisi (izmir_kitle…) → inhouse
-#
-#   df_vardiya_onceki — OPSİYONEL. Önceki ayın son günü (örn. 30 Haziran)
-#     eski tablodan gelir. Tarih formatı farklı olabilir; HÜCRE 2 iki tabloyu
-#     vardiya_birlestir() ile birleştirip df_vardiya_tum üretir.
+#   df_aht — saat, sub_queue, line_based_main_group, weighted_avg_aht
 #
 # İKİ FARKLI ÖLÇÜ — karıştırma:
 #   SLOT KAPASİTESİ  = o slotta telefonda KAÇ KİŞİ VAR (vardiya boyunca sayılır)
 #   VARDİYA BAŞLANGICI = o slotta KAÇ KİŞİ İŞE BAŞLIYOR (sadece başlangıç slotu)
+#
+# Outsource +30 dk kuralı bu kaynağa da UYGULANIR (OUTSOURCE_EK_SLOT=1).
 # =============================================================================
 
 # %% [HÜCRE 1] — FONKSİYONLAR
@@ -168,25 +186,207 @@ SIRKETLER = (('inhouse', 'in'), ('outsource', 'out'), ('part_time', 'pt'))
 OLCU_KOL = [f"{o}_{s}" for o in ('kapasite', 'baslangic')
             for s in ('in', 'out', 'pt', 'toplam')]
 
-# Kısmi (part-time) vardiya etiketleri. PLAN tarafında hafta içi HARİÇ tutulur,
-# hafta sonu DAHİL edilir. Kendi listeni buraya yaz ya da fonksiyona parametre
-# olarak geç. SQL'de zaten filtreliyorsan boş bırak.
-KISMI_VARDIYALAR = []
-
-
-def _vardiya_anahtar(v):
-    """'08:00 - 12:00' ve '08:00-12:00' aynı sayılsın diye normalize eder."""
-    m = _SHIFT_RE.search(str(v))
-    if not m:
-        return re.sub(r'\s+', '', str(v)).lower()
-    sh, sm, eh, em = (int(g) for g in m.groups())
-    return f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d}"
-
-
 def _company(s):
-    """'outsource' geçen → outsource, gerisi inhouse."""
-    v = s.astype(str).str.strip().str.lower()
-    return v.map(lambda x: 'outsource' if 'outsource' in x else 'inhouse')
+    """'outsource' → outsource · 'kismi'/'part' → part_time · gerisi inhouse."""
+    def _e(x):
+        if 'outsource' in x:
+            return 'outsource'
+        if 'part' in x or 'kismi' in x or 'kısmi' in x:
+            return 'part_time'
+        return 'inhouse'
+    return s.astype(str).str.strip().str.lower().map(_e)
+
+
+GENIS_KOL = {
+    'date':  ['data_date', 'date', 'tarih'],
+    'shift': ['vardiya', 'shift', 'saat'],
+}
+
+
+def vardiya_genis_uzun(df, queue='kitle', cols=None, sifir_at=True, verbose=True):
+    """GENİŞ format vardiya Excel'ini standart UZUN şemaya çevirir.
+
+    Girdi (iş birimi Excel'i):
+        data_date · vardiya
+        {queue}_in_kisi_sayisi     → inhouse
+        {queue}_out_kisi_sayisi    → outsource
+        {queue}_kismi_kisi_sayisi  → part_time   (opsiyonel)
+      Kısmi çalışanlar KENDİ vardiya satırlarında olmalı (örn. '08:00-12:00'),
+      tam zamanlının satırında değil — yoksa kapasite yanlış slotlara yayılır.
+      Tek kolonlu kuyruklar da olur ({queue}_kisi_sayisi) → hepsi inhouse.
+
+    Çıktı:
+        data_date · vardiya · working_main_group · kisi_sayisi
+      working_main_group = '{queue}_inhouse' / '_outsource' / '_part_time'
+      → _company() bunları doğru okur, vardiya_tablosu() olduğu gibi çalışır.
+      Kısmi tespiti tamamen bu kolondan gelir — elle etiket listesi yok.
+
+    sifir_at=True → kişi sayısı 0/NaN olan satırlar elenir (tablo şişmesin).
+    """
+    c = {**GENIS_KOL, **(cols or {})}
+    d_col = _resolve_col(df, c['date'])
+    v_col = _resolve_col(df, c['shift'])
+    if d_col is None or v_col is None:
+        raise KeyError(f"GENİŞ VARDİYA: tarih/vardiya kolonu yok  |  "
+                       f"mevcut: {list(df.columns)}")
+
+    in_col = _resolve_col(df, [f"{queue}_in_kisi_sayisi", f"{queue}_inhouse_kisi_sayisi",
+                               f"{queue}_in", f"{queue}_inhouse"])
+    out_col = _resolve_col(df, [f"{queue}_out_kisi_sayisi", f"{queue}_outsource_kisi_sayisi",
+                                f"{queue}_out", f"{queue}_outsource"])
+    pt_col = _resolve_col(df, [f"{queue}_kismi_kisi_sayisi", f"{queue}_pt_kisi_sayisi",
+                               f"{queue}_part_time_kisi_sayisi", f"kismi_{queue}",
+                               f"{queue}_kismi", f"{queue}_pt"])
+    tek_col = _resolve_col(df, [f"{queue}_kisi_sayisi", f"{queue}_kisi"])
+
+    hedef = []
+    if in_col:
+        hedef.append((in_col, f"{queue}_inhouse"))
+    if out_col:
+        hedef.append((out_col, f"{queue}_outsource"))
+    if pt_col:
+        hedef.append((pt_col, f"{queue}_part_time"))
+    if not hedef and tek_col:
+        hedef.append((tek_col, f"{queue}_inhouse"))
+        if verbose:
+            print(f"  ℹ '{queue}' için in/out ayrımı yok — hepsi inhouse sayıldı.")
+    if not hedef:
+        raise KeyError(f"GENİŞ VARDİYA: '{queue}' kişi kolonu bulunamadı  |  "
+                       f"mevcut: {list(df.columns)}")
+
+    tarih = _to_date_series(df[d_col]).dt.normalize()
+    vard = df[v_col].astype(str)
+
+    parca = []
+    for kol, grup in hedef:
+        kisi = pd.to_numeric(df[kol], errors='coerce').fillna(0)
+        parca.append(pd.DataFrame({'data_date': tarih, 'vardiya': vard,
+                                   'working_main_group': grup,
+                                   'kisi_sayisi': kisi}))
+    out = pd.concat(parca, ignore_index=True)
+    if sifir_at:
+        onceki = len(out)
+        out = out[out['kisi_sayisi'] > 0]
+        atilan = onceki - len(out)
+    else:
+        atilan = 0
+    out = (out.groupby(['data_date', 'vardiya', 'working_main_group'],
+                       as_index=False)['kisi_sayisi'].sum()
+              .sort_values(['data_date', 'vardiya'])
+              .reset_index(drop=True))
+
+    if verbose:
+        kullanilan = ', '.join(k for k, _ in hedef)
+        atlanan = [k for k in df.columns
+                   if str(k).lower().endswith('kisi_sayisi')
+                   and k not in [x for x, _ in hedef]]
+        print(f"GENİŞ→UZUN ({queue}) — kullanılan kolonlar: {kullanilan}")
+        if atlanan:
+            print(f"  ℹ atlanan kolonlar: {atlanan}")
+        if atilan:
+            print(f"  ℹ kişi=0 olan {atilan:,} satır elendi.")
+        gun = out['data_date'].nunique()
+        print(f"  {len(out):,} satır  |  {gun} gün  "
+              f"({out.data_date.min():%d.%m.%Y} – {out.data_date.max():%d.%m.%Y})  |  "
+              f"inhouse {int(out.loc[out.working_main_group.str.contains('inhouse'), 'kisi_sayisi'].sum()):,} · "
+              f"outsource {int(out.loc[out.working_main_group.str.contains('outsource'), 'kisi_sayisi'].sum()):,} kişi-gün")
+    return out
+
+
+def kadro_ozeti(df_genis, year, month, queue='kitle',
+                kismi_haftaici_haric=False, verbose=True):
+    """GENİŞ vardiya matrisinden GÜN GÜN KİŞİ sayısı + ortalamalar.
+
+    HÜCRE 13'ün plan tarafıyla aynı ölçü: birim KİŞİ, slot hesabı YOK.
+    "O gün kaç kişi vardiyaya yazılmış" sorusunu cevaplar.
+
+    Kısmi kolonu ({queue}_kismi_kisi_sayisi) yoksa pt kolonu 0 kalır.
+    kismi_haftaici_haric=True → kısmiler hafta içi günlerde sayılmaz.
+
+    Çıktı: (gun_gun, gun_tipi, gun_adi, hafta)
+      gun_gun  → data_date · gun · hafta_sonu · in · out · pt · toplam
+      gun_tipi → hafta içi / hafta sonu ortalaması (ay geneli)
+      gun_adi  → Pzt…Paz ortalaması
+      hafta    → ISO HAFTA × gün tipi — hafta hafta seyir
+    """
+    u = vardiya_genis_uzun(df_genis, queue=queue, verbose=verbose)
+    u['sirket'] = _company(u['working_main_group'])
+    u = u[(u['data_date'].dt.year == year) & (u['data_date'].dt.month == month)]
+    if u.empty:
+        raise ValueError(f"{year}/{month:02d} için satır yok.")
+
+    if kismi_haftaici_haric:
+        at = (u['data_date'].dt.weekday < 5) & u['sirket'].eq('part_time')
+        if verbose and at.any():
+            print(f"  ℹ kısmi: hafta içi {int(u.loc[at, 'kisi_sayisi'].sum()):,} "
+                  f"kişi çıkarıldı.")
+        u = u[~at]
+
+    g = u.pivot_table(index='data_date', columns='sirket',
+                      values='kisi_sayisi', aggfunc='sum', fill_value=0)
+    g = g.rename(columns={'inhouse': 'in', 'outsource': 'out', 'part_time': 'pt'})
+    for k in ('in', 'out', 'pt'):
+        if k not in g:
+            g[k] = 0
+    g['toplam'] = g[['in', 'out', 'pt']].sum(axis=1)
+
+    gunler = pd.date_range(pd.Timestamp(year, month, 1),
+                           pd.Timestamp(year, month, 1) + pd.offsets.MonthEnd(1))
+    g = g.reindex(gunler).fillna(0).astype(int)
+    g.index.name = 'data_date'
+    g = g.reset_index()
+    g['gun'] = g['data_date'].dt.weekday.map(lambda i: GUN_TR[i])
+    g['hafta_sonu'] = (g['data_date'].dt.weekday >= 5).astype(int)
+    iso = g['data_date'].dt.isocalendar()
+    g['iso_hafta'] = iso['year'].astype(int).astype(str) + '-H' + \
+                     iso['week'].astype(int).astype(str).str.zfill(2)
+    g['hafta_basi'] = g['data_date'] - pd.to_timedelta(
+        g['data_date'].dt.weekday, unit='D')
+    g = g[['data_date', 'gun', 'iso_hafta', 'hafta_basi', 'hafta_sonu',
+           'in', 'out', 'pt', 'toplam']]
+
+    dolu = g[g['toplam'] > 0]
+    gun_tipi = (dolu.groupby('hafta_sonu')[['in', 'out', 'pt', 'toplam']]
+                    .agg(['mean', 'count']).round(1))
+    gun_tipi = pd.DataFrame({
+        'gun_tipi': ['hafta içi', 'hafta sonu'],
+        'gun_sayisi': [int(dolu[dolu.hafta_sonu == h]['toplam'].count()) for h in (0, 1)],
+        **{k: [round(dolu[dolu.hafta_sonu == h][k].mean(), 1) if
+               len(dolu[dolu.hafta_sonu == h]) else 0 for h in (0, 1)]
+           for k in ('in', 'out', 'pt', 'toplam')},
+    })
+
+    gun_adi = (dolu.groupby('gun')[['in', 'out', 'pt', 'toplam']].mean()
+                   .round(1).reindex(GUN_TR).reset_index())
+    gun_adi.insert(1, 'gun_sayisi',
+                   dolu.groupby('gun')['toplam'].count().reindex(GUN_TR).values)
+
+    # --- ISO HAFTA × GÜN TİPİ ---
+    hafta = (dolu.groupby(['iso_hafta', 'hafta_basi', 'hafta_sonu'])
+                 .agg(gun_sayisi=('toplam', 'count'),
+                      **{k: (k, 'mean') for k in ('in', 'out', 'pt', 'toplam')},
+                      kisi_gun=('toplam', 'sum'))
+                 .round(1).reset_index())
+    hafta['gun_tipi'] = hafta['hafta_sonu'].map({0: 'hafta içi', 1: 'hafta sonu'})
+    hafta = hafta[['iso_hafta', 'hafta_basi', 'gun_tipi', 'gun_sayisi',
+                   'in', 'out', 'pt', 'toplam', 'kisi_gun']]
+    hafta = hafta.sort_values(['hafta_basi', 'gun_tipi']).reset_index(drop=True)
+
+    if verbose:
+        bos = g[g['toplam'] == 0]
+        if len(bos):
+            print(f"  ⚠ {len(bos)} günde kayıt yok: "
+                  f"{', '.join(bos['data_date'].dt.strftime('%d.%m'))}")
+        for _, r in gun_tipi.iterrows():
+            print(f"  {r['gun_tipi']:<10} {int(r['gun_sayisi']):>2} gün  |  "
+                  f"in {r['in']:>6.1f} · out {r['out']:>6.1f} · "
+                  f"pt {r['pt']:>5.1f}  →  toplam {r['toplam']:>6.1f} kişi")
+        eksik_h = hafta[hafta['gun_sayisi'] < hafta.groupby('gun_tipi')
+                        ['gun_sayisi'].transform('max')]
+        if len(eksik_h):
+            print(f"  ℹ {len(eksik_h)} hafta-satırı EKSİK GÜNLÜ (ay sınırında "
+                  f"kesilmiş): {', '.join(eksik_h['iso_hafta'].unique())}")
+    return g, gun_tipi, gun_adi, hafta
 
 
 def vardiya_listesi(df_vardiya, cols=None):
@@ -265,8 +465,7 @@ def vardiya_birlestir(*tablolar, cols=None, verbose=True):
 
 def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
                     outsource_ek_slot=OUTSOURCE_EK_SLOT,
-                    kismi_vardiyalar=None, kismi_haftaici_haric=True,
-                    verbose=True):
+                    kismi_haftaici_haric=True, verbose=True):
     """Vardiya planından İKİ tablo: slot kapasitesi + vardiya başlangıcı.
 
     gece_ertesi_gune:
@@ -280,10 +479,11 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
       ('09:00-18:00' outsource fiilen 09:00-18:30 sayılır). 0 = kapalı.
       Vardiya BAŞLANGICI bundan etkilenmez.
 
-    kismi_vardiyalar: kısmi (part-time) vardiya etiketleri listesi.
-      kismi_haftaici_haric=True (varsayılan) → bu vardiyalar HAFTA İÇİ
-      günlerde hesaba katılmaz, HAFTA SONU dahil edilir. Hangi etiketlerin
-      olduğunu görmek için vardiya_listesi(df_vardiya) çağır.
+    KISMİ (part-time) TESPİTİ tamamen VERİDEN gelir: working_main_group
+      'kismi'/'part' içeriyorsa _company() onu part_time sayar. Geniş Excel'de
+      'kitle_kismi_kisi_sayisi' kolonu varsa vardiya_genis_uzun() bunu yazar.
+    kismi_haftaici_haric=True (varsayılan) → kısmiler HAFTA İÇİ günlerde
+      hesaba katılmaz, HAFTA SONU dahil edilir.
 
     NOT: Ayın 1'inin gece slotları için ÖNCEKİ AYIN SON GÜNÜ de df_vardiya'da
     olmalı. Yoksa uyarı basılır ve 1. günün gecesi eksik kalır.
@@ -305,26 +505,22 @@ def vardiya_tablosu(df_vardiya, year, month, cols=None, gece_ertesi_gune=True,
     d['kisi'] = pd.to_numeric(d[r['kisi']], errors='coerce').fillna(0)
     d['_vardiya'] = d[r['shift']].astype(str)
 
-    kismi = list(kismi_vardiyalar if kismi_vardiyalar is not None else KISMI_VARDIYALAR)
-    if kismi:
-        norm = {_vardiya_anahtar(v) for v in kismi}
-        kismi_mi = d['_vardiya'].map(_vardiya_anahtar).isin(norm)
-        veri_anahtar = set(d['_vardiya'].map(_vardiya_anahtar))
-        bulunmayan = [v for v in kismi if _vardiya_anahtar(v) not in veri_anahtar]
+    # KISMİ — working_main_group'tan geliyor ('kitle_kismi_kisi_sayisi' kolonu)
+    kismi_mi = d['company'].eq('part_time')
+    if kismi_mi.any():
         if kismi_haftaici_haric:
             at = (d['data_date'].dt.weekday < 5) & kismi_mi
             if verbose:
-                print(f"  ℹ kısmi vardiya: hafta içi {int(at.sum()):,} satır "
+                print(f"  ℹ kısmi: hafta içi {int(at.sum()):,} satır "
                       f"({int(d.loc[at, 'kisi'].sum()):,} kişi) çıkarıldı, "
                       f"hafta sonu korundu.")
             d = d[~at]
             kismi_mi = kismi_mi[~at]
-        d.loc[kismi_mi, 'company'] = 'part_time'
         if verbose:
-            print(f"  ℹ kalan kısmi satır 'part_time' olarak ayrıldı "
-                  f"({int(d.loc[kismi_mi, 'kisi'].sum()):,} kişi).")
-            if bulunmayan:
-                print(f"  ⚠ listede olup veride bulunmayan etiket: {bulunmayan}")
+            print(f"  ℹ kısmi (hafta sonu) {int(d.loc[kismi_mi, 'kisi'].sum()):,} "
+                  f"kişi ayrı 'part_time' kolonunda.")
+    elif verbose:
+        print("  ℹ kısmi çalışan yok — veride 'kismi/part' grubu bulunamadı.")
 
     ay_bas = pd.Timestamp(year=year, month=month, day=1)
     ay_son = ay_bas + pd.offsets.MonthEnd(1)
@@ -565,11 +761,17 @@ def _eksen(ax, g, adim=4, y_adim=None):
                        fontsize=8, color=RENK['metin2'])
     ax.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
     ax.set_axisbelow(True)
+    # DİKEY kılavuz — alan dolgularının ÜSTÜNE çizilir; grid'e bırakılırsa
+    # dolgunun altında kalıp tam okunması gereken yerde kayboluyor.
+    for i in range(0, len(g), adim):
+        ax.axvline(i, color=RENK['metin2'], lw=0.6, alpha=0.22, zorder=3.5)
     for k in ('top', 'right'):
         ax.spines[k].set_visible(False)
     for k in ('left', 'bottom'):
         ax.spines[k].set_color(RENK['izgara'])
     ax.tick_params(colors=RENK['metin2'], labelsize=8)
+    # sharex/sharey olsa bile HER panel kendi sayısal değerlerini yazsın
+    ax.tick_params(labelbottom=True, labelleft=True)
     ax.set_xlim(-0.5, len(g) - 0.5)
     ax.set_facecolor(RENK['yuzey'])
     if y_adim:
@@ -585,15 +787,33 @@ def _kutu(ax, metin, konum=(0.98, 0.95), renk='#fff7d6'):
                       edgecolor='#d9d2a8', linewidth=0.8))
 
 
+def _kismi_notu(g):
+    """Panel başlığına eklenecek not: kısmiler bu tabloda var mı, yok mu.
+
+    Veriden türetilir — hangi tabloyu (df_genel / df_genel_kismili) verirsen
+    ver, başlık doğru yazar. Modelde hafta içi kısmi olmadığı için orada da
+    otomatik '(kısmisiz)' çıkar.
+    """
+    if 'kapasite_pt' not in g:
+        return ''
+    return ' (kısmiler dahil)' if float(g['kapasite_pt'].sum()) > 0 else ' (kısmisiz)'
+
+
 def _cagri_paneli(ax, g, etiket='Gerçekleşen çağrı', adim=None):
     """Üstteki ince çağrı paneli — alttaki grafikle AYNI x ekseni."""
     x = range(len(g))
     ax.fill_between(x, g['cagri'], color=RENK['cagri'], alpha=0.18, zorder=1)
     ax.plot(x, g['cagri'], color=RENK['cagri'], lw=1.8, zorder=3, label=etiket)
     ax.set_ylabel('çağrı adedi', fontsize=9, color=RENK['cagri'])
-    ax.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
+    ax.tick_params(axis='y', colors=RENK['cagri'], labelsize=8, labelleft=True)
+    ax.set_xticks(range(0, len(g), 4))
+    ax.set_xticklabels([g['interval'].iloc[i] for i in range(0, len(g), 4)],
+                       fontsize=7.5, color=RENK['metin2'])
+    ax.tick_params(axis='x', labelbottom=True)   # sharex olsa da yazsın
     ax.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
     ax.set_axisbelow(True)
+    for i in range(0, len(g), 4):
+        ax.axvline(i, color=RENK['metin2'], lw=0.6, alpha=0.22, zorder=2)
     for k in ('top', 'right'):
         ax.spines[k].set_visible(False)
     for k in ('left', 'bottom'):
@@ -720,6 +940,103 @@ def grafik_genel(df, queue='KİTLE', kirilim=False, olcu='ortalama', y_adim=25,
     return fig
 
 
+def grafik_olcekli(df, queue='KİTLE', olcu='ortalama', y_adim=25,
+                   olcek='ortak', kirilim=True, kaydet=None):
+    """TEK EKSEN: kapasite + vardiya başlangıcı + ÖLÇEKLENMİŞ çağrı.
+
+    Çağrı bir çarpanla kişi eksenine oturtulur:  k = tepe_kapasite / tepe_çağrı
+
+    ⚠ Amaç yalnızca ŞEKİL karşılaştırması. Eğrilerin kesişmesi HİÇBİR ŞEY
+      ifade etmez — çarpan keyfîdir. Anlamlı (birimli) karşılaştırma için
+      HÜCRE 12'ye bak: orada çağrı 'gereken kişi'ye çevriliyor.
+
+    olcek='ortak' (varsayılan) → hafta içi ve hafta sonu AYNI çarpanı kullanır;
+        iki panel birbiriyle kıyaslanabilir kalır.
+    olcek='panel' → her panel kendi çarpanını kullanır; şekil uyumu en iyi
+        olur ama paneller arası kıyas bozulur.
+    """
+    import matplotlib.pyplot as plt
+
+    veri = {hs: slot_ozet(df, hafta_sonu=hs, olcu=olcu) for hs in (0, 1)}
+    dolu = [g for g in veri.values() if not g.empty]
+    if not dolu:
+        raise ValueError("Çizilecek veri yok.")
+    if olcek not in ('ortak', 'panel'):
+        raise ValueError("olcek: 'ortak' veya 'panel'")
+
+    k_ortak = (max(g['kapasite_toplam'].max() for g in dolu)
+               / max(g['cagri'].max() for g in dolu))
+    y_max = max(g['kapasite_toplam'].max() for g in dolu) * 1.30
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=(olcek == 'ortak'))
+    fig.patch.set_facecolor(RENK['yuzey'])
+
+    for j, (hs, ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
+        ax = axes[j]
+        g = veri[hs]
+        if g.empty:
+            ax.set_visible(False)
+            continue
+        x = range(len(g))
+        k = k_ortak if olcek == 'ortak' else (g['kapasite_toplam'].max()
+                                              / max(g['cagri'].max(), 1))
+        cagri_olcekli = g['cagri'] * k
+
+        if kirilim:
+            ust_in = g['kapasite_in']
+            ust_out = ust_in + g['kapasite_out']
+            ax.fill_between(x, ust_in, color=RENK['inhouse'], alpha=0.45,
+                            zorder=1, label='Kapasite — inhouse')
+            ax.fill_between(x, ust_in, ust_out, color=RENK['outsource'],
+                            alpha=0.85, zorder=1, label='Kapasite — outsource')
+            if g['kapasite_pt'].sum() > 0:
+                ax.fill_between(x, ust_out, g['kapasite_toplam'],
+                                color=RENK['kismi'], alpha=0.60, zorder=1,
+                                label='Kapasite — kısmi')
+        else:
+            ax.fill_between(x, g['kapasite_toplam'], color=RENK['dolgu'],
+                            zorder=1, label='Slot kapasitesi')
+        ax.plot(x, g['kapasite_toplam'], color=RENK['kapasite'], lw=2.4,
+                zorder=4, label='Kapasite (sahadaki kişi)')
+        ax.plot(x, g['baslangic_toplam'], color=RENK['baslangic'], lw=2,
+                marker='o', ms=3, zorder=5, label='Vardiya başlangıcı')
+        ax.plot(x, cagri_olcekli, color=RENK['cagri'], lw=2.4, ls='--',
+                zorder=6, label=f'Gerçekleşen çağrı (×{k:.3f} ölçekli)')
+
+        ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
+        ax.set_title(f"{queue} — {ad}{_kismi_notu(g)}", fontsize=11,
+                     fontweight='bold', color=RENK['metin'], loc='left', pad=8)
+        _eksen(ax, g, y_adim=y_adim)
+        if olcek == 'ortak':
+            ax.set_ylim(0, y_max)
+        else:
+            ax.set_ylim(0, g['kapasite_toplam'].max() * 1.30)
+
+        i_tepe = int(g['cagri'].idxmax())
+        _kutu(ax, f"Çağrı ölçeği ×{k:.3f}\n"
+                  f"grafikteki 1 kişi ≈ {1 / k:,.0f} çağrı\n"
+                  f"tepe çağrı {g['cagri'].iloc[i_tepe]:,.0f} @ "
+                  f"{g['interval'].iloc[i_tepe]}\n"
+                  f"{int(g['gun_sayisi'].iloc[0])} gün {olcu}",
+              konum=(0.98, 0.97))
+        if j == 0:
+            ax.legend(loc='upper left', frameon=False, fontsize=8,
+                      labelcolor=RENK['metin2'])
+
+    kap = ('ortak çarpan — paneller kıyaslanabilir' if olcek == 'ortak'
+           else 'panel başına çarpan — paneller kıyaslanamaz')
+    fig.suptitle(f"{queue} — kapasite ve çağrı, tek eksende  ({kap})\n"
+                 f"⚠ çağrı eğrisi ölçeklenmiştir; eğrilerin KESİŞMESİ anlam "
+                 f"taşımaz — birimli karşılaştırma için HÜCRE 12",
+                 fontsize=12, fontweight='bold', color=RENK['metin'],
+                 x=0.01, ha='left', y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    if kaydet:
+        fig.savefig(kaydet, dpi=150, facecolor=fig.get_facecolor())
+        print(f"✓ {kaydet}")
+    return fig
+
+
 def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
     """Gün gün: kapasite (kişi-saat) ve çağrı — ay boyunca seyir.
 
@@ -754,6 +1071,12 @@ def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
         ax_u.tick_params(axis='y', colors=RENK['cagri'], labelsize=8)
         ax_u.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
         ax_u.set_axisbelow(True)
+        ax_u.set_xticks(list(x))
+        ax_u.set_xticklabels([str(d.day) for d in g['data_date']],
+                             fontsize=7, color=RENK['metin2'])
+        ax_u.tick_params(axis='x', labelbottom=True)
+        for i in x:
+            ax_u.axvline(i, color=RENK['metin2'], lw=0.5, alpha=0.13, zorder=2)
         for k in ('top', 'right'):
             ax_u.spines[k].set_visible(False)
         ax_u.set_ylim(bottom=0)
@@ -777,6 +1100,8 @@ def grafik_gun_egrisi(df, queue='KİTLE', cagri_ust=True, kaydet=None):
                        fontsize=7, color=RENK['metin2'])
     ax.grid(axis='y', color=RENK['izgara'], lw=1, zorder=0)
     ax.set_axisbelow(True)
+    for i in x:
+        ax.axvline(i, color=RENK['metin2'], lw=0.5, alpha=0.13, zorder=2)
     for k in ('top', 'right'):
         ax.spines[k].set_visible(False)
     if cagri_ust:
@@ -1174,8 +1499,8 @@ def grafik_plan_model(df_plan, df_model, queue='KİTLE', olcu='ortalama',
                     label='Vardiya başlangıcı (kaç kişi başlıyor)')
 
             ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
-            ax.set_title(f"{ad} — {gun_ad}", fontsize=11, fontweight='bold',
-                         color=RENK['metin'], loc='left', pad=8)
+            ax.set_title(f"{ad} — {gun_ad}{_kismi_notu(g)}", fontsize=11,
+                         fontweight='bold', color=RENK['metin'], loc='left', pad=8)
             _eksen(ax, g, y_adim=y_adim)
             ax.set_ylim(0, kisi_max)
 
@@ -1282,14 +1607,15 @@ def slot_yan_yana(hafta_sonu=0, olcu='ortalama', **tablolar):
 
 
 def gunluk_kadro(df_vardiya, results, df_actual, year, month, queue='kitle',
-                 kismi_vardiyalar=None, model_year=None, model_month=None,
+                 model_year=None, model_month=None,
                  cols=None, verbose=True):
     """Gün gün tek tablo: gerçekleşen çağrı + model kişi + plan kişi.
 
     Birim KİŞİ (kişi-slot değil): o gün kaç kişi vardiyaya yazılmış.
       model_* ← mip_info['total_inhouse_kisi' | 'total_outsource_kisi'
                          | 'total_part_time_kisi']
-      plan_*  ← df_vardiya KISI_SAYISI toplamı; kısmi etiketleri ayrı kolona
+      plan_*  ← df_vardiya KISI_SAYISI toplamı; kısmiler working_main_group
+                'kismi/part' üzerinden plan_pt kolonuna ayrılır
 
     model_year/month verilmezse year/month kullanılır (pickle farklı aya
     aitse ikisini ayrı ver).
@@ -1307,12 +1633,7 @@ def gunluk_kadro(df_vardiya, results, df_actual, year, month, queue='kitle',
     p = df_vardiya.copy()
     p['data_date'] = _to_date_series(p[r['date']]).dt.normalize()
     p['kisi'] = pd.to_numeric(p[r['kisi']], errors='coerce').fillna(0)
-    p['sirket'] = _company(p[r['group']])
-    kismi = list(kismi_vardiyalar if kismi_vardiyalar is not None else KISMI_VARDIYALAR)
-    if kismi:
-        norm = {_vardiya_anahtar(v) for v in kismi}
-        kismi_mi = p[r['shift']].astype(str).map(_vardiya_anahtar).isin(norm)
-        p.loc[kismi_mi, 'sirket'] = 'part_time'
+    p['sirket'] = _company(p[r['group']])          # kismi/part → part_time
     p = p[(p['data_date'].dt.year == year) & (p['data_date'].dt.month == month)]
     plan = p.pivot_table(index='data_date', columns='sirket', values='kisi',
                          aggfunc='sum', fill_value=0)
@@ -1391,6 +1712,92 @@ def gunluk_kadro(df_vardiya, results, df_actual, year, month, queue='kitle',
                       f"plan {a['plan_toplam'].mean():>6.1f} kişi  |  "
                       f"fark {a['fark_toplam'].mean():>+6.1f}")
     return out
+
+
+def haftalik_kadro(df_kadro, verbose=True):
+    """Ardışık HAFTA İÇİ / HAFTA SONU BLOKLARINA göre kadro ortalaması.
+
+    Girdi: gunluk_kadro() çıktısı (HÜCRE 13'ün df_kadro'su).
+
+    Gruplama ISO haftası DEĞİL, BLOK bazlıdır: Pzt–Cum bir satır, onu izleyen
+    Cmt–Paz ayrı satır. ISO hafta numarası yalnızca etikete yazılır
+    ("1. hafta ici (ISO 36)"). Ay sınırında kesilen blok kısa kalır — kaç gün
+    olduğunu 'gun' kolonu söyler.
+
+    Plan, model ve çağrının hepsi 0 olan günler ortalamaya GİRMEZ; blok sırası
+    yine tam takvim üzerinden sayılır ("2. hafta ici" kaymaz).
+
+    Çıktı: etiket · _tur · aralik · gun · hafta_sonu · cagri ·
+           model_in/out/pt/toplam · plan_in/out/pt/toplam ·
+           fark_toplam · cagri_kisi
+    """
+    gerek = ['data_date', 'hafta_sonu', 'plan_toplam', 'model_toplam']
+    eksik = [k for k in gerek if k not in df_kadro.columns]
+    if eksik:
+        raise KeyError(f"haftalik_kadro: {eksik} kolonu yok. Bu fonksiyon "
+                       f"gunluk_kadro() çıktısı bekler.\n"
+                       f"  Gelen kolonlar: {list(df_kadro.columns)[:14]}")
+
+    d = df_kadro.copy()
+    d['data_date'] = pd.to_datetime(d['data_date'])
+    d = d.sort_values('data_date').reset_index(drop=True)
+
+    hs = d['data_date'].dt.weekday >= 5
+    d['_blok'] = (hs != hs.shift()).cumsum()
+    d['_tur'] = hs.map({False: 'hafta ici', True: 'hafta sonu'})
+    d['_iso'] = d['data_date'].dt.isocalendar().week.astype(int)
+
+    # blok sırası TAM takvimden — boş gün elemesi numaralandırmayı bozmasın
+    _bt = d.groupby('_blok')['_tur'].first()
+    d['_sira'] = d['_blok'].map(_bt.groupby(_bt).cumcount() + 1)
+
+    _var = d[['plan_toplam', 'model_toplam']].sum(axis=1)
+    if 'cagri' in d:
+        _var = _var + d['cagri'].fillna(0)
+    dolu = d[_var > 0]
+    if dolu.empty:
+        if verbose:
+            print("  ⚠ her günde plan/model/çağrı 0 — haftalık özet boş.")
+        return pd.DataFrame()
+    if verbose and len(dolu) < len(d):
+        bos = d.loc[d.index.difference(dolu.index), 'data_date']
+        print(f"  ℹ {len(bos)} gün tamamen boş — ortalamaya girmedi: "
+              f"{', '.join(bos.dt.strftime('%d.%m'))}")
+
+    sayisal = [c for c in dolu.columns
+               if c.startswith(('plan_', 'model_'))
+               or c in ('cagri', 'fark_toplam', 'cagri_kisi')]
+    ozet = (dolu.groupby(['_blok', '_tur'])
+                .agg(bas=('data_date', 'min'), bit=('data_date', 'max'),
+                     gun=('data_date', 'size'),
+                     iso=('_iso', 'min'), sira=('_sira', 'first'),
+                     hafta_sonu=('hafta_sonu', 'first'),
+                     **{c: (c, 'mean') for c in sayisal})
+                .reset_index().sort_values('bas'))
+
+    ozet['etiket'] = (ozet['sira'].astype(str) + '. ' + ozet['_tur']
+                      + ' (ISO ' + ozet['iso'].astype(str) + ')')
+    ozet['aralik'] = (ozet['bas'].dt.strftime('%d.%m') + '–'
+                      + ozet['bit'].dt.strftime('%d.%m'))
+    ozet[sayisal] = ozet[sayisal].astype(float).round(1)
+    ozet = ozet.drop(columns=['_blok', 'bas', 'bit', 'iso', 'sira'])
+    on = ['etiket', '_tur', 'aralik', 'gun', 'hafta_sonu']
+    ozet = ozet[on + [c for c in ozet.columns if c not in on]]
+    ozet = ozet.reset_index(drop=True)
+
+    if verbose:
+        for tur in ('hafta ici', 'hafta sonu'):
+            a = ozet[ozet['_tur'] == tur]
+            if len(a):
+                print(f"  {tur:<10} {len(a)} blok  |  "
+                      f"model {a['model_toplam'].mean():>6.1f} kişi  |  "
+                      f"plan {a['plan_toplam'].mean():>6.1f} kişi  |  "
+                      f"fark {a['fark_toplam'].mean():>+6.1f}")
+        kisa = ozet[ozet['gun'] < ozet.groupby('_tur')['gun'].transform('max')]
+        if len(kisa):
+            print(f"  ℹ {len(kisa)} blok EKSİK GÜNLÜ (ay sınırında kesilmiş): "
+                  f"{', '.join(kisa['etiket'])}")
+    return ozet
 
 
 # ---------------------------------------------------------------------------
@@ -1676,16 +2083,31 @@ def grafik_ihtiyac(df_plan, df_model, queue='KİTLE', cagri_adedi=CAGRI_ADEDI,
                         label=f'Gereken kişi ({cagri_adedi} çağrı/saat)')
 
             ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
-            ax.set_title(f"{ad} — {gun_ad}", fontsize=11, fontweight='bold',
-                         color=RENK['metin'], loc='left', pad=8)
+            ax.set_title(f"{ad} — {gun_ad}{_kismi_notu(g)}", fontsize=11,
+                         fontweight='bold', color=RENK['metin'], loc='left', pad=8)
             _eksen(ax, g, y_adim=y_adim)
             ax.set_ylim(0, y_max)
 
             fazla = float(np.clip(kap - ger, 0, None).sum()) / 2      # kişi-saat
             eksik = float(np.clip(ger - kap, 0, None).sum()) / 2
-            oran = kap.sum() / ger.sum() if ger.sum() else float('nan')
+
+            # KARŞILANAN ÇAĞRI — fazlalık eksiği KAPATMAZ (mahsuplaşma yok).
+            # Bir slotta kadronun %x'i eksikse o slotun çağrısının %x'i açıkta.
+            #   açık_çağrı = Σ  çağrı_i × max(0, (gereken_i − kapasite_i)) / gereken_i
+            # 15 kuralında bu, (gereken−kapasite)×7,5 ile BİREBİR aynı sonucu
+            # verir; Erlang'da da aynı mantıkla çalışır (oran üzerinden).
+            cg = g['cagri'].values.astype(float)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                acik_pay = np.where(ger > 0, np.clip(ger - kap, 0, None) / ger, 0.0)
+            acik_cagri = float((cg * acik_pay).sum())
+            cagri_top = float(cg.sum())
+            oran = (1 - acik_cagri / cagri_top) if cagri_top else float('nan')
+            eksik_slot = int((kap < ger).sum())
+
             i_dip = int(np.argmin(kap - ger))
-            _kutu(ax, f"Karşılama {oran:.0%}\n"
+            _kutu(ax, f"Karşılanan çağrı {oran:.1%}\n"
+                      f"açıkta {acik_cagri:,.0f} çağrı "
+                      f"({eksik_slot}/{len(g)} slot)\n"
                       f"fazla {fazla:,.0f} · eksik {eksik:,.0f} kişi-saat\n"
                       f"en dar slot {g['interval'].iloc[i_dip]} "
                       f"({kap[i_dip] - ger[i_dip]:+.0f} kişi)",
@@ -1723,38 +2145,58 @@ def excel_yaz(df, yol=None, year=2026, month=7):
 
 
 # %% [HÜCRE 2] — KONFİG + HAZIRLIK
-# Girdiler: df_actual, df_vardiya  (SQL'den çek, sonra bu hücreyi çalıştır)
+# Girdiler: df_actual, df_vardiya (GENİŞ format Excel), df_vardiya_onceki (ops.)
 
 YEAR  = 2026
 MONTH = 7
 QUEUE = 'kitle'
 
-# PLAN tarafı: kısmi (part-time) vardiyalar hafta içi HARİÇ, hafta sonu DAHİL.
-# Etiketleri HÜCRE 2C'deki vardiya_listesi() çıktısına bakarak doldur.
-# SQL'de zaten filtrelediysen boş bırak.
-KISMI_VARDIYALAR = []
+# PLAN tarafı: kısmiler hafta içi HARİÇ, hafta sonu DAHİL tutulur.
+# Tespit tamamen Excel'deki 'kitle_kismi_kisi_sayisi' kolonundan gelir —
+# elle etiket listesi YOK.
 
 if 'df_actual' in globals() and 'df_vardiya' in globals():
-    # (0) df_vardiya (güncel tablo) + df_vardiya_onceki (30 Haziran, eski tablo)
-    #     Tarih formatları farklı olsa bile her tablo ayrı çözümlenir.
-    if 'df_vardiya_onceki' in globals():
-        df_vardiya_tum = vardiya_birlestir(df_vardiya_onceki, df_vardiya)
+    # (0) GENİŞ → UZUN
+    #     kitle_in_kisi_sayisi     → working_main_group = 'kitle_inhouse'
+    #     kitle_out_kisi_sayisi    → 'kitle_outsource'
+    #     kitle_kismi_kisi_sayisi  → 'kitle_part_time'
+    df_vardiya_u = vardiya_genis_uzun(df_vardiya, queue=QUEUE)
+
+    # (0b) Ayın 1'inin GECE slotları için önceki ayın son günü şart.
+    #      Excel'de varsa doğrudan kullanılır; yoksa eski tablodan eklenir.
+    onceki_gun = pd.Timestamp(YEAR, MONTH, 1) - pd.Timedelta(days=1)
+    excelde_var = bool((df_vardiya_u['data_date'] == onceki_gun).any())
+
+    if excelde_var:
+        df_vardiya_tum = df_vardiya_u
+        print(f"  ✓ {onceki_gun:%d.%m.%Y} Excel'de var — gece sarkması tam.")
+    elif 'df_vardiya_onceki' in globals():
+        # Eski tablo UZUN formatta; sadece o tek günü al, gerisi sızmasın.
+        _o = df_vardiya_onceki.copy()
+        _dc = _resolve_col(_o, VARDIYA_KOL['date'])
+        _o = _o[_to_date_series(_o[_dc]).dt.normalize() == onceki_gun]
+        if len(_o):
+            print(f"  ℹ {onceki_gun:%d.%m.%Y} eski tablodan ekleniyor "
+                  f"({len(_o):,} satır):")
+            df_vardiya_tum = vardiya_birlestir(_o, df_vardiya_u)
+        else:
+            df_vardiya_tum = df_vardiya_u
+            print(f"  ⚠ df_vardiya_onceki'de {onceki_gun:%d.%m.%Y} yok — "
+                  f"{YEAR}-{MONTH:02d}-01 gece slotları eksik kalacak.")
     else:
-        df_vardiya_tum = df_vardiya
-        print("  ℹ df_vardiya_onceki yok — sadece güncel tablo kullanılıyor "
-              f"({(pd.Timestamp(YEAR, MONTH, 1) - pd.Timedelta(days=1)):%d.%m} "
-              "gecesi eksik kalabilir).")
+        df_vardiya_tum = df_vardiya_u
+        print(f"  ⚠ {onceki_gun:%d.%m.%Y} hiçbir kaynakta yok — "
+              f"{YEAR}-{MONTH:02d}-01 gece slotları eksik kalacak. "
+              f"Excel'e o günü ekle ya da df_vardiya_onceki'yi tanımla.")
 
     c = cagri_tablosu(df_actual, YEAR, MONTH, queue=QUEUE)
 
-    # (1) df_genel — kısmiler hafta içi HARİÇ (model karşılaştırmasında bu kullanılır)
-    v = vardiya_tablosu(df_vardiya_tum, YEAR, MONTH,
-                        kismi_vardiyalar=KISMI_VARDIYALAR)
+    # (1) df_genel — kısmiler hafta içi HARİÇ (model karşılaştırma tabanı)
+    v = vardiya_tablosu(df_vardiya_tum, YEAR, MONTH)
     df_genel = genel_bakis(v, c)
 
     # (2) df_genel_kismili — kısmiler HER GÜN dahil (sahadaki gerçek tablo)
     v2 = vardiya_tablosu(df_vardiya_tum, YEAR, MONTH,
-                         kismi_vardiyalar=KISMI_VARDIYALAR,
                          kismi_haftaici_haric=False, verbose=False)
     df_genel_kismili = genel_bakis(v2, c, verbose=False)
 
@@ -1765,7 +2207,7 @@ if 'df_actual' in globals() and 'df_vardiya' in globals():
           f"| kısmili {int(df_genel_kismili.loc[hi, 'kapasite_toplam'].sum()):,}")
     show(df_genel, 5)
 else:
-    print("df_actual / df_vardiya yok — SQL'den çekip bu hücreyi çalıştır.")
+    print("df_actual / df_vardiya yok — SQL/Excel'den çekip bu hücreyi çalıştır.")
 
 
 # %% [HÜCRE 2B] — TEŞHİS
@@ -1779,7 +2221,7 @@ else:
     print("df_vardiya_tum yok — HÜCRE 2'yi çalıştır.")
 
 
-# %% [HÜCRE 2C] — VARDİYA LİSTESİ (kısmi etiketlerini buradan seç)
+# %% [HÜCRE 2C] — VARDİYA LİSTESİ (hangi vardiya, kaç kişi, hangi şirket)
 
 if 'df_vardiya_tum' in globals():
     show(vardiya_listesi(df_vardiya_tum))
@@ -1829,6 +2271,23 @@ if 'df_genel' in globals():
     # medyan hali gerekirse: olcu='medyan' ekle (sayıları HÜCRE 3'te)
 else:
     print("df_genel yok — HÜCRE 2'yi çalıştır.")
+
+
+# %% [HÜCRE 5B] — TEK EKSEN: çağrı, kişi eksenine ÖLÇEKLENMİŞ
+# Çağrı k = tepe_kapasite / tepe_çağrı çarpanıyla kişi eksenine oturtulur.
+# Sadece ŞEKİL karşılaştırması içindir — eğrilerin kesişmesi anlam taşımaz.
+# Birimli (anlamlı) karşılaştırma HÜCRE 12'de.
+
+if 'df_genel_kismili' in globals():
+    # (1) ORTAK ÇARPAN — hafta içi ve hafta sonu aynı ölçekte, kıyaslanabilir
+    grafik_olcekli(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                   olcek='ortak', y_adim=25)
+
+    # (2) PANEL BAŞINA ÇARPAN — her panelde şekil uyumu en iyi hâlde
+    grafik_olcekli(df_genel_kismili, queue=f"{QUEUE.upper()} (kısmiler dahil)",
+                   olcek='panel', y_adim=25)
+else:
+    print("df_genel_kismili yok — HÜCRE 2'yi çalıştır.")
 
 
 # %% [HÜCRE 6] — GRAFİK: GÜN GÜN SEYİR
@@ -1949,7 +2408,7 @@ else:
 
 if all(k in globals() for k in ('df_vardiya_tum', 'results', 'df_actual')):
     df_kadro = gunluk_kadro(df_vardiya_tum, results, df_actual, YEAR, MONTH,
-                            queue=QUEUE, kismi_vardiyalar=KISMI_VARDIYALAR,
+                            queue=QUEUE,
                             model_year=MODEL_YEAR, model_month=MODEL_MONTH)
     show(df_kadro)
 
@@ -1967,3 +2426,163 @@ if all(k in globals() for k in ('df_vardiya_tum', 'results', 'df_actual')):
     show(h.reindex(GUN_TR).reset_index())
 else:
     print("df_vardiya_tum / results / df_actual eksik — HÜCRE 2 ve HÜCRE 9'u çalıştır.")
+
+
+# %% [HÜCRE 14] — HAFTA HAFTA KADRO  (blok bazlı: hafta içi / hafta sonu)
+# HÜCRE 13'ün df_kadro'sunu ardışık hafta içi ve hafta sonu bloklarına böler.
+# Etikette ISO hafta numarası var ama gruplama BLOK bazlı:
+#   Pzt–Cum bir satır, onu izleyen Cmt–Paz ayrı satır.
+# Ay sınırında kesilen bloklar kısa kalır — 'gun' kolonu kaç gün olduğunu söyler.
+
+if 'df_kadro' in globals():
+    df_kadro_hafta = haftalik_kadro(df_kadro)
+    show(df_kadro_hafta)
+else:
+    print("df_kadro yok — HÜCRE 13'ü çalıştır.")
+
+
+# %% [HÜCRE 16] — YENİ TARZ: KAPASİTE KIRILIMI + GERÇEK ERLANG İHTİYACI
+# =============================================================================
+# HÜCRE 5B'nin geliştirilmiş hâli. İki fark:
+#   (1) ÖLÇEKLENMİŞ çağrı eğrisi YOK. Onun yerine çağrı ÜSTTE ayrı panelde,
+#       kendi ekseninde — sahte çarpan yok.
+#   (2) Alt panelde 'gereken kişi' EKLENDİ: Erlang-C, bizim AHT'mizle,
+#       shrinkage dahil. KİŞİ biriminde olduğu için kapasiteyle AYNI eksende
+#       — kesişmeler GERÇEK anlam taşıyor.
+#
+# Renkli dolgular (inhouse / outsource / kısmi) olduğu gibi korunuyor;
+# Erlang üstüne kalın siyah kesikli çizgi olarak biniyor.
+#
+# ÖNKOŞUL: HÜCRE 12 çalışmış olmalı — 'gereken_erlang' kolonu oradan geliyor
+#          (df_genel_e · df_model_e · aht_slot).
+# =============================================================================
+
+def grafik_kapasite_erlang(df, queue='KİTLE', olcu='ortalama', y_adim=25,
+                           cagri_adim=None, kaydet=None):
+    """Kapasite kırılımı + vardiya başlangıcı + Erlang ihtiyacı, TEK EKSEN.
+
+    Üst satır  : gerçekleşen çağrı (kendi ekseni, ölçekleme YOK)
+    Alt satır  : yığılı kapasite (inhouse/outsource/kısmi)
+                 + kapasite çizgisi + vardiya başlangıcı
+                 + Erlang ihtiyacı (kalın siyah kesikli)
+
+    df, 'gereken_erlang' kolonunu İÇERMELİ → erlang_ekle() ile üretilir.
+    Sol sütun hafta içi, sağ sütun hafta sonu; y eksenleri ORTAK.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    veri = {hs: ihtiyac_profili(df, hs, CAGRI_ADEDI, olcu) for hs in (0, 1)}
+    dolu = [g for g in veri.values() if not g.empty]
+    if not dolu:
+        raise ValueError("Çizilecek veri yok.")
+    if 'gereken_erlang' not in dolu[0].columns:
+        raise ValueError("'gereken_erlang' kolonu yok — önce HÜCRE 12'yi "
+                         "çalıştır ya da erlang_ekle(df, aht_slot) uygula.")
+
+    y_max = max(max(g['kapasite_toplam'].max(), g['gereken_erlang'].max())
+                for g in dolu) * 1.30          # kutuya tepede yer bırak
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9), sharex='col',
+                             gridspec_kw={'height_ratios': [1, 3]})
+    ust, alt = axes[0], axes[1]
+    fig.patch.set_facecolor(RENK['yuzey'])
+
+    for j, (hs, gun_ad) in enumerate([(0, 'HAFTA İÇİ'), (1, 'HAFTA SONU')]):
+        g = veri[hs]
+        if g.empty:
+            ust[j].set_visible(False)
+            alt[j].set_visible(False)
+            continue
+
+        # --- ÜST: gerçekleşen çağrı, kendi ekseninde ---
+        _cagri_paneli(ust[j], g, adim=cagri_adim)
+        ust[j].set_title(f"{queue} — {gun_ad}{_kismi_notu(g)}", fontsize=11,
+                         fontweight='bold', color=RENK['metin'], loc='left', pad=8)
+        if j == 0:
+            ust[j].legend(loc='upper left', frameon=False, fontsize=8,
+                          labelcolor=RENK['metin2'])
+
+        # --- ALT: kapasite kırılımı + Erlang ---
+        ax = alt[j]
+        x = np.arange(len(g))
+        kap = g['kapasite_toplam'].values.astype(float)
+        ger = g['gereken_erlang'].values.astype(float)
+        u_in = g['kapasite_in'].values.astype(float)
+        u_out = u_in + g['kapasite_out'].values.astype(float)
+
+        ax.fill_between(x, u_in, color=RENK['inhouse'], alpha=0.45,
+                        zorder=1, label='Kapasite — inhouse')
+        ax.fill_between(x, u_in, u_out, color=RENK['outsource'], alpha=0.85,
+                        zorder=1, label='Kapasite — outsource')
+        if g['kapasite_pt'].sum() > 0:
+            ax.fill_between(x, u_out, kap, color=RENK['kismi'], alpha=0.60,
+                            zorder=1, label='Kapasite — kısmi')
+
+        ax.plot(x, kap, color=RENK['kapasite'], lw=2.4, zorder=4,
+                label='Kapasite (sahadaki kişi)')
+        ax.plot(x, g['baslangic_toplam'].values, color=RENK['baslangic'], lw=2,
+                marker='o', ms=3, zorder=5, label='Vardiya başlangıcı')
+        ax.plot(x, ger, color=RENK['metin'], lw=2.6, ls='--', zorder=6,
+                label=f'Gereken kişi (Erlang-C, ASA≤{TARGET_ASA}sn, shrinkage dahil)')
+
+        ax.set_ylabel('kişi', fontsize=9, color=RENK['metin2'])
+        _eksen(ax, g, y_adim=y_adim)
+        ax.set_ylim(0, y_max)
+
+        # --- bilgi kutusu: eksik/fazla ve karşılanan çağrı ---
+        fazla = float(np.clip(kap - ger, 0, None).sum()) / 2      # kişi-saat
+        eksik = float(np.clip(ger - kap, 0, None).sum()) / 2
+        cg = g['cagri'].values.astype(float)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            acik_pay = np.where(ger > 0, np.clip(ger - kap, 0, None) / ger, 0.0)
+        acik = float((cg * acik_pay).sum())
+        cagri_top = float(cg.sum())
+        oran = (1 - acik / cagri_top) if cagri_top else float('nan')
+        eksik_slot = int((kap < ger).sum())
+        i_dip = int(np.argmin(kap - ger))
+        i_tepe = int(np.argmax(ger))
+
+        _kutu(ax, f"Karşılanan çağrı {oran:.1%}\n"
+                  f"eksik slot {eksik_slot}/{len(g)}\n"
+                  f"fazla {fazla:,.0f} · eksik {eksik:,.0f} kişi-saat\n"
+                  f"tepe ihtiyaç {ger[i_tepe]:.0f} @ {g['interval'].iloc[i_tepe]}\n"
+                  f"en dar slot {g['interval'].iloc[i_dip]} "
+                  f"({kap[i_dip] - ger[i_dip]:+.0f} kişi)\n"
+                  f"{int(g['gun_sayisi'].iloc[0])} gün {olcu}",
+              konum=(0.98, 0.97))
+
+        if j == 0:
+            ax.legend(loc='upper left', frameon=False, fontsize=8,
+                      labelcolor=RENK['metin2'])
+
+    fig.suptitle(f"{queue} — kapasite kırılımı ve Erlang ihtiyacı  "
+                 f"(her iki eğri de KİŞİ biriminde — kesişmeler anlamlı)",
+                 fontsize=13, fontweight='bold', color=RENK['metin'],
+                 x=0.01, ha='left', y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    if kaydet:
+        fig.savefig(kaydet, dpi=150, facecolor=fig.get_facecolor())
+        print(f"✓ {kaydet}")
+    return fig
+
+
+if 'df_genel_e' in globals():
+    # (1) PLAN — kısmiler hafta içi hariç (HÜCRE 12'nin tabanıyla aynı)
+    grafik_kapasite_erlang(df_genel_e, queue=f"{QUEUE.upper()} · PLAN",
+                           y_adim=25)
+
+    # (2) PLAN — kısmiler dahil (sahadaki gerçek kapasite)
+    if 'df_genel_kismili' in globals() and 'aht_slot' in globals():
+        df_kismili_e = erlang_ekle(df_genel_kismili, aht_slot, verbose=False)
+        grafik_kapasite_erlang(df_kismili_e,
+                               queue=f"{QUEUE.upper()} · PLAN (kısmiler dahil)",
+                               y_adim=25)
+
+    # (3) MODEL
+    if 'df_model_e' in globals():
+        grafik_kapasite_erlang(df_model_e, queue=f"{QUEUE.upper()} · MODEL",
+                               y_adim=25)
+else:
+    print("df_genel_e yok — önce HÜCRE 12'yi çalıştır "
+          "(gereken_erlang kolonu oradan geliyor).")
