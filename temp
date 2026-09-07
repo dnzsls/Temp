@@ -1,44 +1,34 @@
-# %% [HÜCRE 19B] — GEÇ VARDİYA GEÇMİŞ ADALETİ (takım bazında, df_gecmis) ─
-# Geç vardiya (GEC_BASLANGIC=15:00 ve sonrası + gece) yükü TAKIMLAR arasında
-# yıllara yayılsın: geçmişte adil payın üstünde geç vardiya yapmış takım, bu ay
-# geç bir tipe atanırsa CEZALI. Az yapmış takım cezasız → model onları seçer.
-#
-# Ölçü ORAN (gün sayısı değil): büyük takımın toplam günü doğal olarak fazla.
-#   oran[T]  = takımın geç gün sayısı ÷ toplam gün sayısı
-#   ortalama = Σ geç gün ÷ Σ toplam gün        (ağırlıklı, tüm takımlar)
-#   katsayı[T] = round(W_GECMIS × max(0, oran[T] − ortalama) × 100)
-# Ceza doğrudan takim_tip değişkeninin KATSAYISINA giriyor → yeni değişken YOK,
-# model büyümüyor. Takım o hafta geç tipe giderse katsayı kadar ceza yazılır.
-# df_gecmis yoksa ya da W_GECMIS=0 ise hücre hiçbir şey yapmaz.
-_gec_dk = dakika(GEC_BASLANGIC)                    # "15:00" → 900 (gece 00:00→1440 dahil)
-gecmis_katsayi = {}                                # takım → geç tip başına ek ceza
-if df_gecmis is not None and W_GECMIS:
-    _gec = df_gecmis.copy()
-    _gec["_gec_mi"] = _gec["shifts_adj"].map(                        # başlangıç ≥ 15:00 mı
-        lambda s: bool(_vardiya_parse(s)) and dakika(_vardiya_parse(s)[0]) >= _gec_dk)
-    _gec["_gec_gun"] = _gec["total_gun_sayisi"].where(_gec["_gec_mi"], 0)
-    _tk = _gec.groupby("takim")[["_gec_gun", "total_gun_sayisi"]].sum()
-    _tk.columns = ["gec", "top"]                                    # takım → geç / toplam gün
-    _ort = _tk["gec"].sum() / max(1, _tk["top"].sum())              # ağırlıklı ortalama oran
-    for T in takimlar:                                              # SADECE modeldeki takımlar
-        if T not in _tk.index or _tk.at[T, "top"] == 0:
-            continue                                                # geçmiş verisi yok → nötr
-        _oran = _tk.at[T, "gec"] / _tk.at[T, "top"]
-        _kat = round(W_GECMIS * max(0.0, _oran - _ort) * 100)
-        if _kat:
-            gecmis_katsayi[T] = _kat
-    _n_gec = 0
-    for (T, wk, bas), yv_ in takim_tip.items():
-        if T in gecmis_katsayi and dakika(bas) >= _gec_dk:
-            amac.append(gecmis_katsayi[T] * yv_)
-            _n_gec += 1
-    _eslesen = len(set(takimlar) & set(_tk.index))
-    print(f"geç vardiya geçmiş adaleti: df_gecmis'te {_eslesen}/{len(takimlar)} takım eşleşti  |  "
-          f"ortalama geç oran %{100 * _ort:.1f}  |  cezalı takım {len(gecmis_katsayi)}  |  "
-          f"{_n_gec} (takım,hafta,geç tip) terimi (ağ. {W_GECMIS})")
-    if gecmis_katsayi:
-        _ilk = sorted(gecmis_katsayi.items(), key=lambda kv: -kv[1])[:5]
-        print(f"  en cezalı 5 takım (geçmişte en çok geç çalışan): {_ilk}")
-else:
-    print("geç vardiya geçmiş adaleti: KAPALI "
-          f"({'df_gecmis yok' if df_gecmis is None else 'W_GECMIS=0'})")
+# ── UNKNOWN TEŞHİSİ — çözüm GEREKTİRMEZ (H20F'den sonra çalıştır) ──────
+print("="*78)
+print("[1] YAPISAL DENGE — hafta içi kapasitesi yeter mi")
+print("="*78)
+_ti = sum(k for (ds,_v),k in talep.items() if dt.date.fromisoformat(ds).weekday()<5)
+_ts = sum(talep.values()) - _ti
+_K, _U = sum(kota_map.values()), sum(ust_map.values())
+print(f"  HAFTA İÇİ  talep {_ti:6d}  vs Σkota      {_K:6d}  → "
+      f"{'⚠ YAPISAL AÇIK '+str(_ti-_K) if _ti>_K else 'pay +'+str(_K-_ti)}")
+print(f"  HAFTA SONU talep {_ts:6d}  vs Σ(ust−kota) {_U-_K:6d}  → "
+      f"{'⚠ AÇIK '+str(_ts-(_U-_K)) if _ts>_U-_K else 'pay +'+str(_U-_K-_ts)}")
+
+print("\n"+"="*78)
+print("[2] H19D BÜTÇE TABLOSU — tip açığı yasak olan hafta var mı")
+print("="*78)
+print(f"  {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} {'pay':>5} "
+      f"{'taban':>6} {'açgözlü':>8} {'BÜTÇE':>6}  seçilen")
+for _wk,_z,_u,_y,_g,_b,_p in _19d_ozet:
+    _s = "TABAN" if (_y+_p)>=_g else "açgözlü"
+    print(f"  {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} {_p:>5} "
+          f"{_y+_p:>6} {_g:>8} {_b:>6}  {_s}"
+          + ("   ← TİP AÇIĞI YASAK" if _b==0 else ""))
+
+print("\n"+"="*78)
+print("[3] ARAMA UZAYI")
+print("="*78)
+print(f"  x değişkeni       : {len(x):,}")
+print(f"  y (takım,hafta,tip): {len(takim_tip):,}")
+print(f"  tip sayısı        : {len(TIP_SET)}   {sorted(TIP_SET)}")
+print(f"  takım / agent     : {len(takimlar)} / {len(AGENTS)}")
+print(f"  amaç terimi       : {len(amac):,}")
+print(f"  tip_acik değişkeni: {len(tip_acik)}   sıfır bütçeli hafta: "
+      f"{sum(1 for *_r,_b,_p in _19d_ozet if _b==0)}")
+print("="*78)
