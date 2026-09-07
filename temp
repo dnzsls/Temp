@@ -1,34 +1,143 @@
-# ── UNKNOWN TEŞHİSİ — çözüm GEREKTİRMEZ (H20F'den sonra çalıştır) ──────
-print("="*78)
-print("[1] YAPISAL DENGE — hafta içi kapasitesi yeter mi")
-print("="*78)
-_ti = sum(k for (ds,_v),k in talep.items() if dt.date.fromisoformat(ds).weekday()<5)
-_ts = sum(talep.values()) - _ti
-_K, _U = sum(kota_map.values()), sum(ust_map.values())
-print(f"  HAFTA İÇİ  talep {_ti:6d}  vs Σkota      {_K:6d}  → "
-      f"{'⚠ YAPISAL AÇIK '+str(_ti-_K) if _ti>_K else 'pay +'+str(_K-_ti)}")
-print(f"  HAFTA SONU talep {_ts:6d}  vs Σ(ust−kota) {_U-_K:6d}  → "
-      f"{'⚠ AÇIK '+str(_ts-(_U-_K)) if _ts>_U-_K else 'pay +'+str(_U-_K-_ts)}")
+# -*- coding: utf-8 -*-
+"""İKİ PICKLE'IN İHTİYAÇLARINI KARŞILAŞTIR (Stage-1 çıktısı, inhouse kovalar)
 
-print("\n"+"="*78)
-print("[2] H19D BÜTÇE TABLOSU — tip açığı yasak olan hafta var mı")
-print("="*78)
-print(f"  {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} {'pay':>5} "
-      f"{'taban':>6} {'açgözlü':>8} {'BÜTÇE':>6}  seçilen")
-for _wk,_z,_u,_y,_g,_b,_p in _19d_ozet:
-    _s = "TABAN" if (_y+_p)>=_g else "açgözlü"
-    print(f"  {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} {_p:>5} "
-          f"{_y+_p:>6} {_g:>8} {_b:>6}  {_s}"
-          + ("   ← TİP AÇIĞI YASAK" if _b==0 else ""))
+Agent modelinin H2 hücresiyle BİREBİR aynı süzme: inhouse + kisi>0.
+Çıktı: df_1, df_2 (tidy talep tabloları) + karşılaştırma tabloları.
+Ayrı dosyada/notebook'ta çalıştır; agent modeline dokunmaz.
+"""
+import pickle
+import datetime as dt
+import pandas as pd
 
-print("\n"+"="*78)
-print("[3] ARAMA UZAYI")
-print("="*78)
-print(f"  x değişkeni       : {len(x):,}")
-print(f"  y (takım,hafta,tip): {len(takim_tip):,}")
-print(f"  tip sayısı        : {len(TIP_SET)}   {sorted(TIP_SET)}")
-print(f"  takım / agent     : {len(takimlar)} / {len(AGENTS)}")
-print(f"  amaç terimi       : {len(amac):,}")
-print(f"  tip_acik değişkeni: {len(tip_acik)}   sıfır bütçeli hafta: "
-      f"{sum(1 for *_r,_b,_p in _19d_ozet if _b==0)}")
-print("="*78)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.expand_frame_repr", False)
+
+# ── KONFİG ────────────────────────────────────────────────────────────
+PKL_1 = ""          # ESKİ / referans pickle yolu
+PKL_2 = ""          # YENİ / karşılaştırılan pickle yolu
+AD_1, AD_2 = "PKL_1", "PKL_2"
+QUEUE = "kitle"     # kitle | kurumsal | gold
+
+DAY_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+
+def talep_df(yol, queue=QUEUE):
+    """pickle → tidy talep tablosu (H2 ile aynı mantık: inhouse, kisi>0)."""
+    with open(yol, "rb") as f:
+        res = pickle.load(f)
+    sat = []
+    for ds in sorted(res):
+        r = res.get(ds)
+        if not r or queue not in r or not r[queue]:
+            continue
+        mi = r[queue]["mip_info"]
+        sc = mi.get("shift_coverage", {})
+        for shift, kisi in mi.get("assignments", {}).items():
+            info = sc.get(shift, {})
+            if kisi <= 0 or info.get("company") != "inhouse":
+                continue
+            d = dt.date.fromisoformat(ds)
+            yil, hafta, _ = d.isocalendar()
+            sat.append({"tarih": ds, "gun": DAY_TR[d.weekday()],
+                        "hafta": f"{yil}-W{hafta}",
+                        "hafta_sonu": int(d.weekday() >= 5),
+                        "vardiya": shift, "tip": info.get("start"),
+                        "bitis": info.get("end"), "talep": int(kisi)})
+    df = pd.DataFrame(sat)
+    df.attrs["gun_sayisi"] = len(res)
+    return df
+
+df_1 = talep_df(PKL_1)
+df_2 = talep_df(PKL_2)
+
+def _ozet(df):
+    hi = df.loc[df.hafta_sonu == 0, "talep"].sum()
+    hs = df.loc[df.hafta_sonu == 1, "talep"].sum()
+    return {"satır": len(df), "gün": df.tarih.nunique(), "tip": df.tip.nunique(),
+            "kova": df.groupby(["tarih", "vardiya"]).ngroups,
+            "hafta içi": int(hi), "hafta sonu": int(hs), "TOPLAM": int(hi + hs)}
+
+print("=" * 84)
+print("[1] GENEL ÖZET")
+print("=" * 84)
+_o = pd.DataFrame({AD_1: _ozet(df_1), AD_2: _ozet(df_2)})
+_o["fark"] = _o[AD_2] - _o[AD_1]
+print(_o.to_string())
+print(f"\n  tipler {AD_1}: {sorted(df_1.tip.unique())}")
+print(f"  tipler {AD_2}: {sorted(df_2.tip.unique())}")
+_y = sorted(set(df_2.tip) - set(df_1.tip))
+_k = sorted(set(df_1.tip) - set(df_2.tip))
+print(f"  YENİ tip: {_y or '—'}   |   KAYBOLAN tip: {_k or '—'}")
+
+print("\n" + "=" * 84)
+print("[2] TİP BAZLI TALEP  (hafta içi / hafta sonu ayrı)")
+print("=" * 84)
+_t1 = df_1.groupby(["tip", "hafta_sonu"])["talep"].sum().unstack(fill_value=0)
+_t2 = df_2.groupby(["tip", "hafta_sonu"])["talep"].sum().unstack(fill_value=0)
+_t = pd.DataFrame({
+    f"{AD_1}_hi": _t1.get(0, 0), f"{AD_2}_hi": _t2.get(0, 0),
+    f"{AD_1}_hs": _t1.get(1, 0), f"{AD_2}_hs": _t2.get(1, 0),
+}).fillna(0).astype(int)
+_t["fark_hi"] = _t[f"{AD_2}_hi"] - _t[f"{AD_1}_hi"]
+_t["fark_hs"] = _t[f"{AD_2}_hs"] - _t[f"{AD_1}_hs"]
+_t["FARK"] = _t.fark_hi + _t.fark_hs
+print(_t.sort_values("FARK").to_string())
+print(f"\n  Σ fark: hafta içi {_t.fark_hi.sum():+d}  |  hafta sonu {_t.fark_hs.sum():+d}"
+      f"  |  TOPLAM {_t.FARK.sum():+d}")
+
+print("\n" + "=" * 84)
+print("[3] HAFTALIK Σ ZİRVE  ← H19D BÜTÇESİNİ BELİRLEYEN SAYI")
+print("=" * 84)
+print("  (her tip için o haftanın EN YOĞUN hafta içi günündeki talep, sonra toplanır)")
+
+def _zirve(df):
+    hi = df[df.hafta_sonu == 0]
+    gunluk = hi.groupby(["hafta", "tip", "tarih"])["talep"].sum().reset_index()
+    zir = gunluk.groupby(["hafta", "tip"])["talep"].max()
+    return zir.groupby("hafta").agg(["sum", "count"]).rename(
+        columns={"sum": "Σzirve", "count": "tip_sayisi"})
+
+_z1, _z2 = _zirve(df_1), _zirve(df_2)
+_z = _z1.join(_z2, lsuffix=f"_{AD_1}", rsuffix=f"_{AD_2}", how="outer").fillna(0).astype(int)
+_z["Σzirve_fark"] = _z[f"Σzirve_{AD_2}"] - _z[f"Σzirve_{AD_1}"]
+_z["tip_fark"] = _z[f"tip_sayisi_{AD_2}"] - _z[f"tip_sayisi_{AD_1}"]
+print(_z.to_string())
+print(f"\n  → Σzirve ARTTIYSA H19D bütçesi sertleşir (yapısal açık büyür).")
+print(f"  → tip_sayisi ARTTIYSA hem y uzayı hem yuvarlama kaybı büyür.")
+
+print("\n" + "=" * 84)
+print("[4] GÜN BAZLI TALEP — en çok değişen 15 gün")
+print("=" * 84)
+_g1 = df_1.groupby(["tarih", "gun"])["talep"].sum()
+_g2 = df_2.groupby(["tarih", "gun"])["talep"].sum()
+_g = pd.DataFrame({AD_1: _g1, AD_2: _g2}).fillna(0).astype(int)
+_g["fark"] = _g[AD_2] - _g[AD_1]
+print(_g.reindex(_g.fark.abs().sort_values(ascending=False).index).head(15).to_string())
+print(f"\n  toplam gün farkı: {_g.fark.sum():+d}  |  "
+      f"değişen gün: {(_g.fark != 0).sum()}/{len(_g)}")
+
+print("\n" + "=" * 84)
+print("[5] KOVA BAZLI — yeni / kaybolan / değişen")
+print("=" * 84)
+_k1 = df_1.set_index(["tarih", "vardiya"])["talep"]
+_k2 = df_2.set_index(["tarih", "vardiya"])["talep"]
+_kk = pd.DataFrame({AD_1: _k1, AD_2: _k2})
+_yeni = _kk[_kk[AD_1].isna() & _kk[AD_2].notna()]
+_kayip = _kk[_kk[AD_1].notna() & _kk[AD_2].isna()]
+_ortak = _kk.dropna()
+_ortak = _ortak.assign(fark=(_ortak[AD_2] - _ortak[AD_1]).astype(int))
+print(f"  YENİ kova   : {len(_yeni):4d}  (talep {int(_yeni[AD_2].sum()):+d})")
+print(f"  KAYBOLAN    : {len(_kayip):4d}  (talep {int(-_kayip[AD_1].sum()):+d})")
+print(f"  ortak, değişen: {int((_ortak.fark != 0).sum()):4d}  "
+      f"(net {int(_ortak.fark.sum()):+d})")
+print(f"  ortak, aynı   : {int((_ortak.fark == 0).sum()):4d}")
+if len(_yeni):
+    print(f"\n  YENİ kovalar (ilk 10):")
+    print(_yeni.head(10).to_string())
+if len(_kayip):
+    print(f"\n  KAYBOLAN kovalar (ilk 10):")
+    print(_kayip.head(10).to_string())
+print(f"\n  en çok değişen 15 ortak kova:")
+print(_ortak.reindex(_ortak.fark.abs().sort_values(ascending=False).index)
+      .head(15).to_string())
+print("=" * 84)
