@@ -1,12 +1,72 @@
+# ── İNCE ÖRNEKLEMLİ TAKIM TEŞHİSİ — H19B katsayısı ne olur (SALT OKUNUR) ──
+import pandas as pd
+
+GEC_BASLANGIC, W_GECMIS = "15:00", 5      # H0'daki değerlerle aynı olmalı
+
+def _dk(t):
+    s, d = str(t).split(":"); m = int(s) * 60 + int(d)
+    return 1440 if m == 0 else m          # 00:00 → 1440 (gece geç sayılır)
+
+def _p(v):
+    q = str(v).split("-")
+    if len(q) != 2: return None
+    try:
+        for t in q:
+            a, b = t.split(":"); int(a); int(b)
+    except ValueError: return None
+    return q[0], q[1]
+
 g = df_gecmis.copy()
-g.columns = [c.strip().lower() for c in g.columns]
-g["takim"] = g["working_main_group"].str.strip()+" | "+g["teamleader_name"].str.strip()
+g.columns = [str(c).strip().lower() for c in g.columns]
+for c in ("teamleader_name", "working_main_group", "shifts_adj"):
+    g[c] = g[c].astype(str).str.strip()
+g["total_gun_sayisi"] = pd.to_numeric(g["total_gun_sayisi"], errors="coerce").fillna(0).astype(int)
+g["takim"]   = g["working_main_group"] + " | " + g["teamleader_name"]
+g["gec_mi"]  = g["shifts_adj"].map(lambda s: bool(_p(s)) and _dk(_p(s)[0]) >= _dk(GEC_BASLANGIC))
+g["gec_gun"] = g["total_gun_sayisi"].where(g["gec_mi"], 0)
 
-print("dönem      :", g[["yil","ay_bas"]].drop_duplicates().to_dict("records"))
-print("takım başına satır:", g.groupby("takim").size().describe()[["min","50%","max"]].to_dict())
-print("takım toplam gün  :", g.groupby("takim")["total_gun_sayisi"].sum().describe()[["min","50%","max"]].to_dict())
+# ORTALAMA: H19B ile BİREBİR aynı → df_gecmis'teki TÜM takımlar üzerinden
+_all = g.groupby("takim").agg(gun=("total_gun_sayisi", "sum"), gec=("gec_gun", "sum"))
+ort = _all["gec"].sum() / max(1, _all["gun"].sum())
 
-import re
-_b = g[~g["shifts_adj"].astype(str).str.match(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$")]
-print("saat formatı olmayan:", len(_b), list(_b["shifts_adj"].unique()[:5]))
-print("eşleşme:", len(set(takimlar) & set(g["takim"])), "/", len(takimlar))
+t = g.groupby("takim").agg(satir=("shifts_adj", "size"),
+                           gun=("total_gun_sayisi", "sum"),
+                           gec=("gec_gun", "sum"))
+t = t[t.index.isin(takimlar)].copy()                    # sadece modeldeki takımlar
+t["oran"]    = t["gec"] / t["gun"].clip(lower=1)
+t["katsayi"] = (W_GECMIS * (t["oran"] - ort).clip(lower=0) * 100).round().astype(int)
+t["uye"]     = [len(takimlar[T]) for T in t.index]
+t["gun_uye"] = (t["gun"] / t["uye"].clip(lower=1)).round(0).astype(int)
+
+KOL = ["uye", "satir", "gun", "gec", "gun_uye", "oran", "katsayi"]
+FMT = lambda v: f"{v:.3f}"
+
+print(f"ağırlıklı ortalama geç oran : %{100*ort:.1f}   (H19B ile aynı hesap)")
+print(f"modeldeki takım             : {len(t)} / {len(takimlar)}\n")
+
+print("=" * 96); print("EN İNCE 5 TAKIM (toplam güne göre)"); print("=" * 96)
+print(t.sort_values("gun").head(5)[KOL].to_string(float_format=FMT))
+
+print("\n" + "=" * 96); print("EN CEZALI 5 TAKIM"); print("=" * 96)
+print(t.sort_values("katsayi", ascending=False).head(5)[KOL].to_string(float_format=FMT))
+
+_ince = t[t["gun"] < 200]
+print("\n" + "=" * 96); print(f"200 GÜNDEN AZ GEÇMİŞİ OLAN: {len(_ince)} takım"); print("=" * 96)
+if len(_ince) == 0:
+    print("  yok")
+for T in _ince.sort_values("gun").index:
+    r = t.loc[T]
+    print(f"\n▶ {T}")
+    print(f"   üye {r.uye} | {r.satir} vardiya satırı | toplam {r.gun} gün "
+          f"({r.gun_uye} gün/üye) | geç {r.gec} | oran %{100*r.oran:.1f} | "
+          f"KATSAYI {r.katsayi}")
+    print(g[g.takim == T][["shifts_adj", "total_gun_sayisi", "gec_mi"]]
+          .sort_values("total_gun_sayisi", ascending=False).to_string(index=False))
+
+print("\n" + "=" * 96)
+print(f"medyan takım: {int(t.gun.median())} gün, {int(t.gun_uye.median())} gün/üye")
+_c = sorted(t[t.katsayi > 0].katsayi.tolist(), reverse=True)
+print(f"cezalı takım: {len(_c)}/{len(t)}   katsayılar: {_c}")
+if _c and _c[0] > 200:
+    print(f"⚠ EN YÜKSEK KATSAYI {_c[0]} — 15 kişilik takımın coverage değeri ~375. "
+          f"Ceza aynı mertebede, ince örneklemden geliyorsa çarpıtır.")
