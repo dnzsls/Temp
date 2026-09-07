@@ -1,11 +1,12 @@
-# 1-4 Eylül'de 15:00 kovası var mı?
-_kw = (2026, 36)
-print("sınır haftası hafta içi tipler:", hafta_tipler.get(_kw))
+g = df_gecmis.copy()
+g.columns = [c.strip().lower() for c in g.columns]
+g["takim"] = g["working_main_group"].str.strip()+" | "+g["teamleader_name"].str.strip()
 
-# o agent'ın kilit durumu
-A = "U123456"          # ← agent kodunu yaz
-print("SERT kilit :", _kilit_sert.get(A))
-print("yumuşak    :", _kilit_yumusak.get(A))
-print("atlanan    :", [r for r in _kilit_atlanan if r[0] == A])
-print("31 Ağu     :", onceki_gunluk.get(A, {}).get(dt.date(2026,8,31)))
-print("15:00 yasak mı:", (A, "15:00") in tip_yasak)
+print("dönem      :", g[["yil","ay_bas"]].drop_duplicates().to_dict("records"))
+print("takım başına satır:", g.groupby("takim").size().describe()[["min","50%","max"]].to_dict())
+print("takım toplam gün  :", g.groupby("takim")["total_gun_sayisi"].sum().describe()[["min","50%","max"]].to_dict())
+
+import re
+_b = g[~g["shifts_adj"].astype(str).str.match(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$")]
+print("saat formatı olmayan:", len(_b), list(_b["shifts_adj"].unique()[:5]))
+print("eşleşme:", len(set(takimlar) & set(g["takim"])), "/", len(takimlar))
