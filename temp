@@ -224,6 +224,18 @@ W_TAKIM      = 2               # takımdan ayrılan her (üye, hafta) için ceza
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
 W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
                                # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
+GECMIS_OLCU   = "gun_agent_ratio"   # H19B oranını hangi sütundan kursun.
+                               # df_gecmis'te bu sütun VARSA kullanılır, YOKSA
+                               # otomatik "total_gun_sayisi"na düşer (eski davranış).
+                               # None → her zaman total_gun_sayisi.
+                               #
+                               # DİKKAT — bölen takım başına SABİTSE (ör. takımın
+                               # agent sayısı) oran MATEMATİKSEL OLARAK DEĞİŞMEZ:
+                               #   (gece/agent) ÷ (toplam/agent) = gece / toplam
+                               # Bölen SATIR bazında değişiyorsa (ör. o vardiyayı
+                               # fiilen yapan agent sayısı) ölçü gerçekten değişir.
+                               # H19B çıktısı iki ölçüyü karşılaştırıp hangisi
+                               # olduğunu basıyor → "EN BÜYÜK fark" satırına bak.
 # SINIR HAFTASI TİP KİLİDİ (H19E) — önceki aydan vardiya devamlılığı.
 # SORUN: ay ortasında başlayan ISO hafta (ör. 1 Eylül Salı → aynı haftanın Pazartesi'si
 # 31 Ağustos) modelin GÖRMEDİĞİ bir çizelgeyle başlıyor. Kilit yokken agent
@@ -542,11 +554,21 @@ if df_gecmis is not None:
         df_gecmis[_c] = df_gecmis[_c].astype(str).str.strip()
     df_gecmis["total_gun_sayisi"] = (pd.to_numeric(df_gecmis["total_gun_sayisi"],
                                                    errors="coerce").fillna(0).astype(int))
+    # OPSİYONEL ÖLÇÜ SÜTUNU (GECMIS_OLCU): varsa sayıya çevrilir. Takım boyutuna
+    # göre normalize edilmiş bir oran bekleniyor; float olabilir.
+    if GECMIS_OLCU and GECMIS_OLCU in df_gecmis.columns:
+        df_gecmis[GECMIS_OLCU] = (pd.to_numeric(df_gecmis[GECMIS_OLCU],
+                                                errors="coerce").fillna(0.0).astype(float))
     df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
                           + df_gecmis["teamleader_name"])          # H6 ile aynı anahtar
     print(f"\ndf_gecmis: {df_gecmis.shape[0]} satır  |  "
           f"{df_gecmis['takim'].nunique()} takım  |  "
           f"toplam {df_gecmis['total_gun_sayisi'].sum()} gün")
+    if GECMIS_OLCU:
+        print(f"  H19B ölçü sütunu '{GECMIS_OLCU}': "
+              + (f"VAR (toplam {df_gecmis[GECMIS_OLCU].sum():,.1f}) → kullanılacak"
+                 if GECMIS_OLCU in df_gecmis.columns
+                 else "YOK → total_gun_sayisi'na düşülecek"))
     print(f"df_gecmis shifts_adj: {df_gecmis['shifts_adj'].value_counts().head(10).to_dict()}")
     print(df_gecmis.head())
 else:
@@ -1866,15 +1888,26 @@ def _gecmis_kutu(bas):
 gecmis_katsayi = {}                                # (takım, kutu) → ek ceza
 if df_gecmis is not None and W_GECMIS:
     _gec = df_gecmis.copy()
+    # ÖLÇÜ SÜTUNU: GECMIS_OLCU varsa o, yoksa ham gün (geriye dönük uyumlu).
+    _olcu = (GECMIS_OLCU if (GECMIS_OLCU and GECMIS_OLCU in _gec.columns)
+             else "total_gun_sayisi")
     _gec["_kutu"] = _gec["shifts_adj"].map(
         lambda s: _gecmis_kutu(_vardiya_parse(s)[0]) if _vardiya_parse(s) else None)
-    for _k in ("aksam", "gece"):                              # kutu başına gün sütunu
-        _gec[f"_{_k}_gun"] = _gec["total_gun_sayisi"].where(_gec["_kutu"] == _k, 0)
-    _tk = _gec.groupby("takim")[["_aksam_gun", "_gece_gun", "total_gun_sayisi"]].sum()
+    for _k in ("aksam", "gece"):                              # kutu başına ölçü + ham gün
+        _gec[f"_{_k}_gun"] = _gec[_olcu].where(_gec["_kutu"] == _k, 0)
+        _gec[f"_{_k}_ham"] = _gec["total_gun_sayisi"].where(_gec["_kutu"] == _k, 0)
+    _tk = _gec.groupby("takim")[["_aksam_gun", "_gece_gun", _olcu]].sum()
     _tk.columns = ["aksam", "gece", "top"]
-    _ort = {_k: _tk[_k].sum() / max(1, _tk["top"].sum()) for _k in ("aksam", "gece")}
+    # HAM gün ile paralel tablo — yeni ölçü gerçekten farklı mı, yoksa sadeleşiyor mu
+    _tk_ham = _gec.groupby("takim")[["_aksam_ham", "_gece_ham", "total_gun_sayisi"]].sum()
+    _tk_ham.columns = ["aksam", "gece", "top"]
+    _ort = {_k: _tk[_k].sum() / max(1e-9, float(_tk["top"].sum()))
+            for _k in ("aksam", "gece")}
+    # ham gün ortalaması — teşhis çıktısında karşılaştırmak için
+    _ort_ham = {_k: _tk_ham[_k].sum() / max(1e-9, float(_tk_ham["top"].sum()))
+                for _k in ("aksam", "gece")}
     for T in takimlar:                                        # SADECE modeldeki takımlar
-        if T not in _tk.index or _tk.at[T, "top"] == 0:
+        if T not in _tk.index or _tk.at[T, "top"] <= 0:
             continue                                          # geçmiş verisi yok → nötr
         for _k in ("aksam", "gece"):
             _oran = _tk.at[T, _k] / _tk.at[T, "top"]
@@ -1890,6 +1923,35 @@ if df_gecmis is not None and W_GECMIS:
     _eslesen = len(set(takimlar) & set(_tk.index))
     print(f"geç vardiya geçmiş adaleti: df_gecmis'te {_eslesen}/{len(takimlar)} takım eşleşti  "
           f"(ağ. {W_GECMIS}, sabah/gündüz tiplerine DOKUNULMUYOR)")
+    # ── ÖLÇÜ TEŞHİSİ: seçilen sütun ham günden farklı bir oran üretiyor mu ──
+    if _olcu == "total_gun_sayisi":
+        print(f"  ölçü sütunu: total_gun_sayisi (ham gün)"
+              + (f"  ⚠ '{GECMIS_OLCU}' df_gecmis'te YOK" if GECMIS_OLCU else ""))
+    else:
+        _fark, _fark_T = 0.0, None
+        for _T in _tk.index:
+            if _tk.at[_T, "top"] <= 0 or _tk_ham.at[_T, "top"] <= 0:
+                continue
+            for _kk in ("aksam", "gece"):
+                _d = abs(_tk.at[_T, _kk] / _tk.at[_T, "top"]
+                         - _tk_ham.at[_T, _kk] / _tk_ham.at[_T, "top"])
+                if _d > _fark:
+                    _fark, _fark_T = _d, (_T, _kk)
+        print(f"  ölçü sütunu: {_olcu} (total_gun_sayisi yerine)")
+        if _fark < 1e-9:
+            print(f"    takım ORANLARI ham günle birebir aynı (bölen takım başına "
+                  f"sabit → pay/paydada sadeleşiyor)")
+        else:
+            print(f"    takım oranlarında ham günden EN BÜYÜK sapma: {100 * _fark:.2f} "
+                  f"puan ({_fark_T[1]}, {_fark_T[0].split(' | ')[-1]})")
+        # ASIL ETKİ: kıyas ORTALAMASI. Ham günde büyük takım ortalamayı domine
+        # eder (gün-ağırlıklı); normalize sütunda her takım EŞİT ağırlıkta olur.
+        # Ceza = W × (oran − ortalama) olduğu için katsayılar buradan değişir.
+        print(f"    kıyas ORTALAMASI (asıl etki — ceza bu farktan doğuyor):")
+        for _kk in ("aksam", "gece"):
+            print(f"      {_kk:<6} ham gün %{100 * _ort_ham[_kk]:.1f}"
+                  f"  →  {_olcu} %{100 * _ort[_kk]:.1f}"
+                  f"   ({100 * (_ort[_kk] - _ort_ham[_kk]):+.1f} puan)")
     for _k, _ad in (("aksam", f"AKŞAM (≥{GEC_BASLANGIC}, gece hariç)"),
                     ("gece",  f"GECE  ({'/'.join(sorted(GECE_TIPLERI))})")):
         _cz = {T: v for (T, kk), v in gecmis_katsayi.items() if kk == _k}
