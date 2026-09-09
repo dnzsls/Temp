@@ -224,18 +224,6 @@ W_TAKIM      = 2               # takımdan ayrılan her (üye, hafta) için ceza
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
 W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
                                # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
-GECMIS_OLCU   = "gun_agent_ratio"   # H19B oranını hangi sütundan kursun.
-                               # df_gecmis'te bu sütun VARSA kullanılır, YOKSA
-                               # otomatik "total_gun_sayisi"na düşer (eski davranış).
-                               # None → her zaman total_gun_sayisi.
-                               #
-                               # DİKKAT — bölen takım başına SABİTSE (ör. takımın
-                               # agent sayısı) oran MATEMATİKSEL OLARAK DEĞİŞMEZ:
-                               #   (gece/agent) ÷ (toplam/agent) = gece / toplam
-                               # Bölen SATIR bazında değişiyorsa (ör. o vardiyayı
-                               # fiilen yapan agent sayısı) ölçü gerçekten değişir.
-                               # H19B çıktısı iki ölçüyü karşılaştırıp hangisi
-                               # olduğunu basıyor → "EN BÜYÜK fark" satırına bak.
 # SINIR HAFTASI TİP KİLİDİ (H19E) — önceki aydan vardiya devamlılığı.
 # SORUN: ay ortasında başlayan ISO hafta (ör. 1 Eylül Salı → aynı haftanın Pazartesi'si
 # 31 Ağustos) modelin GÖRMEDİĞİ bir çizelgeyle başlıyor. Kilit yokken agent
@@ -554,21 +542,21 @@ if df_gecmis is not None:
         df_gecmis[_c] = df_gecmis[_c].astype(str).str.strip()
     df_gecmis["total_gun_sayisi"] = (pd.to_numeric(df_gecmis["total_gun_sayisi"],
                                                    errors="coerce").fillna(0).astype(int))
-    # OPSİYONEL ÖLÇÜ SÜTUNU (GECMIS_OLCU): varsa sayıya çevrilir. Takım boyutuna
-    # göre normalize edilmiş bir oran bekleniyor; float olabilir.
-    if GECMIS_OLCU and GECMIS_OLCU in df_gecmis.columns:
-        df_gecmis[GECMIS_OLCU] = (pd.to_numeric(df_gecmis[GECMIS_OLCU],
-                                                errors="coerce").fillna(0.0).astype(float))
+    # gun_agent_ratio: takım boyutuna normalize edilmiş gün ölçüsü (H19B kullanır).
+    # Sütun yoksa hata VERMEZ → H19B ham güne (total_gun_sayisi) düşer.
+    if "gun_agent_ratio" in df_gecmis.columns:
+        df_gecmis["gun_agent_ratio"] = (pd.to_numeric(df_gecmis["gun_agent_ratio"],
+                                                      errors="coerce")
+                                        .fillna(0.0).astype(float))
     df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
                           + df_gecmis["teamleader_name"])          # H6 ile aynı anahtar
     print(f"\ndf_gecmis: {df_gecmis.shape[0]} satır  |  "
           f"{df_gecmis['takim'].nunique()} takım  |  "
           f"toplam {df_gecmis['total_gun_sayisi'].sum()} gün")
-    if GECMIS_OLCU:
-        print(f"  H19B ölçü sütunu '{GECMIS_OLCU}': "
-              + (f"VAR (toplam {df_gecmis[GECMIS_OLCU].sum():,.1f}) → kullanılacak"
-                 if GECMIS_OLCU in df_gecmis.columns
-                 else "YOK → total_gun_sayisi'na düşülecek"))
+    print(f"  H19B ölçü sütunu 'gun_agent_ratio': "
+          + (f"VAR (toplam {df_gecmis['gun_agent_ratio'].sum():,.1f}) → kullanılacak"
+             if "gun_agent_ratio" in df_gecmis.columns
+             else "⚠ YOK → total_gun_sayisi'na düşülecek (ham gün)"))
     print(f"df_gecmis shifts_adj: {df_gecmis['shifts_adj'].value_counts().head(10).to_dict()}")
     print(df_gecmis.head())
 else:
@@ -1888,8 +1876,9 @@ def _gecmis_kutu(bas):
 gecmis_katsayi = {}                                # (takım, kutu) → ek ceza
 if df_gecmis is not None and W_GECMIS:
     _gec = df_gecmis.copy()
-    # ÖLÇÜ SÜTUNU: GECMIS_OLCU varsa o, yoksa ham gün (geriye dönük uyumlu).
-    _olcu = (GECMIS_OLCU if (GECMIS_OLCU and GECMIS_OLCU in _gec.columns)
+    # ÖLÇÜ SÜTUNU: df_gecmis'teki gun_agent_ratio (takım boyutuna normalize
+    # edilmiş gün). Sütun yoksa ham güne düşer → eski davranış, hata vermez.
+    _olcu = ("gun_agent_ratio" if "gun_agent_ratio" in _gec.columns
              else "total_gun_sayisi")
     _gec["_kutu"] = _gec["shifts_adj"].map(
         lambda s: _gecmis_kutu(_vardiya_parse(s)[0]) if _vardiya_parse(s) else None)
@@ -1925,8 +1914,9 @@ if df_gecmis is not None and W_GECMIS:
           f"(ağ. {W_GECMIS}, sabah/gündüz tiplerine DOKUNULMUYOR)")
     # ── ÖLÇÜ TEŞHİSİ: seçilen sütun ham günden farklı bir oran üretiyor mu ──
     if _olcu == "total_gun_sayisi":
-        print(f"  ölçü sütunu: total_gun_sayisi (ham gün)"
-              + (f"  ⚠ '{GECMIS_OLCU}' df_gecmis'te YOK" if GECMIS_OLCU else ""))
+        print(f"  ölçü sütunu: total_gun_sayisi (ham gün)  "
+              f"⚠ 'gun_agent_ratio' df_gecmis'te YOK → büyük takım kıyas "
+              f"ortalamasını domine eder")
     else:
         _fark, _fark_T = 0.0, None
         for _T in _tk.index:
