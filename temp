@@ -3947,30 +3947,88 @@ else:
     print(f"    toplam tavan yeterli (fazla {-_acik} kişi-gün); "
           f"kullanılmayan tavan {_top_ust - _gercek_atama} kişi-gün.")
 
-# ── 1B) HAFTA İÇİ / HAFTA SONU AYRI BİLANÇO — asıl belirleyici olan bu ────
-# Toplam karşılaştırma YANILTICI: kotanın ÜSTÜNDEKİ kapasite (mesai payı) zorunlu
-# olarak HAFTA SONU günüdür (kota = tüm müsait hafta içi gün). Hafta sonu doluysa
-# o kapasite ölü kalır, hafta içine AKTARILAMAZ.
-#   hafta içi TAVAN  = Σ kota           (agent en fazla tüm müsait hafta içi gününü çalışır)
-#   hafta sonu TAVAN = Σ (ust − kota)   (mesai + tatil + sınır alacağı payı)
-# Hafta içi talep Σ kota'yı aşıyorsa fark YAPISALDIR: takım-tip düzeltmesi,
-# ağırlık, MAX_MESAI — hiçbiri kapatamaz (mesai hafta içine gün ekleyemez).
+# ── 1B) KİŞİ-GÜN HAVUZU — hafta içi ve hafta sonu AYNI havuzu paylaşıyor ──
+# ESKİ HÂLİ YANILTICIYDI, kayda geçsin:
+#   hafta içi TAVAN  = Σ kota
+#   hafta sonu TAVAN = Σ (ust − kota)
+# İki satır bağımsız tavan gibi sunuluyordu. Gizli varsayım: "hafta sonu ancak
+# MESAİ olarak yapılır". Oysa hafta sonu NORM olarak da yapılır (agent bir hafta
+# içi gününü off alıp yerine hafta sonu çalışır; toplam gün aynı, kota dolu,
+# mesai YOK). NORM günü KOTADAN gelir → o gün hafta içi kapasiteden DÜŞER.
+# Ölçülen sonuç (2026-09): tablo "hafta sonu açık 399" diyordu ama gerçek hafta
+# sonu eksiği 4'tü — model açığı NORM ile kapattı ve faturayı hafta içine yazdı.
+# "Hafta içi yapısal açık 86" da bu yüzden gerçeğin çok altındaydı.
+#
+# DOĞRU KURGU — üç sert sınır, tek havuz:
+#   (a) hafta içi çalışma       ≤ Σ kota              (hafta içinde o kadar gün var)
+#   (b) hafta içi + hafta sonu  ≤ Σ ust               (kota + mesai + tatil payı)
+#   (c) hafta sonu              ≥ Σ(talep − HS_TOL)   (H10 SERT band, ZORUNLU)
+# (c) önce dolar → hafta içine kalan tavan:
+#   W_max = min( Σkota , Σust − zorunlu_hafta_sonu )
+# Hafta içi KAÇINILMAZ açık = talep_hi − W_max. Bu sayı ağırlıkla, MAX_MESAI ile,
+# takım-tip ayarıyla KAPANMAZ — kadro/outsource ya da Stage-1 talebi kararıdır.
 _talep_hi = sum(k for (ds, _v), k in talep.items()
-                if dt.date.fromisoformat(ds).weekday() < 5)
-_talep_hs = _top_talep - _talep_hi
-_hs_tavan = _top_ust - _top_kota
-print(f"\n[1B] HAFTA İÇİ / HAFTA SONU AYRI (mesai kapasitesi hafta içine AKTARILAMAZ)")
-print(f"    HAFTA İÇİ  talep {_talep_hi:6d}  vs tavan (Σkota) {_top_kota:6d}  "
-      f"→ {'⚠ YAPISAL AÇIK ' + str(_talep_hi - _top_kota) if _talep_hi > _top_kota else 'tavan yeterli (+' + str(_top_kota - _talep_hi) + ')'}")
-print(f"    HAFTA SONU talep {_talep_hs:6d}  vs tavan (Σust−Σkota) {_hs_tavan:6d}  "
-      f"→ {'⚠ AÇIK ' + str(_talep_hs - _hs_tavan) if _talep_hs > _hs_tavan else 'tavan yeterli (+' + str(_hs_tavan - _talep_hs) + ')'}")
-if _talep_hi > _top_kota:
-    _yap = _talep_hi - _top_kota
-    print(f"    → Hafta içi eksiğin EN AZ {_yap} kişi-günü YAPISAL. Kalanı dağıtım.")
-    print(f"      Yapısal kısmın çaresi: kadro/outsource ya da Stage-1 hafta içi talebini")
-    print(f"      düşürmek. MAX_MESAI ve takım-tip ayarı bu kısma DOKUNAMAZ.")
+                if dt.date.fromisoformat(ds).weekday() < 5
+                and dt.date.fromisoformat(ds) not in TATIL)
+_talep_tat = sum(k for (ds, _v), k in talep.items()
+                 if dt.date.fromisoformat(ds) in TATIL)
+_talep_hs = _top_talep - _talep_hi - _talep_tat
+# (c) hafta sonu sert bandın ZORUNLU kıldığı alt sınır
+_zorunlu_hs = sum(max(0, k - HS_TOL) for (ds, _v), k in talep.items()
+                  if dt.date.fromisoformat(ds).weekday() >= 5
+                  and dt.date.fromisoformat(ds) not in TATIL)
+# FİİLEN atanan — df_cov'dan (tahmin YOK, çözümün kendi sayısı)
+_cov_d = df_cov["tarih"].map(dt.date.fromisoformat)
+_at_hs  = int(df_cov.loc[(_cov_d.map(lambda d: d.weekday() >= 5))
+                         & (~_cov_d.isin(TATIL)), "atanan"].sum())
+_at_tat = int(df_cov.loc[_cov_d.isin(TATIL), "atanan"].sum())
+_at_hi  = int(df_cov.loc[(_cov_d.map(lambda d: d.weekday() < 5))
+                         & (~_cov_d.isin(TATIL)), "atanan"].sum())
+# hafta sonunun MESAİ / NORM kırılımı — roster_2 (H22) ile BİREBİR aynı ölçü.
+# E (hafta sonu çalışma) = mesai_gun + norm_gun kimliği H22'de kanıtlı:
+#   mesai = max(0, E − borç),  norm = min(E, borç)   → toplamı her zaman E
+_hs_mesai = int(roster_2["mesai_gun"].sum())
+_hs_norm  = int(roster_2["norm_gun"].sum())
+# HAFTA İÇİ TAVAN — iki sınırın darı
+_W_kota = _top_kota
+_W_ust  = _top_ust - _zorunlu_hs - _talep_tat
+_W_max  = min(_W_kota, _W_ust)
+_kacinilmaz_hi = max(0, _talep_hi - _W_max)
+# kova bazlı hafta içi eksik (tatil hariç) — [2] ile aynı ölçü
+_eksik_hi_kova = int(-df_cov.loc[(df_cov["fark"] < 0)
+                                 & (_cov_d.map(lambda d: d.weekday() < 5))
+                                 & (~_cov_d.isin(TATIL)), "fark"].sum())
+
+print(f"\n[1B] KİŞİ-GÜN HAVUZU — hafta içi ve hafta sonu AYNI havuzu paylaşıyor")
+print(f"    ÜÇ SERT SINIR:")
+print(f"      (a) hafta içi çalışma       ≤ Σkota            = {_top_kota:>6}")
+print(f"      (b) hafta içi + hafta sonu  ≤ Σust             = {_top_ust:>6}")
+print(f"      (c) hafta sonu              ≥ Σ(talep−{HS_TOL}) [SERT] = {_zorunlu_hs:>6}")
+print(f"    ⚠ (a) ile (c) AYNI havuzdan yiyor: hafta sonu günü MESAİ ise kotanın")
+print(f"      ÜSTÜNDEN gelir; NORM ise KOTADAN gelir → hafta içinden düşer.")
+print(f"      Mesai payı (Σust−Σkota = {_top_ust - _top_kota}) aşıldıktan sonrası ZORUNLU NORM.")
+print(f"\n    FİİLEN NE OLDU (çözümün kendi sayıları)")
+print(f"      hafta sonu : talep {_talep_hs:>6}   atanan {_at_hs:>6}"
+      f"   (sert band ±{HS_TOL})")
+print(f"         ├ MESAİ olarak        {_hs_mesai:>6}   ← kotanın üstü, hafta içine dokunmaz")
+print(f"         └ NORM/TELAFİ olarak  {_hs_norm:>6}   ← KOTADAN yendi, hafta içinden çıktı")
+if _talep_tat:
+    print(f"      resmi tatil: talep {_talep_tat:>6}   atanan {_at_tat:>6}")
+print(f"      hafta içi  : talep {_talep_hi:>6}   atanan {_at_hi:>6}")
+print(f"\n    HAFTA İÇİ KAÇINILMAZ AÇIK")
+print(f"      tavan = min( Σkota {_W_kota} , Σust−zorunlu_hs{'−tatil' if _talep_tat else ''} "
+      f"{_W_ust} ) = {_W_max}"
+      f"   [{'Σkota' if _W_kota <= _W_ust else 'hafta sonu baskısı'} bağlıyor]")
+print(f"      hafta içi talep                                  {_talep_hi}")
+if _kacinilmaz_hi:
+    print(f"      → EN AZ {_kacinilmaz_hi} kişi-gün KAÇINILMAZ — model kapatamaz")
+    print(f"        (çare: kadro/outsource ya da Stage-1 hafta içi talebi)")
+    print(f"      → kova bazlı hafta içi eksik: {_eksik_hi_kova}")
+    print(f"      → aradaki {_eksik_hi_kova - _kacinilmaz_hi} kişi-gün DÜZELTİLEBİLİR "
+          f"(yanlış yere atama + kullanılmayan tavan) → [2] ve [3]'e bak")
 else:
-    print(f"    → Hafta içi eksik tamamen DAĞITIM sorunu (takım-tip tahsisi, [3]'e bak).")
+    print(f"      → kaçınılmaz açık YOK; hafta içi eksiğin ({_eksik_hi_kova}) TAMAMI")
+    print(f"        dağıtım sorunu (takım-tip tahsisi) → [3]'e bak")
 
 # ── 2) EKSİK NEREDE ───────────────────────────────────────────────────
 _eks = df_cov[df_cov["fark"] < 0].copy()
@@ -4872,8 +4930,11 @@ LEJANT = [
     ("kidem_ay",          None, None,
      "Agentın kıdemi (ay, ondalıklı). Kaynak df_kidem; boş = veri yok (KIDEMLİ sayıldı)"),
     ("gece_yasak",        None, None,
-     "1 → GECE (00:00) vardiyası YAZILAMAZ (H14B): kıdem MIN_KIDEM_AY'dan az, "
-     "YA DA kıdemi df_kidem'de yok (BILINMEYEN_KIDEMSIZ=True ise kıdemsiz sayılır). "
+     "GECE (00:00) vardiyası YAZILAMAZ — SEBEBİ yazılı, boş hücre = yazılabilir. "
+     "'kıdem' → H14B: kidem_ay MIN_KIDEM_AY'dan az YA DA kıdemi df_kidem'de yok "
+     "(BILINMEYEN_KIDEMSIZ=True ise kıdemsiz sayılır). "
+     "'sabahçı' → H13: sabah_calisir_flg=1, bitişi >20:00 olan vardiya yasak → gece de kapalı. "
+     "'kıdem+sabahçı' → ikisi birden. "
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
     ("--- takim_vardiya SAYFASI ---", None, None, ""),
     ("70+1",              None, None,
@@ -4961,10 +5022,25 @@ for _a in _agents_sirali:
     # tekrar edebilir, kod tekildir; başka tabloyla eşleştirme kodla yapılır.
     _r = {"agent_name": _ad.get(_a, _a), "agent_kod": _a,
           "takim": roster_2.at[_a, "takim"]}
-    if _kidem_xl:                                       # kıdem verisi varsa 2 kolon
+    if _kidem_xl:                                       # kıdem verisi varsa kidem_ay kolonu
         _kd = _kidem_xl.get(_a)
         _r["kidem_ay"] = (round(float(_kd), 2) if pd.notna(_kd) else None)   # bilinmiyorsa BOŞ
-        _r["gece_yasak"] = int(_a in junior_agents)     # 1 → 00:00 vardiyası yazılamaz (H14B)
+    # GECEYE YAZILAMAZ — SEBEBİ İLE. İki ayrı sert kural aynı sonucu veriyor:
+    #   H14B kıdem : kidem_ay < MIN_KIDEM_AY, ya da kıdemi df_kidem'de YOK
+    #                (BILINMEYEN_KIDEMSIZ=True iken kıdemsiz sayılır)
+    #   H13 sabahçı: sabah_calisir_flg=1 → bitişi >20:00 olan vardiya YASAK
+    #                → gece (00:00-08:00) de otomatik kapalı
+    # Eskiden bu kolon SADECE kıdemi yazıyordu (int 0/1) ve kıdem bloğunun
+    # İÇİNDEYDİ → (a) sabahçı agent "gece_yasak=0" görünüyordu ama fiilen
+    # geceye yazılamıyordu, (b) df_kidem yoksa kolon hiç basılmıyordu ve
+    # sabahçı bilgisi de kayboluyordu. Artık kıdemden BAĞIMSIZ, her zaman var.
+    # Boş hücre = geceye yazılabilir.
+    _gy = []
+    if _a in junior_agents:
+        _gy.append("kıdem")
+    if _a in sabah_agents:
+        _gy.append("sabahçı")
+    _r["gece_yasak"] = "+".join(_gy)                    # "" | kıdem | sabahçı | kıdem+sabahçı
     for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
         _r[_k] = roster_2.at[_a, _k]
     for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
