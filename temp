@@ -2764,9 +2764,32 @@ else:
     _kd = Counter(_s.split(" (")[0] for _, _s in _kilit_yumusak.values())
     print(f"  yumuşak çekim dağılımı  : {dict(sorted(_yd.items()))}  |  "
           f"kaynak: {dict(_kd)}")
-    _serbest = len(AGENTS) - len(_kilit_sert) - len(_kilit_yumusak)
-    print(f"  serbest kalan agent     : {_serbest} "
-          f"(devam ettirilecek geçmişi yok → coverage esnekliği bunlardan gelir)")
+    # SERBEST = kilit de çekim de uygulanmayan agent. AMA bunların çoğu o hafta
+    # HİÇ ÇALIŞAMIYOR olabilir: ay boyu izinli (idari/doğum) ya da tüm hafta
+    # off_t2 → H19'da agent_tip göstergesi hiç kurulmaz → coverage esnekliğine
+    # katkısı SIFIR. Eski mesaj ikisini ayırmıyordu ve "esneklik bunlardan gelir"
+    # diyordu; 2026-09'da 57 serbest görünüyordu, gerçekte kullanılabilir olan
+    # 2 kişiydi. Aşağıdaki tablonun 'serbest*' sütunu ZATEN mevcut olanı sayıyor
+    # (agent_tip kontrolü var) → iki sayı arasındaki fark okuyucuyu yanıltıyordu.
+    _serbest_l = [a for a in AGENTS
+                  if a not in _kilit_sert and a not in _kilit_yumusak]
+    _serbest_var = [a for a in _serbest_l
+                    if any((a, _kw, _b19e) in agent_tip for _b19e in TIP_SET)]
+    _serbest_yok = len(_serbest_l) - len(_serbest_var)
+    print(f"  serbest agent           : {len(_serbest_l)} "
+          f"(kilit/çekim uygulanmadı — devam ettirilecek geçmişi yok)")
+    print(f"    ├ o hafta MEVCUT      : {len(_serbest_var)} "
+          f"← coverage esnekliği SADECE bunlardan gelir")
+    print(f"    └ o hafta DEĞİŞKENİ YOK: {_serbest_yok} "
+          f"(ay boyu izinli / hafta boyu off_t2 → katkı 0)")
+    if _serbest_yok > len(_serbest_var):
+        print(f"    ⚠ serbest agentların {_serbest_yok}/{len(_serbest_l)}'i "
+              f"{_kw[0]}-W{_kw[1]}'da hiç çalışamıyor → kilitli dağılım fiilen "
+              f"SABİT.")
+        print(f"      Aşağıdaki PAY sütununda fazla çıkan tipler oynatılamaz; "
+              f"açık tipleri")
+        print(f"      kapatmak için sadece {len(_serbest_var)} serbest + "
+              f"{len(_kilit_yumusak)} yumuşak agent var.")
     if _kilit_atlanan:
         print(f"  ⚠ {len(_kilit_atlanan)} agentta kilit UYGULANAMADI (emniyet valfi):")
         for a, _t, _sb in _kilit_atlanan[:15]:
@@ -2795,7 +2818,9 @@ else:
         _s3 = sum(1 for a in AGENTS if a not in _kilit_sert and a not in _kilit_yumusak
                   and (a, _kw, _t) in agent_tip)
         print(f"    {_t:>7} {_s1:>6} {_s2:>8} {_s3:>9} {_z:>12} {_s1 + _s2 - _z:>+6}")
-    print(f"    * serbest = o tipe GİREBİLİR (tek tipe sayılmaz, birden çok tipte görünür)")
+    print(f"    * serbest = o tipe GİREBİLİR (tek tipe sayılmaz, birden çok tipte")
+    print(f"      görünür). SADECE o hafta değişkeni OLAN serbest agentları sayar →")
+    print(f"      yukarıdaki 'o hafta MEVCUT' ({len(_serbest_var)}) ile aynı havuz.")
     # gece sert bandı — çözümsüzlük buradan gelir
     _gece_risk = []
     for ds in _kw_hi:
