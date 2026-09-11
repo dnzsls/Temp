@@ -1005,104 +1005,175 @@ else:
         print("  ✓ eksik gün / tanınmayan değer yok")
 
 
-# %% [HÜCRE 8D] — GÜNLÜK ATANABİLİR AGENT (veri kontrolü, KISIT YOK) ────
-# NE İŞE YARAR: model kurulmadan ÖNCE "o gün sahada kaç kişi var" sorusunun
-# cevabı. Çözüm 45 dakika sürüyor; talebin karşılanabilir olup olmadığını
-# baştan görmek gerekiyor. Bu hücre HİÇBİR kısıt kurmaz, sadece sayar.
+# %% [HÜCRE 8D] — GÜNLÜK YAZILABİLİR AGENT (veri kontrolü, KISIT YOK) ───
+# NE İŞE YARAR: model kurulmadan ÖNCE "o gün bu kişiye vardiya YAZABİLİR
+# MİYİM?" sorusunun cevabı. Çözüm 45 dk sürüyor; talebin karşılanabilir olup
+# olmadığını baştan görmek gerekiyor. Bu hücre HİÇBİR kısıt kurmaz, sadece sayar.
 #
-# ÜÇ SAYAÇ — H7'nin sözlüklerinden, ÖNCELİK SIRASIYLA (aynı kişi İKİ KEZ SAYILMAZ):
-#       izin  >  off_t2  >  off_t
-#   izin    : izin_map      → değişken AÇILMAZ, kotadan DÜŞER
-#   off_t2  : off_block_map → değişken AÇILMAZ, kota düşmez (SERT talep)
-#   off_t   : off_soft_map  → değişken AÇILIR (yumuşak talep, cezalı)
+# ÖLÇÜ: NET = o gün gerçekten vardiya yazabileceğin kişi sayısı.
+#       NET = toplam − YAZILAMAZ
 #
-# ÖNCELİK NEDEN ŞART: aynı agentın aynı güne YANLIŞLIKLA hem izin hem off_t2
+# YAZILAMAZ = o gün TÜM vardiyaları kapalı olan kişi. BEŞ sebep var; hepsi
+# koddaki SERT kurallardan geliyor, TEK ÖNCELİK ZİNCİRİNDE sayılıyor
+# (aynı kişi iki kolonda GÖRÜNMEZ):
+#
+#   1) izin    izin_map      → H9 değişken AÇMAZ. Kotadan düşer (H17).
+#   2) off_t2  off_block_map → H9 değişken AÇMAZ. SERT off talebi, kota düşmez.
+#   3) hs_y    hamile/süt    → H14: Cmt/Pzr tüm vardiyalar = 0. (hafta sonunda)
+#   4) tat_y   mesaiye_kalamaz → H16: resmi tatilde tüm vardiyalar = 0. (tatilde)
+#   5) ari_y   hamile/süt/mesai → H16B: arife günü SADECE ARIFE_YARIM alabilir,
+#              o da COVERAGE'A GİRMEZ → talep açısından o gün sahada yok.
+#              (mesaiye_kalamaz hafta sonu arifede ARIFE_YARIM da alamaz → tam off.)
+#
+# off_t NEDEN YAZILAMAZ DEĞİL: off_t (off_soft_map) günü için H9 değişken
+# AÇAR. O kişiye yazabilirsin, sadece yazarsan W_OFF_T cezası ödersin
+# (H20B-3). Yani off_t "yazamam" değil, "yazmak istemiyorum" → NET'in İÇİNDE
+# kalır, ayrı kolonda gösterilir. En kötü senaryo ayrı kolonda:
+#   net_kötü = NET − off_t   (bütün off_t taleplerini karşılarsan kalan)
+# Gerçek kapasite NET ile net_kötü ARASINDA: W_OFF_T=20 < W_EKSIK=25 olduğu
+# için sıkı günde off_t verilmez, bol günde verilir.
+#
+# ÖNCELİK NEDEN ŞART: aynı agentın aynı gününe YANLIŞLIKLA hem izin hem off_t2
 # hem off_t girilmiş olabilir (üç ayrı kaynak: df_izin, df_off, flag'ler).
-# Ham sayımda o kişi üç kolonda birden görünür ve "toplam − izin − off_t2 −
-# off_t" gerçeğin ALTINA düşer. Ayrıca idari/doğum izni TÜM AYA izin yazıyor
-# (izin |= GUN_SET) → o agentın herhangi bir off_t kaydı otomatik çakışır.
-# Kod if/elif/elif ile en sert olanı sayıyor; çakışma ADEDİ ayrıca raporlanır
-# (veri girişi hatası olabilir → aşağıdaki ÇAKIŞMA satırına bak).
+# Ayrıca idari/doğum izni TÜM AYA izin yazıyor (izin |= GUN_SET) → o agentın
+# herhangi bir off kaydı otomatik çakışır. Hamile bir agent aynı cumartesi
+# izinliyse ham sayımda hem izin hem hs_y kolonunda görünür ve NET gerçeğin
+# ALTINA düşer. Zincir en SERT olanı sayar; çakışma ADEDİ ayrıca raporlanır.
 #
-# İKİ FARKLI "atanabilir" TANIMI — ikisi de basılıyor, karıştırmayın:
-#   ATANABİLİR = toplam − izin − off_t2        → modelin DEĞİŞKEN açtığı kişi
-#                (off_t günü bloklu DEĞİL; model gerekirse çalıştırır, W_OFF_T öder)
-#   AKTİF      = ATANABİLİR − off_t            → off_t talepleri de karşılanırsa
-#                kalan kişi. İSTENEN ÖLÇÜ bu.
-# Gerçek kapasite ikisinin ARASINDA: off_t'nin ne kadarı karşılanır, o günün
-# kovası ne kadar bol olduğuna bağlı (W_OFF_T=20 < W_EKSIK=25 → sıkı günde verilmez).
-#
-# HAFTA SONU EK DÜŞÜM: hamile/süt (H14) Cmt/Pzr çalışamaz → hafta sonu
-# satırlarında ayrı kolon, NET onu da düşüyor.
+# BAYRAK SETLERİ BURADA YENİDEN KURULUYOR: hafta_sonu_yasak (H14) ve mesai_yok
+# (H16) bu hücreden SONRA tanımlanıyor. Bu hücre veri çekimine yakın durmalı,
+# o yüzden aynı flag'lerden yerel kopya çıkarıyoruz (_8d_ önekli). H14/H16 hâlâ
+# tek yetkili; burada sadece SAYIYORUZ, kısıt kurmuyoruz.
+_8d_hs_yasak = set()                        # hamile_flg / sut_izni_flg  (H14 ile aynı)
+_8d_mesai_yok = set()                       # mesaiye_kalamaz_flg        (H16 ile aynı)
+for _, _8d_row in df_tam.iterrows():
+    _8d_c = str(_8d_row["agent_user_code"]).strip()
+    if (pd.to_numeric(_8d_row.get("hamile_flg", 0), errors="coerce") == 1
+            or pd.to_numeric(_8d_row.get("sut_izni_flg", 0), errors="coerce") == 1):
+        _8d_hs_yasak.add(_8d_c)
+    if pd.to_numeric(_8d_row.get("mesaiye_kalamaz_flg", 0), errors="coerce") == 1:
+        _8d_mesai_yok.add(_8d_c)
+_8d_arife_kis = _8d_hs_yasak | _8d_mesai_yok         # H16B arife_kisitli ile aynı
+
 _8d_top = len(AGENTS)
-_8d_hsy = len(hafta_sonu_yasak)                    # hamile/süt (hafta sonu yasak)
 _8d = []
-_8d_cak = {"izin+off_t2": 0, "izin+off_t": 0, "off_t2+off_t": 0}   # veri çakışması
+_8d_cak = {"izin+off_t2": 0, "izin+off_t": 0, "off_t2+off_t": 0,
+           "izin+yasak": 0, "off_t+yasak": 0}        # veri/kural çakışması
+_8d_ot_yenen = 0                             # off_t talebi bloklu güne düştü → sayılmadı
 for ds in PLAN_GUNLER:
     d = dt.date.fromisoformat(ds)
-    _iz = _o2 = _o1 = 0
+    _hs = d.weekday() >= 5
+    _tt = d in _TATIL
+    _ar = d in ARIFE
+    _iz = _o2 = _hy = _ty = _ay = _o1 = 0
     for a in AGENTS:
         _in_iz = d in izin_map.get(a, set())
         _in_o2 = d in off_block_map.get(a, set())
         _in_o1 = d in off_soft_map.get(a, set())
-        if _in_iz and _in_o2:                      # çakışma sayaçları (rapor için)
+        _in_ys = ((_hs and a in _8d_hs_yasak)         # kural kaynaklı tam-gün yasak
+                  or (_tt and a in _8d_mesai_yok)
+                  or (_ar and a in _8d_arife_kis))
+        if _in_iz and _in_o2:                         # çakışma sayaçları (rapor için)
             _8d_cak["izin+off_t2"] += 1
         if _in_iz and _in_o1:
             _8d_cak["izin+off_t"] += 1
         if _in_o2 and _in_o1:
             _8d_cak["off_t2+off_t"] += 1
-        if _in_iz:                                 # ÖNCELİK: izin > off_t2 > off_t
+        if _in_iz and _in_ys:
+            _8d_cak["izin+yasak"] += 1
+        if _in_o1 and _in_ys:
+            _8d_cak["off_t+yasak"] += 1
+        # ── ÖNCELİK ZİNCİRİ: izin > off_t2 > hs_y > tat_y > ari_y > (yazılabilir)
+        if _in_iz:
             _iz += 1
         elif _in_o2:
             _o2 += 1
-        elif _in_o1:
+        elif _hs and a in _8d_hs_yasak:
+            _hy += 1
+        elif _tt and a in _8d_mesai_yok:
+            _ty += 1
+        elif _ar and a in _8d_arife_kis:
+            _ay += 1
+        elif _in_o1:                                  # YAZILABİLİR ama off_t talebi var
             _o1 += 1
-    _atan = _8d_top - _iz - _o2                    # değişken açılan kişi
-    _aktif = _atan - _o1                           # off_t de karşılanırsa
-    _hsy_d = _8d_hsy if d.weekday() >= 5 else 0    # hafta sonu → hamile/süt düş
-    _net = _aktif - _hsy_d
+        if _in_o1 and (_in_iz or _in_o2 or _in_ys):   # off_t zaten bloklu güne denk geldi
+            _8d_ot_yenen += 1
+    _yz = _iz + _o2 + _hy + _ty + _ay                 # YAZILAMAZ (çakışmasız)
+    _net = _8d_top - _yz                              # NET = elindeki aktif kadro
+    _nk = _net - _o1                                  # net_kötü = tüm off_t verilirse
     _tal = sum(k for (_ds2, _v2), k in talep.items() if _ds2 == ds)
     _8d.append({"tarih": ds, "gun": DAY_TR[d.weekday()],
-                "hs": int(d.weekday() >= 5), "tatil": int(d in TATIL),
-                "toplam": _8d_top, "izin": _iz, "off_t2": _o2, "off_t": _o1,
-                "atanabilir": _atan, "aktif": _aktif,
-                "hs_yasak": _hsy_d, "net": _net,
-                "talep": _tal, "pay": _net - _tal})
+                "hs": int(_hs), "tatil": int(_tt), "arife": int(_ar),
+                "toplam": _8d_top, "izin": _iz, "off_t2": _o2,
+                "hs_y": _hy, "tat_y": _ty, "ari_y": _ay,
+                "yazilamaz": _yz, "net": _net,
+                "off_t": _o1, "net_kotu": _nk,
+                "talep": _tal, "pay": _net - _tal, "pay_kotu": _nk - _tal})
 df_gunluk_aktif = pd.DataFrame(_8d)
 
-print("=" * 104)
-print("H8D — GÜNLÜK ATANABİLİR AGENT  (veri kontrolü; model kurulmadan önce)")
-print("=" * 104)
-print(f"  toplam agent {_8d_top}  |  hamile/süt (hafta sonu yasak) {_8d_hsy}")
-print(f"  SAYIM ÖNCELİĞİ: izin > off_t2 > off_t  (aynı kişi bir günde TEK kolonda)")
-print(f"  ATANABİLİR = toplam − izin − off_t2         (off_t bloklu DEĞİL → üst sınır)")
-print(f"  AKTİF      = toplam − izin − off_t2 − off_t (off_t talepleri karşılanırsa)")
-print(f"  NET        = AKTİF − hamile/süt             (sadece hafta sonu satırlarında)")
-_8d_cak_var = {k: v for k, v in _8d_cak.items() if v}
-if _8d_cak_var:
-    print(f"  ⚠ VERİ ÇAKIŞMASI (aynı agent+gün iki tipte birden): {_8d_cak_var}")
-    print(f"    → öncelikle SERT olan sayıldı, çift sayım YOK. Ama bu bir veri girişi")
-    print(f"      hatası olabilir: df_izin / df_off / flag'ler arasında çelişki var.")
-    print(f"      'izin+off_t' çoksa sebep idari/doğum izni (tüm aya izin) olabilir.")
+_8d_W = 118
+print("=" * _8d_W)
+print("H8D — GÜNLÜK YAZILABİLİR AGENT  (veri kontrolü; model kurulmadan önce)")
+print("=" * _8d_W)
+print(f"  toplam agent {_8d_top}  |  hamile/süt {len(_8d_hs_yasak)}  |  "
+      f"mesaiye kalamaz {len(_8d_mesai_yok)}  |  "
+      f"resmi tatil {len(_TATIL)} gün  |  arife {len(ARIFE)} gün")
+print("  YAZILAMAZ = izin + off_t2 + hs_y + tat_y + ari_y   (öncelik zinciri, çift sayım YOK)")
+print("     izin  = izinli (H9 değişken açmaz, kotadan düşer)")
+print("     off_t2= SERT off talebi (H9 değişken açmaz)")
+print("     hs_y  = hamile/süt, SADECE hafta sonu satırında (H14)")
+print("     tat_y = mesaiye kalamaz, SADECE resmi tatil satırında (H16)")
+print("     ari_y = hamile/süt/mesai, SADECE arife satırında (H16B: yarım vardiya coverage'a girmez)")
+print("  NET      = toplam − YAZILAMAZ        ← O GÜN VARDİYA YAZABİLECEĞİN KİŞİ")
+print("  off_t    = YAZILABİLİR ama yumuşak off talebi var (NET'in İÇİNDE, cezalı: W_OFF_T)")
+print("  net_kötü = NET − off_t               ← tüm off_t talepleri karşılanırsa alt sınır")
+print("  pay      = NET − talep               ← o gün ne kadar rahatsın")
+_8d_cv = {k: v for k, v in _8d_cak.items() if v}
+if _8d_cv:
+    print(f"  ⚠ ÇAKIŞMA (aynı agent+gün birden fazla sebeple kapalı): {_8d_cv}")
+    print("    → zincirde en SERT olan sayıldı, ÇİFT SAYIM YOK. Ama veri girişi hatası")
+    print("      olabilir: df_izin / df_off / flag'ler birbiriyle çelişiyor.")
+    print("      'izin+off_t' çoksa sebep idari/doğum izni (tüm aya izin) olabilir.")
 else:
-    print(f"  ✓ veri çakışması yok (hiçbir agent+gün iki tipte birden değil)")
+    print("  ✓ çakışma yok (hiçbir agent+gün birden fazla sebeple kapalı değil)")
+
+# ── off_t MUTABAKATI: H7'nin bastığı toplamla H8D kolonunun toplamı ─────
+# H7: "off_t (YUMUŞAK talep) olan agent: N (M kişi-gün)". M, off_soft_map'in
+# HAM toplamı. H8D kolonu bundan AZ çıkar, çünkü (a) bloklu güne denk gelen
+# off_t zincirde emilir, (b) PLAN_GUNLER dışındaki tarih hiç sayılmaz.
+# Hamile/süt off_t'si H7'de zaten SİLİNDİ (off_soft = set()) → M'de de yok.
+_8d_ot_ham = sum(len(v) for v in off_soft_map.values())
+_8d_ot_say = sum(r["off_t"] for r in _8d)
+_8d_ot_disi = _8d_ot_ham - _8d_ot_say - _8d_ot_yenen
 print("")
-print(f"  {'tarih':>11} {'gün':>4} {'toplam':>7} {'izin':>5} {'off_t2':>7} "
-      f"{'off_t':>6} {'ATANABİLİR':>11} {'AKTİF':>6} {'hs_yasak':>9} {'NET':>5} "
-      f"{'talep':>6} {'pay':>6}")
+print(f"  off_t MUTABAKAT:  H7 ham toplam {_8d_ot_ham} kişi-gün")
+print(f"     − bloklu güne denk gelen (izin/off_t2/yasak emdi) : {_8d_ot_yenen}")
+print(f"     − plan günleri dışında kalan tarih                : {_8d_ot_disi}")
+print(f"     = H8D off_t kolonu toplamı                        : {_8d_ot_say}"
+      f"   (günlük ortalama {_8d_ot_say / max(1, len(_8d)):.1f})")
+print(f"     NOT: günlük sayı küçük görünür çünkü aylık talep {len(_8d)} güne yayılıyor.")
+print(f"     NOT: hamile/süt off_t'si H7'de silindi → ham toplamda da YOK.")
+
+print("")
+print(f"  {'tarih':>11} {'gün':>4} {'top':>4} {'izin':>5} {'oft2':>5} {'hs_y':>5} "
+      f"{'tat_y':>6} {'ari_y':>6} {'YAZILAMAZ':>10} {'NET':>5} {'off_t':>6} "
+      f"{'net_kötü':>9} {'talep':>6} {'pay':>6}")
 for _r in _8d:
     _im = ""
     if _r["pay"] < 0:
         _im = "  ⚠ AÇIK"
     elif _r["pay"] < 0.05 * max(1, _r["talep"]):
         _im = "  ⚠ dar"
-    print(f"  {_r['tarih']:>11} {_r['gun']:>4} {_r['toplam']:>7} {_r['izin']:>5} "
-          f"{_r['off_t2']:>7} {_r['off_t']:>6} {_r['atanabilir']:>11} "
-          f"{_r['aktif']:>6} {_r['hs_yasak']:>9} {_r['net']:>5} "
-          f"{_r['talep']:>6} {_r['pay']:>+6}{_im}"
-          + ("   [tatil]" if _r["tatil"] else ""))
+    elif _r["pay_kotu"] < 0:
+        _im = "  · off_t dar"
+    print(f"  {_r['tarih']:>11} {_r['gun']:>4} {_r['toplam']:>4} {_r['izin']:>5} "
+          f"{_r['off_t2']:>5} {_r['hs_y']:>5} {_r['tat_y']:>6} {_r['ari_y']:>6} "
+          f"{_r['yazilamaz']:>10} {_r['net']:>5} {_r['off_t']:>6} "
+          f"{_r['net_kotu']:>9} {_r['talep']:>6} {_r['pay']:>+6}{_im}"
+          + ("   [tatil]" if _r["tatil"] else "")
+          + ("   [arife]" if _r["arife"] else ""))
 
-# ── ÖZET: hafta içi / hafta sonu ayrı (tavanları ve ortalamaları farklı) ──
+# ── ÖZET: hafta içi / hafta sonu / tatil ayrı (tavanları farklı) ─────────
 for _et, _alt in (("HAFTA İÇİ", [r for r in _8d if not r["hs"] and not r["tatil"]]),
                   ("HAFTA SONU", [r for r in _8d if r["hs"] and not r["tatil"]]),
                   ("RESMİ TATİL", [r for r in _8d if r["tatil"]])):
@@ -1110,13 +1181,16 @@ for _et, _alt in (("HAFTA İÇİ", [r for r in _8d if not r["hs"] and not r["tat
         continue
     _n = len(_alt)
     _izo = sum(r["izin"] for r in _alt) / _n
+    _yzo = sum(r["yazilamaz"] for r in _alt) / _n
     _neto = sum(r["net"] for r in _alt) / _n
+    _nko = sum(r["net_kotu"] for r in _alt) / _n
     _talo = sum(r["talep"] for r in _alt) / _n
     _acik = [r for r in _alt if r["pay"] < 0]
     print("")
-    print(f"  {_et} ({_n} gün): ortalama izin {_izo:.1f}  |  "
-          f"ortalama NET {_neto:.1f}  |  ortalama talep {_talo:.1f}  |  "
-          f"ortalama pay {_neto - _talo:+.1f}")
+    print(f"  {_et} ({_n} gün): ort. izin {_izo:.1f}  |  ort. YAZILAMAZ {_yzo:.1f}  |  "
+          f"ort. NET {_neto:.1f}  |  ort. net_kötü {_nko:.1f}")
+    print(f"    ort. talep {_talo:.1f}  |  ort. pay {_neto - _talo:+.1f}  |  "
+          f"en kötü senaryo payı {_nko - _talo:+.1f}")
     print(f"    NET aralığı: {min(r['net'] for r in _alt)} .. "
           f"{max(r['net'] for r in _alt)}   |   "
           f"talep aralığı: {min(r['talep'] for r in _alt)} .. "
@@ -1128,15 +1202,20 @@ for _et, _alt in (("HAFTA İÇİ", [r for r in _8d if not r["hs"] and not r["tat
             print(f"       {_r['tarih']} {_r['gun']}: NET {_r['net']}  "
                   f"talep {_r['talep']}  açık {-_r['pay']}")
     else:
-        print(f"    ✓ her günde NET ≥ talep (gün bazında kapasite yeterli)")
+        print("    ✓ her günde NET ≥ talep (gün bazında kapasite yeterli)")
 print("")
-print(f"  NOT: bu tablo GÜN TOPLAMI bakar, KOVA bazına BAKMAZ. Gün toplamı yetse")
-print(f"       bile tek bir vardiya (kova) dolmayabilir — takım-tip tahsisi (H19)")
-print(f"       ve sert bandlar (H10) orada devreye giriyor. Kova bazlı kontrol")
-print(f"       çözümden SONRA H25B / H25D'de.")
-print(f"  NOT: izin sayısı ayın her gününde ~aynıysa idari/doğum izni (tüm ay)")
-print(f"       baskın demektir; dalgalanma yıllık izinden gelir.")
-print("=" * 104)
+print("  NOT: bu tablo GÜN TOPLAMI bakar, KOVA bazına BAKMAZ. Gün toplamı yetse")
+print("       bile tek bir vardiya (kova) dolmayabilir — takım-tip tahsisi (H19)")
+print("       ve sert bandlar (H10) orada devreye giriyor. Kova bazlı kontrol")
+print("       çözümden SONRA H25B / H25D'de.")
+print("  NOT: NET, TEK GÜNE bakar. Ay boyu kota/tavan (H17), 7-gün üst üste (H12),")
+print("       çift hafta sonu off (H18) gibi ÇOK GÜNLÜ kurallar burada YOK → NET")
+print("       bir ÜST SINIR, gerçekleşen atama daha az olabilir.")
+print("  NOT: izin sayısı ayın her gününde ~aynıysa idari/doğum izni (tüm ay)")
+print("       baskın demektir; dalgalanma yıllık izinden gelir.")
+print("=" * _8d_W)
+
+
 
 
 # %% [HÜCRE 9] — CP-SAT MODEL + KARAR DEĞİŞKENLERİ ─────────────────────
