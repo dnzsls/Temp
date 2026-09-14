@@ -2658,22 +2658,58 @@ else:
     except Exception:                       # düz pickle.dump ile yazılmış olabilir
         with open(M2_PKL_PATH, "rb") as f:
             df_model2 = pickle.load(f)
+    _m2_tarih = None                                # ay kontrolü için tarih serisi
     if isinstance(df_model2, dict):                 # agent_cov_*.pkl paketi
-        _m = df_model2.get('meta', {})
+        _m = df_model2.get('meta', {}) or {}
         print(f"model2 paketi yüklendi: {list(df_model2)}")
         if _m:
-            print(f"  kuyruk={_m.get('kuyruk')}  {_m.get('yil')}/{_m.get('ay'):02d}  "
+            # meta'da 'ay' yoksa :02d None'da TypeError veriyordu → güvenli yaz
+            _ay = _m.get('ay')
+            _ay_s = f"{_ay:02d}" if isinstance(_ay, int) else str(_ay)
+            print(f"  kuyruk={_m.get('kuyruk')}  {_m.get('yil')}/{_ay_s}  "
                   f"durum={_m.get('durum')}  agent={_m.get('agent_sayisi')}  "
                   f"arife_sayildi={_m.get('arife_sayildi')}")
         if 'interval' in df_model2:
-            print(f"  interval tablosu: {df_model2['interval'].shape[0]:,} satır  |  "
-                  f"kolonlar: {list(df_model2['interval'].columns)}")
+            _iv = df_model2['interval']
+            print(f"  interval tablosu: {_iv.shape[0]:,} satır  |  "
+                  f"kolonlar: {list(_iv.columns)}")
+            if 'data_date' in _iv.columns:
+                _m2_tarih = _iv['data_date']
     elif isinstance(df_model2, pd.DataFrame):
         print(f"model2 yüklendi: {df_model2.shape[0]:,} satır × "
               f"{df_model2.shape[1]} kolon  |  kolonlar: {list(df_model2.columns)}")
+        _dc2 = _resolve_col(df_model2, DEFAULT_M2_COLS['date'])
+        if _dc2:
+            _m2_tarih = df_model2[_dc2]
     else:
         raise SystemExit(f"[H2] model2 pickle'ı tanınmadı: "
                          f"{type(df_model2).__name__} — dict paket ya da DataFrame olmalı.")
+
+    # AY KONTROLÜ (Model-2) — meta'ya değil VERİDEKİ tarihlere bakılır.
+    # Yanlış ay yüklenirse HÜCRE 3'te katman 3 hata vermeden 0 slot geliyordu.
+    if _m2_tarih is None:
+        print("  ⚠ model2'de tarih kolonu bulunamadı — ay kontrolü yapılamadı.")
+    else:
+        try:
+            _d2 = _to_date_series(_m2_tarih, ad='model2.data_date').dt.normalize()
+            _ay2 = (_d2.dropna().drop_duplicates()
+                       .groupby([_d2.dt.year, _d2.dt.month]).size().to_dict())
+            print(f"  model2'nin ayları: "
+                  + ', '.join(f"{y}/{m:02d} ({n} gün)"
+                              for (y, m), n in sorted(_ay2.items())))
+            if (YEAR, MONTH) not in _ay2:
+                _en2 = max(_ay2, key=_ay2.get) if _ay2 else None
+                print(f"  ⚠ AYAR UYUŞMUYOR: YEAR={YEAR}, MONTH={MONTH} model2'de YOK "
+                      f"→ katman 3 BOŞ gelir.")
+                if _en2:
+                    print(f"     → ya doğru ayın agent_cov dosyasını yükle, ya da "
+                          f"YEAR, MONTH = {_en2[0]}, {_en2[1]}")
+            else:
+                print(f"  ✓ YEAR={YEAR}, MONTH={MONTH} model2'de var "
+                      f"({_ay2[(YEAR, MONTH)]} gün)")
+        except Exception as _ex:
+            print(f"  ⚠ model2 tarih okunamadı, ay kontrolü atlandı → "
+                  f"{type(_ex).__name__}: {_ex}")
 
 
 # %% [HÜCRE 2B] — TEK KATMAN ÖN KONTROL (diğer girdiler GEREKMEZ)
