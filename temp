@@ -56,8 +56,10 @@
 #       Aynı repoda iki anlam — karıştırma.
 #   df_model1       — aylık MIP pickle'ı (PKL_PATH ile yüklenir; dict)
 #   df_model2       — agent_cov_*.pkl paketi (M2_PKL_PATH; dict) ya da DataFrame
-#   df_ekip_model1  — ekibin vardiya planı: DATA_DATE, VARDIYA,
-#                     WORKING_MAIN_GROUP, KISI_SAYISI
+#   df_ekip_model1  — ekibin vardiya planı, İKİ biçimden biri:
+#                     GENİŞ: data_date, vardiya, kitle_in_kisi_sayisi,
+#                            kitle_out_kisi_sayisi (gold/kurumsal kolonları okunmaz)
+#                     UZUN : DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
 #   df_ekip_model2  — ekibin kişi ataması: data_date, vardiya, agent_user_code
 #                     (ya da slot/vardiya+kisi biçimleri — model2_coverage okur)
 #   df_aht          — (ops.) saat, sub_queue, line_based_main_group,
@@ -639,51 +641,97 @@ def _company_from_group(s):
     return v.map(lambda x: 'outsource' if 'outsource' in x else 'inhouse')
 
 
+# GENİŞ FORMAT kolon adayları — ekibin planı tek satırda in/out ayrı kolonlarda:
+#   data_date | vardiya | kitle_in_kisi_sayisi | kitle_out_kisi_sayisi | gold_… | kurumsal_…
+DEFAULT_PLAN_WIDE_COLS = {
+    'in':  ['kitle_in_kisi_sayisi', 'kitle_in', 'inhouse_kisi_sayisi'],
+    'out': ['kitle_out_kisi_sayisi', 'kitle_out', 'outsource_kisi_sayisi'],
+}
+
+
 def build_plan_coverage_kitle(df_plan, year=2026, month=8, plan_cols=None,
                               verbose=True):
-    """Vardiya bazlı plan tablosunu slot ızgarasına açar (tamamı kitle).
+    """Ekibin vardiya planını slot ızgarasına açar (sadece kitle).
 
-    Girdi: DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
+    İKİ GİRDİ BİÇİMİ — kolonlara bakıp kendisi seçer:
+      GENİŞ : data_date, vardiya, kitle_in_kisi_sayisi, kitle_out_kisi_sayisi
+              (+ gold_kisi_sayisi, kurumsal_kisi_sayisi → KULLANILMAZ)
+              inhouse/outsource AYRI kolonda → şirket tahmini gerekmez.
+      UZUN  : DATA_DATE, VARDIYA, WORKING_MAIN_GROUP, KISI_SAYISI
+              WORKING_MAIN_GROUP'ta 'outsource' geçen → outsource, diğerleri inhouse.
+    Geniş kolonlar bulunursa GENİŞ öncelikli.
+
+    Tarih '1.08.2026' (gg.aa.yyyy, sıfırsız gün) gibi gelebilir → _to_date_series
+    gün-önce olarak okur. Geceyi aşan vardiyalar ('15:30-00:30', '19:00-03:00')
+    AYNI GÜNÜN 00:00… slotlarına yazılır (dosyanın genel slot konvansiyonu).
+
     Çıktı: data_date, interval, plan_in, plan_out, plan_toplam
     """
     cols = {**DEFAULT_PLAN_AGG_COLS, **(plan_cols or {})}
-    resolved = {k: _resolve_col(df_plan, v) for k, v in cols.items()}
-    eksik = [cols[k] for k, v in resolved.items() if v is None]
+    d_col = _resolve_col(df_plan, cols['date'])
+    v_col = _resolve_col(df_plan, cols['shift'])
+    in_col = _resolve_col(df_plan, DEFAULT_PLAN_WIDE_COLS['in'])
+    out_col = _resolve_col(df_plan, DEFAULT_PLAN_WIDE_COLS['out'])
+    genis = in_col is not None or out_col is not None
+
+    eksik = [ad for ad, c in (('tarih', d_col), ('vardiya', v_col)) if c is None]
+    if not genis:
+        g_col = _resolve_col(df_plan, cols['group'])
+        k_col = _resolve_col(df_plan, cols['kisi'])
+        eksik += [ad for ad, c in (('working_main_group', g_col),
+                                   ('kisi_sayisi', k_col)) if c is None]
     if eksik:
-        raise KeyError(f"PLAN: şu kolon(lar) yok: {eksik}  |  "
-                       f"mevcut: {list(df_plan.columns)}")
+        raise KeyError(f"PLAN: şu alan(lar) için kolon yok: {eksik}  |  "
+                       f"mevcut: {list(df_plan.columns)}  |  beklenen: GENİŞ "
+                       f"(kitle_in_kisi_sayisi / kitle_out_kisi_sayisi) ya da "
+                       f"UZUN (WORKING_MAIN_GROUP + KISI_SAYISI)")
 
     df = df_plan.copy()
-    df['data_date'] = _to_date_series(df[resolved['date']]).dt.normalize()
-    df['company'] = _company_from_group(df[resolved['group']])
-    df['kisi'] = pd.to_numeric(df[resolved['kisi']], errors='coerce').fillna(0)
+    df['data_date'] = _to_date_series(df[d_col], ad=f"PLAN.{d_col}",
+                                      verbose=verbose).dt.normalize()
+    if genis:
+        df['plan_in'] = (pd.to_numeric(df[in_col], errors='coerce').fillna(0)
+                         if in_col else 0)
+        df['plan_out'] = (pd.to_numeric(df[out_col], errors='coerce').fillna(0)
+                          if out_col else 0)
+        if verbose:
+            _ek = [c for c in df_plan.columns
+                   if str(c).lower().endswith('kisi_sayisi')
+                   and c not in (in_col, out_col)]
+            print(f"  ℹ PLAN: GENİŞ format — inhouse='{in_col}', outsource='{out_col}'"
+                  + (f"  |  kullanılmayan: {_ek}" if _ek else ""))
+            if in_col is None or out_col is None:
+                print(f"  ⚠ PLAN: {'inhouse' if in_col is None else 'outsource'} "
+                      f"kolonu yok → 0 sayıldı.")
+    else:
+        comp = _company_from_group(df[g_col])
+        kisi = pd.to_numeric(df[k_col], errors='coerce').fillna(0)
+        df['plan_in'] = kisi.where(comp == 'inhouse', 0)
+        df['plan_out'] = kisi.where(comp == 'outsource', 0)
+        if verbose:
+            print(f"  ℹ PLAN: UZUN format — şirket '{g_col}', kişi '{k_col}'")
 
     n0 = len(df)
     df = df[(df['data_date'].dt.year == year) & (df['data_date'].dt.month == month)]
     if verbose and len(df) < n0:
         print(f"  ℹ PLAN: {n0 - len(df):,} satır {year}/{month:02d} dışında, elendi.")
 
-    slot_map = {v: shift_slots(v) for v in df[resolved['shift']].astype(str).unique()}
+    slot_map = {v: shift_slots(v) for v in df[v_col].astype(str).unique()}
     cozulmeyen = [v for v, s in slot_map.items() if not s]
     if cozulmeyen:
         print(f"  ⚠ PLAN: vardiya olarak okunamayan {len(cozulmeyen)} değer "
               f"(kapsamaya girmedi): {cozulmeyen[:8]}")
 
-    df['slot_30'] = df[resolved['shift']].astype(str).map(slot_map)
+    df['slot_30'] = df[v_col].astype(str).map(slot_map)
     df = df.explode('slot_30').dropna(subset=['slot_30'])
-
-    agg = (df.groupby(['data_date', 'slot_30', 'company'])['kisi']
-             .sum().reset_index())
+    agg = (df.groupby(['data_date', 'slot_30'], as_index=False)
+             [['plan_in', 'plan_out']].sum())
 
     first = pd.Timestamp(year=year, month=month, day=1)
     all_days = pd.date_range(first, first + pd.offsets.MonthEnd(1), freq='D')
     out = pd.MultiIndex.from_product(
         [all_days, SLOTS_30], names=['data_date', 'slot_30']).to_frame(index=False)
-
-    for comp, kol in (('inhouse', 'plan_in'), ('outsource', 'plan_out')):
-        sub = agg[agg['company'] == comp][['data_date', 'slot_30', 'kisi']]
-        out = out.merge(sub.rename(columns={'kisi': kol}),
-                        on=['data_date', 'slot_30'], how='left')
+    out = out.merge(agg, on=['data_date', 'slot_30'], how='left')
 
     out[['plan_in', 'plan_out']] = out[['plan_in', 'plan_out']].fillna(0).round().astype(int)
     out['plan_toplam'] = out['plan_in'] + out['plan_out']
