@@ -2728,19 +2728,28 @@ else:
         try:
             if ON_KONTROL == 'df_ekip_model2':
                 _cov, _ov = ekip_model2_coverage(_g, year=YEAR, month=MONTH)
-                _cov = _cov.rename(columns={'ekip_model2_in': 'model2_in'})
+                _cov = _cov.rename(columns={'ekip_model2_in': 'kisi_in',
+                                            'ekip_model2_out': 'kisi_out'})
                 print(f"  outsource satırı var mı: {_ov}")
             else:
                 _cov = model2_coverage(_g, year=YEAR, month=MONTH)
+                _cov = _cov.rename(columns={'model2_in': 'kisi_in'})
+                _cov['kisi_out'] = 0                    # bizim Model-2 sadece inhouse
             print(f"\n  ✓ slot coverage üretildi — ilk 10 satır:")
             show(_cov.head(10))
-            _gun = _cov.groupby('data_date', as_index=False)['model2_in'].agg(
-                ['sum', 'max']).reset_index()
-            _gun.columns = ['data_date', 'kisi_slot', 'tepe_kisi']
+            # gün özeti inhouse/outsource AYRI — sadece inhouse toplanırsa
+            # outsource-only tabloda her gün 0 görünür.
+            # (as_index=False + agg([...]) + reset_index pandas 3'te fazladan
+            #  'index' kolonu üretiyordu → Length mismatch; named agg kullanılıyor)
+            _gun = _cov.groupby('data_date').agg(
+                kisi_slot_in=('kisi_in', 'sum'), kisi_slot_out=('kisi_out', 'sum'),
+                tepe_in=('kisi_in', 'max'), tepe_out=('kisi_out', 'max'),
+            ).reset_index()
             print(f"\n  gün bazında (ilk 10):")
             show(_gun.head(10))
-            print(f"  toplam {len(_cov):,} slot, {_cov['data_date'].nunique()} gün, "
-                  f"tepe {int(_cov['model2_in'].max())} kişi")
+            print(f"  toplam {len(_cov):,} slot, {_cov['data_date'].nunique()} gün  |  "
+                  f"tepe inhouse {int(_cov['kisi_in'].max())}, "
+                  f"outsource {int(_cov['kisi_out'].max())}")
         except Exception as _ex:
             print(f"\n  ✗ COVERAGE HATASI → {type(_ex).__name__}: {_ex}")
     elif ON_KONTROL == 'df_ekip_model1':
