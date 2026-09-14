@@ -170,13 +170,64 @@ def _normalize_queue(s):
     return v.map(lambda x: QUEUE_BY_GROUP.get(x, x if x in QUEUES else None))
 
 
-def _to_date_series(s):
-    """ISO ('2026-08-03') ise dayfirst kapalı, aksi halde açık."""
+# Tarih deseni — SIFIRSIZ ay/gün de kapsanıyor ({1,2}), yoksa '2026-8-1'
+# ISO sayılmıyordu ve dayfirst=True'ya düşüp pandas '%Y-%d-%m' tahmin ediyordu:
+#   ValueError: unconverted data remains when parsing with format "%Y-%d-%m": "3"
+_ISO_RE  = r'^\s*\d{4}-\d{1,2}-\d{1,2}'          # 2026-08-01 / 2026-8-1 (+saat)
+_GGAA_RE = r'^\s*\d{1,2}[./]\d{1,2}[./]\d{4}'    # 01.08.2026 / 01/08/2026
+
+
+def _to_date_series(s, ad='tarih', verbose=False):
+    """Tarih kolonunu güvenle datetime'a çevirir — FORMAT TAHMİN ETMEZ.
+
+    Eski sürüm `pd.to_datetime(s, dayfirst=...)` ile pandas'ın tahminine
+    güveniyordu. Sıfırsız tarihte ('2026-8-1') regex ISO'yu kaçırıyor,
+    dayfirst=True'ya düşüyor ve pandas '%Y-%d-%m' (yıl-GÜN-ay) tahmin
+    ediyordu → hem HATA hem (daha kötüsü) SESSİZ gün/ay TERSİ riski.
+    Ölçüldü: '2026-8-1' → ValueError "unconverted data remains … '3'".
+
+    Artık desen açıkça sınıflandırılıyor:
+      ISO (yıl önce)  → format='ISO8601', tutmazsa format='mixed', dayfirst=False
+      gg.aa.yyyy      → format='mixed', dayfirst=True
+      karışık         → format='mixed', dayfirst = ISO hiç yoksa True
+    Çözümlenemeyen satır SESSİZ GEÇMEZ — örnekle birlikte hata verir; tarih
+    yanlış okunursa bütün ay/slot eşlemesi kayar, sessiz kalması en kötüsü.
+    """
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s)
-    sample = s.dropna().astype(str)
-    is_iso = bool(len(sample)) and sample.str.match(r'^\d{4}-\d{2}-\d{2}').all()
-    return pd.to_datetime(s, dayfirst=not is_iso)
+    if pd.api.types.is_numeric_dtype(s):
+        raise TypeError(f"{ad}: sayısal kolon tarih olarak okunamaz "
+                        f"(örnek: {s.dropna().head(3).tolist()})")
+
+    t = s.astype(str).str.strip()
+    _bos = t.eq('') | t.isin(('nan', 'None', 'NaT'))
+    iso = t.str.match(_ISO_RE).fillna(False)
+    ggaa = t.str.match(_GGAA_RE).fillna(False)
+
+    if (iso | _bos).all():
+        out = pd.to_datetime(t, format='ISO8601', errors='coerce')
+        if (out.isna() & ~_bos).any():                  # sıfırsız/karışık ISO
+            out = pd.to_datetime(t, format='mixed', dayfirst=False, errors='coerce')
+        yontem = 'ISO (yıl-ay-gün)'
+    elif (ggaa | _bos).all():
+        out = pd.to_datetime(t, format='mixed', dayfirst=True, errors='coerce')
+        yontem = 'gün.ay.yıl'
+    else:
+        out = pd.to_datetime(t, format='mixed', dayfirst=not iso.any(),
+                             errors='coerce')
+        yontem = f"KARIŞIK (dayfirst={not iso.any()})"
+
+    bad = out.isna() & ~_bos
+    if bad.any():
+        raise ValueError(
+            f"{ad}: {int(bad.sum()):,} satırda tarih çözümlenemedi "
+            f"(yöntem: {yontem}). Örnekler: {t[bad].head(5).tolist()}  |  "
+            f"Kolonu önce pd.to_datetime(..., format='...') ile kendin çevirip "
+            f"tekrar dene.")
+    if verbose:
+        print(f"  ℹ {ad}: {yontem}  |  örnek "
+              f"{t[~_bos].head(3).tolist()}")
+    return out
 
 
 _SHIFT_RE = re.compile(r'(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})')
@@ -361,7 +412,23 @@ def model_coverage_from_results(results, year=2026, month=8, verbose=True):
                              'inhouse': inn.get(slot, 0), 'outsource': out.get(slot, 0)})
 
     if not rows:
-        raise ValueError(f"results içinde {year}/{month:02d} için sonuç yok.")
+        # Eski mesaj sadece "sonuç yok" diyordu → kullanıcı hangi ayın olduğunu
+        # bilemiyordu. Pickle'daki ayları listele: en sık sebep YEAR/MONTH'un
+        # pickle'ın ayıyla uyuşmaması (ör. pickle Eylül, ayar Ağustos).
+        _aylar = {}
+        for _ds in results:
+            try:
+                _d = pd.to_datetime(_ds)
+            except Exception:
+                continue
+            _aylar[(_d.year, _d.month)] = _aylar.get((_d.year, _d.month), 0) + 1
+        _liste = ', '.join(f"{y}/{m:02d} ({n} gün)"
+                           for (y, m), n in sorted(_aylar.items()))
+        raise ValueError(
+            f"df_model1 (pickle) içinde {year}/{month:02d} için sonuç YOK.\n"
+            f"  Pickle'daki aylar: {_liste or '(hiç tarih okunamadı)'}\n"
+            f"  → HÜCRE 2'deki YEAR / MONTH değerlerini pickle'ın ayına göre "
+            f"ayarla.")
 
     long = pd.DataFrame(rows)
 
@@ -1616,27 +1683,150 @@ def model2_ekle(df, df_m2, verbose=True):
     return out
 
 
-def ekip_model2_ekle(df, df_ekip_m2_cov, verbose=True):
-    """KATMAN 5 — ekibin KİŞİ ATAMASI'nı hakem tablosuna ekler.
+# ŞİRKET kolonu adayları — KATMAN 5'te inhouse/outsource ayrımı için.
+# 'line_based_main_group' BİLİNÇLİ OLARAK YOK: o KUYRUK kolonu
+# ('kitle_cagrilar'), şirket değil. _company_from_group ona bakarsa 'outsource'
+# geçmediği için her şeyi inhouse sayar → outsource sessizce inhouse'a yazılır.
+EKIP_GRUP_ADAY = ['working_main_group', 'company', 'sirket']
 
-    Girdi df_ekip_m2_cov: model2_coverage() çıktısı (data_date, interval,
-    model2_in) — burada 'model2_in' EKİBİN atadığı inhouse kişi demek.
-    Aynı fonksiyondan geçtiği için katman 3 ile ÖLÇÜ BİRLİĞİ garanti.
 
-    ekip_model2_toplam = ekip_model2_in + model_out
-      → outsource kişi bazlı dağıtılmıyor; MIP'inki aynen alınıyor (katman 3
-        ile AYNI kural, yoksa iki katman kıyaslanamaz).
+def ekip_model2_coverage(df_ekip_m2, year=2026, month=8, cols=None,
+                         queue='kitle', verbose=True):
+    """KATMAN 5 — ekibin atama çıktısı → slot coverage, inhouse/outsource AYRI.
+
+    NEDEN AYRI: ekip_model2_toplam hesaplanırken outsource iki kez sayılabilir.
+    Katman 3 (bizim Model-2) SADECE inhouse üretiyor, outsource'u MIP'ten
+    (model_out) alıyoruz. Ekibin tablosu outsource DA içeriyorsa ve biz üstüne
+    model_out eklersek outsource ÇİFT SAYILIR. Bu yüzden ayrımı veriden
+    okuyoruz, varsaymıyoruz.
+
+    Ayrımı `working_main_group` / `company` kolonundan yapar
+    (_company_from_group: içinde 'outsource' geçen → outsource, diğerleri
+    inhouse). Kolon YOKSA tamamı inhouse sayılır ve outsource MIP'ten alınır.
+
+    Hesap model2_coverage'a ALT KÜME olarak devredilir → katman 3 ile ÖLÇÜ
+    BİRLİĞİ garanti (aynı vardiya→slot açıcı, aynı tekilleştirme).
+
+    Dönüş: (cov, out_var)
+      cov     : data_date, interval, ekip_model2_in, ekip_model2_out
+      out_var : ekibin tablosunda outsource satırı VAR mı (bool)
+                True  → ekip_model2_toplam = in + out  (ekibin kendi outsource'u)
+                False → ekip_model2_toplam = in + model_out  (MIP'ten ödünç)
+    """
+    # agent_cov paketi (dict) → şirket ayrımı yok, tamamı inhouse
+    if isinstance(df_ekip_m2, dict):
+        cov = model2_coverage(df_ekip_m2, year=year, month=month, cols=cols,
+                              queue=queue, verbose=verbose)
+        cov = cov.rename(columns={'model2_in': 'ekip_model2_in'})
+        cov['ekip_model2_out'] = 0
+        if verbose:
+            print("  ℹ EKİP-MODEL2: paket girdisi → tamamı inhouse, "
+                  "outsource MIP'ten alınacak.")
+        return cov, False
+
+    g_col = _resolve_col(df_ekip_m2, EKIP_GRUP_ADAY)
+    if g_col is None:
+        cov = model2_coverage(df_ekip_m2, year=year, month=month, cols=cols,
+                              queue=queue, verbose=verbose)
+        cov = cov.rename(columns={'model2_in': 'ekip_model2_in'})
+        cov['ekip_model2_out'] = 0
+        if verbose:
+            print(f"  ℹ EKİP-MODEL2: şirket kolonu yok "
+                  f"({EKIP_GRUP_ADAY}) → tamamı inhouse sayıldı, "
+                  f"outsource MIP'ten alınacak.")
+        return cov, False
+
+    comp = _company_from_group(df_ekip_m2[g_col])
+    _dag = comp.value_counts().to_dict()
+    if verbose:
+        print(f"  ℹ EKİP-MODEL2: şirket kolonu '{g_col}' → {_dag}")
+
+    parca = {}
+    for _ad, _mask in (('in', comp == 'inhouse'), ('out', comp == 'outsource')):
+        _sub = df_ekip_m2[_mask]
+        if _sub.empty:
+            continue
+        _c = model2_coverage(_sub, year=year, month=month, cols=cols,
+                             queue=queue, verbose=False)
+        parca[_ad] = _c.rename(columns={'model2_in': f'ekip_model2_{_ad}'})
+
+    if not parca:
+        raise ValueError(f"EKİP-MODEL2: {year}/{month:02d} için satır yok "
+                         f"(şirket kolonu '{g_col}').")
+
+    cov = None
+    for _ad in ('in', 'out'):
+        if _ad not in parca:
+            continue
+        cov = parca[_ad] if cov is None else cov.merge(
+            parca[_ad], on=['data_date', 'interval'], how='outer')
+    for _k in ('ekip_model2_in', 'ekip_model2_out'):
+        if _k not in cov.columns:
+            cov[_k] = 0
+        cov[_k] = cov[_k].fillna(0).round().astype(int)
+    cov = cov[['data_date', 'interval', 'ekip_model2_in', 'ekip_model2_out']]
+    cov = cov.sort_values(['data_date', 'interval']).reset_index(drop=True)
+
+    out_var = 'out' in parca
+    if verbose:
+        print(f"  EKİP-MODEL2 — {cov['data_date'].nunique()} gün, "
+              f"{len(cov):,} slot  |  tepe inhouse "
+              f"{int(cov['ekip_model2_in'].max())}, outsource "
+              f"{int(cov['ekip_model2_out'].max())}")
+        if not out_var:
+            print("  ℹ outsource satırı YOK → MIP'in outsource'u (model_out) "
+                  "kullanılacak.")
+        if int(cov['ekip_model2_in'].max()) == 0:
+            print("  ⚠ INHOUSE HİÇ YOK — tablo sadece outsource içeriyor. "
+                  "Katman 5 bu hâliyle EKSİK:")
+            print("     ekibin inhouse ataması ayrı bir tabloda olmalı; "
+                  "ikisini birleştirip ver, yoksa SL olduğundan DÜŞÜK çıkar.")
+    return cov, out_var
+
+
+def ekip_model2_ekle(df, df_ekip_m2_cov, out_var=None, verbose=True):
+    """KATMAN 5 — ekibin atamasını hakem tablosuna ekler.
+
+    df_ekip_m2_cov: ekip_model2_coverage() çıktısı
+                    (data_date, interval, ekip_model2_in, ekip_model2_out)
+                    Eski biçim (model2_in) de kabul edilir → inhouse sayılır.
+    out_var       : ekibin tablosunda outsource satırı var mı
+                    None → kolondan anla (ekip_model2_out toplamı > 0)
+
+    ekip_model2_toplam:
+      out_var True  → ekip_model2_in + ekip_model2_out   (ekibin KENDİ outsource'u)
+      out_var False → ekip_model2_in + model_out         (MIP'ten ödünç)
+
+    ⚠ ÇİFT SAYIM TUZAĞI: ekibin tablosu outsource içeriyorsa ve biz üstüne
+    MIP'in model_out'unu eklersek outsource İKİ KEZ sayılır ve katman 5 olduğundan
+    yüksek görünür. Bu yüzden kaynak veriden okunuyor, varsayılmıyor.
     """
     if 'model_out' not in df.columns:
         raise KeyError("ekip_model2_ekle: tabloda model_out yok — "
                        "hakem_tablosu çıktısını ver.")
-    d = df_ekip_m2_cov.rename(columns={'model2_in': 'ekip_model2_in'})
-    out = df.merge(d, on=['data_date', 'interval'], how='left')
+    d = df_ekip_m2_cov.copy()
+    if 'model2_in' in d.columns and 'ekip_model2_in' not in d.columns:
+        d = d.rename(columns={'model2_in': 'ekip_model2_in'})   # eski biçim
+    if 'ekip_model2_out' not in d.columns:
+        d['ekip_model2_out'] = 0
+
+    out = df.merge(d[['data_date', 'interval', 'ekip_model2_in',
+                      'ekip_model2_out']],
+                   on=['data_date', 'interval'], how='left')
     eksik = int(out['ekip_model2_in'].isna().sum())
     if eksik and verbose:
         print(f"  ⚠ EKİP-MODEL2: {eksik:,} slotta atama verisi yok, 0 sayıldı.")
-    out['ekip_model2_in'] = out['ekip_model2_in'].fillna(0).astype(int)
-    out['ekip_model2_toplam'] = out['ekip_model2_in'] + out['model_out']
+    for _k in ('ekip_model2_in', 'ekip_model2_out'):
+        out[_k] = out[_k].fillna(0).astype(int)
+
+    if out_var is None:
+        out_var = int(out['ekip_model2_out'].sum()) > 0
+    out['ekip_model2_toplam'] = out['ekip_model2_in'] + (
+        out['ekip_model2_out'] if out_var else out['model_out'])
+    if verbose:
+        print(f"  ekip_model2_toplam = ekip_model2_in + "
+              + ("ekip_model2_out (ekibin kendi outsource'u)" if out_var
+                 else "model_out (MIP'ten ödünç — ekip tablosunda outsource yok)"))
     if 'ihtiyac' in out.columns:
         out['ekip_model2_sapma'] = out['ekip_model2_toplam'] - out['ihtiyac']
     if 'plan_in' in out.columns:                 # ekip kendi planını tuttu mu
@@ -2204,6 +2394,159 @@ def sla_saat_bazinda(df_sla, katman='model2', verbose=True):
         show(g)
     return g
 
+def _sla_kod_kol(katman):
+    """katman kodu → df_hakem'deki kişi kolonu (SLA_KATMANLAR'dan)."""
+    return next(k[2] for k in SLA_KATMANLAR if k[0] == katman)
+
+
+def _sla_et(katman):
+    return next(k[1] for k in SLA_KATMANLAR if k[0] == katman)
+
+
+def _sla_toplam(df_sla, katman):
+    """(C, A, AÇIK) — çağrı, 30sn-içi cevaplanan, açık."""
+    C = float(df_sla['actual_kitle'].sum())
+    A = float((df_sla['actual_kitle'] * df_sla[f'sl_{katman}']).sum())
+    return C, A, SLA_HEDEF * C - A
+
+
+def sla_ikili(df_sla, kod_a, kod_b, hedef=SLA_HEDEF, verbose=True):
+    """İKİ KATMANI YAN YANA — tek tabloda, ÇAĞRI cinsinden fark.
+
+    Amaç: "hangisi daha iyi ve aradaki fark kaç çağrı" sorusunu tek bakışta
+    cevaplamak. Katmanlar arası fark = o adımda kaybedilen/kazanılan çağrı.
+    """
+    _yok = [k for k in (kod_a, kod_b) if f'sl_{k}' not in df_sla.columns]
+    if _yok:
+        print(f"  ℹ girdisi olmayan katman: {_yok} — bu karşılaştırma atlandı.")
+        return None
+    C = float(df_sla['actual_kitle'].sum())
+    satir = []
+    for k in (kod_a, kod_b):
+        _, A, acik = _sla_toplam(df_sla, k)
+        satir.append({
+            'katman': _sla_et(k),
+            'kisi_ort': round(df_sla[_sla_kod_kol(k)].mean(), 1),
+            'telefonda_ort': round(df_sla[f'tel_{k}'].mean(), 1),
+            'aylik_SL_%': round(100 * A / C, 2),
+            'cevaplanan': round(A),
+            'ACIK_cagri': round(acik),
+            'durum': '✓ TUTUYOR' if acik <= 0 else '⚠ AÇIK',
+        })
+    out = pd.DataFrame(satir)
+    if verbose:
+        _, A_a, ac_a = _sla_toplam(df_sla, kod_a)
+        _, A_b, ac_b = _sla_toplam(df_sla, kod_b)
+        print(f"toplam çağrı {C:,.0f}  |  hedef (%{hedef*100:.0f}) "
+              f"{hedef*C:,.0f} çağrı")
+        show(out)
+        _d = A_b - A_a
+        print(f"  FARK ({_sla_et(kod_b).strip()} − {_sla_et(kod_a).strip()}): "
+              f"{_d:+,.0f} çağrı  ({100*(A_b-A_a)/C:+.2f} puan SL)")
+        print(f"  → eksi ise: bu adımda {abs(_d):,.0f} çağrı KAYBEDİLDİ")
+    return out
+
+
+def sla_slot_detay(df_sla, katmanlar=('model1', 'model2'), gun=None,
+                   hedef=SLA_HEDEF, n=None, sirala='borc', verbose=True):
+    """SLOT BAZLI: kişi + SL + İKİ TÜR RR, katmanlar yan yana.
+
+    İki ayrı RR — karıştırmamak için ikisi de basılıyor:
+      RRsl = SL_i / hedef          → 1.00 = tam hedefte (SERVİS ölçüsü)
+      RRk  = kişi_i / ihtiyaç_i    → 1.00 = Erlang ihtiyacı kadar kişi (KADRO ölçüsü)
+    Aynı slotta RRk = 1.00 ama RRsl = 0.85 olabilir: kadro "yeterli" ama
+    ihtiyaç ASA=30'a göre hesaplandığı için SL %80'i tutmuyor. Model-1'in
+    sizing kriteri (ASA) ile iş hedefi (SL) arasındaki fark tam buradan okunur.
+
+    sirala: 'borc' (en çok borç yazan önce) | 'tarih' | 'cagri'
+    gun   : '2026-08-05' → sadece o gün
+    """
+    _var = [k for k in katmanlar if f'sl_{k}' in df_sla.columns]
+    if not _var:
+        print(f"  ℹ hiçbiri yok: {katmanlar}")
+        return None
+    d = df_sla.copy()
+    if gun is not None:
+        d = d[pd.to_datetime(d['data_date']) == pd.Timestamp(gun)]
+        if d.empty:
+            print(f"  ℹ {gun} tabloda yok.")
+            return None
+
+    out = d[['data_date', 'interval', 'actual_kitle', 'ihtiyac', 'traffic']].copy()
+    out['traffic'] = out['traffic'].round(1)
+    for k in _var:
+        kol = _sla_kod_kol(k)
+        out[f'kisi_{k}'] = d[kol]
+        out[f'SL_{k}_%'] = (100 * d[f'sl_{k}']).round(1)
+        out[f'RRsl_{k}'] = (d[f'sl_{k}'] / hedef).round(2)
+        out[f'RRk_{k}'] = (d[kol] / d['ihtiyac'].where(d['ihtiyac'] > 0)).round(2)
+        out[f'borc_{k}'] = d[f'kredi_{k}'].round(0)
+    out = out.rename(columns={'actual_kitle': 'cagri', 'traffic': 'trafik'})
+
+    if sirala == 'borc':
+        out = out.sort_values(f'borc_{_var[0]}')
+    elif sirala == 'cagri':
+        out = out.sort_values('cagri', ascending=False)
+    else:
+        out = out.sort_values(['data_date', 'interval'])
+    out = out.reset_index(drop=True)
+
+    if verbose:
+        print(f"SLOT BAZLI — katman {list(_var)}  |  {len(out):,} slot"
+              + (f"  |  {gun}" if gun else "")
+              + f"  |  sıralama: {sirala}")
+        print(f"  RRsl = SL / %{hedef*100:.0f}   (1.00 = tam hedefte)")
+        print(f"  RRk  = kişi / Erlang ihtiyacı (1.00 = ihtiyaç kadar kişi)")
+        show(out.head(n) if n else out)
+        print(f"  ⚠ RRk 1.00 ama RRsl < 1.00 olan slotlar: kadro 'yeterli' ama")
+        print(f"    SL tutmuyor → ihtiyaç ASA=30'a göre hesaplanmış, SL'e göre değil.")
+    return out
+
+
+def sla_gunluk(df_sla, katmanlar=None, hedef=SLA_HEDEF, verbose=True):
+    """GÜN BAZINDA aylık SL — hangi günler açığı taşıyor.
+
+    Aylık hedef AY TOPLAMINDA tutulur; gün bazlı satırlar 'hangi gün ne kadar
+    borç yazdı' sorusunu cevaplar. Gün SL'lerinin ORTALAMASI aylık SL DEĞİLDİR
+    (hacim ağırlıklı) — bu yüzden 'borc_cagri' kolonu asıl ölçü.
+    """
+    _var = [k for k, _e, _c in SLA_KATMANLAR if f'sl_{k}' in df_sla.columns]
+    if katmanlar:
+        _var = [k for k in katmanlar if k in _var]
+    if not _var:
+        return None
+    g = df_sla.groupby('data_date', as_index=False).agg(
+        cagri=('actual_kitle', 'sum'))
+    # borc_* TAM DEĞER olarak tutuluyor (yuvarlanmıyor) — yoksa gün borçlarının
+    # TOPLAMI aylık AÇIK'a eşit çıkmıyor (ölçüldü: 136 vs 137). Toplanabilirlik
+    # bu tablonun tek işi; yuvarlama sadece EKRANDA yapılıyor.
+    for k in _var:
+        _a = (df_sla.assign(_x=df_sla['actual_kitle'] * df_sla[f'sl_{k}'])
+                .groupby('data_date', as_index=False)['_x'].sum())
+        g = g.merge(_a.rename(columns={'_x': f'_a_{k}'}), on='data_date')
+        g[f'SL_{k}_%'] = 100 * g[f'_a_{k}'] / g['cagri']
+        g[f'borc_{k}'] = hedef * g['cagri'] - g[f'_a_{k}']
+        g = g.drop(columns=[f'_a_{k}'])
+    g.insert(1, 'gun', pd.to_datetime(g['data_date']).dt.weekday.map(
+        lambda i: ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'][i]))
+    if verbose:
+        print(f"GÜN BAZINDA — katman {list(_var)}  "
+              f"(borc_* = o günün açığı, ÇAĞRI cinsinden)")
+        _g = g.copy()
+        for k in _var:                                  # SADECE ekran için yuvarla
+            _g[f'SL_{k}_%'] = _g[f'SL_{k}_%'].round(1)
+            _g[f'borc_{k}'] = _g[f'borc_{k}'].round(0)
+        show(_g)
+        print(f"  NOT: gün SL'lerinin ortalaması aylık SL DEĞİL (hacim ağırlıklı). "
+              f"Aylık için 'borc_*' TOPLAMINA bak.")
+        for k in _var:                                  # SAĞLAMA: toplanabilirlik
+            _t = float(g[f'borc_{k}'].sum())
+            _, _, _ac = _sla_toplam(df_sla, k)
+            _isaret = '✓' if abs(_t - _ac) < 1e-6 else '⚠'
+            print(f"  {_isaret} Σ borc_{k} = {_t:,.0f}  |  aylık AÇIK = "
+                  f"{_ac:,.0f}  (eşit olmalı)")
+    return g
+
 # %% [HÜCRE 2] — PICKLE YÜKLE
 
 YEAR  = 2026
@@ -2231,6 +2574,29 @@ else:
     plani_olan = sorted(ds for ds, r in df_model1.items()
                         if r and 'kitle' in r and r['kitle'])
     print(f"'kitle' planı olan gün: {len(plani_olan)}/{len(df_model1)}")
+
+    # AY KONTROLÜ — en sık hata: YEAR/MONTH pickle'ın ayıyla uyuşmuyor
+    # ("results içinde 2026/08 için sonuç yok"). Uyuşmazlığı BURADA yakala,
+    # HÜCRE 3'te patlamadan.
+    _ay_say = {}
+    for _ds in df_model1:
+        try:
+            _d = pd.to_datetime(_ds)
+        except Exception:
+            continue
+        _ay_say[(_d.year, _d.month)] = _ay_say.get((_d.year, _d.month), 0) + 1
+    print(f"  pickle'ın ayları: "
+          + ', '.join(f"{y}/{m:02d} ({n} gün)"
+                      for (y, m), n in sorted(_ay_say.items())))
+    if (YEAR, MONTH) not in _ay_say:
+        _en = max(_ay_say, key=_ay_say.get) if _ay_say else None
+        print(f"  ⚠ AYAR UYUŞMUYOR: YEAR={YEAR}, MONTH={MONTH} pickle'da YOK.")
+        if _en:
+            print(f"     → YEAR, MONTH = {_en[0]}, {_en[1]}  yap ve bu hücreyi "
+                  f"tekrar çalıştır.")
+    else:
+        print(f"  ✓ YEAR={YEAR}, MONTH={MONTH} pickle'da var "
+              f"({_ay_say[(YEAR, MONTH)]} gün)")
 
 # ── MODEL 2 pickle (ayrı akıştan gelen df_sonuc) ──────────────────────
 if not M2_PKL_PATH:
@@ -2260,6 +2626,85 @@ else:
     else:
         raise SystemExit(f"[H2] model2 pickle'ı tanınmadı: "
                          f"{type(df_model2).__name__} — dict paket ya da DataFrame olmalı.")
+
+
+# %% [HÜCRE 2B] — TEK KATMAN ÖN KONTROL (diğer girdiler GEREKMEZ)
+# Elinde sadece BİR katman varken onu doğrulamak için. Pickle da, gerçek çağrı
+# da, diğer katmanlar da GEREKMİYOR — sadece o tabloyu slot coverage'a çevirip
+# gözle bakarsın. Tarih/saat/vardiya ayrıştırması burada patlarsa HÜCRE 3'e
+# hiç gitmeden görürsün.
+#
+# ÖN_KONTROL: hangi değişkeni kontrol edeceksen adını yaz.
+#   'df_ekip_model2' | 'df_model2' | 'df_ekip_model1' | 'df_actual'
+ON_KONTROL = 'df_ekip_model2'
+
+if ON_KONTROL not in globals():
+    print(f"{ON_KONTROL} yok — yükleyip bu hücreyi tekrar çalıştır.")
+else:
+    _g = globals()[ON_KONTROL]
+    print(f"=== {ON_KONTROL} ÖN KONTROL ===")
+    if isinstance(_g, pd.DataFrame):
+        print(f"  {_g.shape[0]:,} satır × {_g.shape[1]} kolon")
+        print(f"  kolonlar: {list(_g.columns)}")
+        print(f"  dtypes:\n{_g.dtypes.to_string()}")
+        print(f"\n  ilk 3 satır:")
+        show(_g.head(3))
+        # hangi kolon tarih/saat/vardiya olarak SEÇİLECEK — tahmin değil, göster
+        for _et, _ad in (('tarih', DEFAULT_M2_COLS['date']),
+                         ('slot', DEFAULT_M2_COLS['slot']),
+                         ('vardiya', DEFAULT_M2_COLS['shift']),
+                         ('agent', DEFAULT_M2_COLS['agent']),
+                         ('kisi', DEFAULT_M2_COLS['kisi'])):
+            _c = _resolve_col(_g, _ad)
+            print(f"  {_et:<8} → {_c if _c else '— bulunamadı'}"
+                  + (f"   örnek: {_g[_c].dropna().head(3).tolist()}" if _c else ""))
+        # tarih ayrıştırma DENEMESİ (patlarsa sebebi burada okunur)
+        _dc = _resolve_col(_g, DEFAULT_M2_COLS['date'])
+        if _dc:
+            try:
+                _d = _to_date_series(_g[_dc], ad=f"{ON_KONTROL}.{_dc}", verbose=True)
+                print(f"  ✓ tarih OK: {_d.min().date()} .. {_d.max().date()}  "
+                      f"({_d.dt.normalize().nunique()} farklı gün)")
+            except Exception as _ex:
+                print(f"  ✗ TARİH HATASI → {type(_ex).__name__}: {_ex}")
+    elif isinstance(_g, dict):
+        print(f"  dict paket — anahtarlar: {list(_g)}")
+        for _k, _v in _g.items():
+            if isinstance(_v, pd.DataFrame):
+                print(f"    {_k}: {_v.shape[0]:,} satır, kolonlar {list(_v.columns)}")
+    else:
+        print(f"  tip: {type(_g).__name__}")
+
+    # slot coverage'a çevir (katman 3/5 ile AYNI fonksiyon)
+    if ON_KONTROL in ('df_ekip_model2', 'df_model2'):
+        try:
+            if ON_KONTROL == 'df_ekip_model2':
+                _cov, _ov = ekip_model2_coverage(_g, year=YEAR, month=MONTH)
+                _cov = _cov.rename(columns={'ekip_model2_in': 'model2_in'})
+                print(f"  outsource satırı var mı: {_ov}")
+            else:
+                _cov = model2_coverage(_g, year=YEAR, month=MONTH)
+            print(f"\n  ✓ slot coverage üretildi — ilk 10 satır:")
+            show(_cov.head(10))
+            _gun = _cov.groupby('data_date', as_index=False)['model2_in'].agg(
+                ['sum', 'max']).reset_index()
+            _gun.columns = ['data_date', 'kisi_slot', 'tepe_kisi']
+            print(f"\n  gün bazında (ilk 10):")
+            show(_gun.head(10))
+            print(f"  toplam {len(_cov):,} slot, {_cov['data_date'].nunique()} gün, "
+                  f"tepe {int(_cov['model2_in'].max())} kişi")
+        except Exception as _ex:
+            print(f"\n  ✗ COVERAGE HATASI → {type(_ex).__name__}: {_ex}")
+    elif ON_KONTROL == 'df_ekip_model1':
+        try:
+            show(build_plan_coverage_kitle(_g, year=YEAR, month=MONTH).head(10))
+        except Exception as _ex:
+            print(f"\n  ✗ HATA → {type(_ex).__name__}: {_ex}")
+    elif ON_KONTROL == 'df_actual':
+        try:
+            show(actual_calls_30(_g, year=YEAR, month=MONTH, queue='kitle').head(10))
+        except Exception as _ex:
+            print(f"\n  ✗ HATA → {type(_ex).__name__}: {_ex}")
 
 
 # %% [HÜCRE 3] — HAZIRLIK (5 katman → tek hücre)
@@ -2317,10 +2762,12 @@ else:
     if M2 is None:
         print("  ℹ df_model2 yok — KATMAN 3 (bizim Model-2) boş kalacak.")
 
-    # KATMAN 5 — ekibin kişi ataması (AYNI fonksiyon → ölçü birliği)
-    EKIP_M2 = model2_coverage(df_ekip_model2, year=YEAR, month=MONTH) \
-        if 'df_ekip_model2' in globals() else None
-    if EKIP_M2 is None:
+    # KATMAN 5 — ekibin ataması; inhouse/outsource AYRI okunur (çift sayım yok)
+    if 'df_ekip_model2' in globals():
+        EKIP_M2, EKIP_M2_OUT = ekip_model2_coverage(df_ekip_model2, year=YEAR,
+                                                    month=MONTH)
+    else:
+        EKIP_M2, EKIP_M2_OUT = None, None
         print("  ℹ df_ekip_model2 yok — KATMAN 5 (ekip ataması) boş kalacak.")
 
     print(f"✓ hazır: df_kitle, df_act30, AHT"
@@ -2333,7 +2780,7 @@ else:
 if not _eksik('df_kitle', 'df_act30', 'AHT'):
     df_hakem = hakem_tablosu(df_kitle, df_act30, aht=AHT, esik=2, df_m2=M2)
     if EKIP_M2 is not None:                      # KATMAN 5'i tabloya ekle
-        df_hakem = ekip_model2_ekle(df_hakem, EKIP_M2)
+        df_hakem = ekip_model2_ekle(df_hakem, EKIP_M2, out_var=EKIP_M2_OUT)
     show(df_hakem, 10)
 else:
     print("HÜCRE 3'ü çalıştır.")
@@ -2391,55 +2838,131 @@ if 'df_hakem' in globals():
 else:
     print("df_hakem yok — önce HÜCRE 4'ü çalıştır.")
 
-# %% [HÜCRE 11] — AYLIK SLA DEFTERİ  (ÖLÇÜ: ÇAĞRI)
-# Bu hücrenin tamamı SALT OKUNUR — hiçbir plana/modele dokunmaz.
+# %% [HÜCRE 11] — SLA TABLOSUNU KUR  (çıktı YOK, sadece hesap)
+# Buradan sonraki 11A…11H hücrelerinin HEPSİ bu tabloyu okur. Bir kez koş.
+# Tamamı SALT OKUNUR — hiçbir plana/modele dokunmaz.
 #
-# NEDEN ÇAĞRI: hedef "aylık, çağrıların %80'i 30 sn içinde". Yüzdeler
-# toplanmaz, çağrılar toplanır → tek sayıya iner:
+# ÖLÇÜ: ÇAĞRI (kişi değil). Aylık hedef hacim-ağırlıklı:
 #     AÇIK = 0.80 × toplam_çağrı − Σ(çağrı_i × SL_i)
-# AÇIK ≤ 0 ise hedef tutuyor. Slot bazlı %80 aramak GEREKSİZ SIKI.
-
-SLA_KATMAN = 'model2'     # kredi-borç / en-borçlu / marjinal hangi katman için
-                          # 'model1' | 'model2' | 'ekip_model1' | 'ekip_model2'
-SLA_N = 15                # listelerde kaç satır
+# AÇIK ≤ 0 → hedef tutuyor. Slot bazlı %80 aramak GEREKSİZ SIKI.
 
 if 'df_hakem' not in globals():
     print("df_hakem yok — önce HÜCRE 3-4'ü çalıştır.")
 else:
     df_sla = sla_slot_tablosu(df_hakem, aht=AHT, hedef=SLA_HEDEF, T=SLA_SANIYE)
-
-    df_sla_defter = sla_defteri(df_sla, hedef=SLA_HEDEF, T=SLA_SANIYE)   # [1]
-    sla_kredi_borc(df_sla, katman=SLA_KATMAN, hedef=SLA_HEDEF)           # [2]
-    sla_en_borclu(df_sla, katman=SLA_KATMAN, n=SLA_N)                    # [3]
-    sla_marjinal(df_sla, katman=SLA_KATMAN, n=SLA_N, hedef=SLA_HEDEF)    # [4]
-    sla_saat_bazinda(df_sla, katman=SLA_KATMAN)                          # [5]
-
-    print("\nOKUMA KILAVUZU")
-    print("  [1] Katmanlar arası SL farkı = o adımda kaybedilen çağrı.")
-    print("      1→2 vardiya yapısı | 2→3 izin/off/takım-tip | 2→4 ekip sapması")
-    print("      4→5 ekip planını tutamaması | 3↔5 MODEL Mİ EKİP Mİ")
-    print("  [2] NET katkı = −AÇIK. Kredi verenler borç yazanları ödüyor →")
-    print("      her slotta %80 tutmak GEREKMİYOR.")
-    print("  [4] Sıralama HACİM-AĞIRLIKLI: 200 çağrılı slotta +1 kişi,")
-    print("      20 çağrılı slotta +1 kişiden 10 KAT fazla aylık SL satın alır.")
-    print("      Model-1 bu sayıyı bilmiyor — erlang_need hacmi tartmıyor.")
+    print(f"\n✓ df_sla hazır → 11A'dan itibaren hücreleri TEK TEK çalıştır.")
+    print(f"  11A BİZ (model1 ↔ model2)   11B EKİP (ekip1 ↔ ekip2)")
+    print(f"  11C 5 katman tek tablo      11D slot bazlı SL + RR")
+    print(f"  11E gün bazında             11F kredi/borç")
+    print(f"  11G en borçlu slotlar       11H kritik + '+1 kişi nereye'")
 
 
-# %% [HÜCRE 12] — KATMAN KARŞILAŞTIRMA (SL farkı nereden geliyor)
+# %% [HÜCRE 11A] — BİZ: MODEL-1 ↔ MODEL-2
 
 if 'df_sla' in globals():
+    print("=== BİZİM İKİ AŞAMA — aradaki fark izin/off/takım-tip kaybı ===")
+    df_sla_biz = sla_ikili(df_sla, 'model1', 'model2')
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11B] — EKİP: MODEL-1 ↔ MODEL-2
+
+if 'df_sla' in globals():
+    print("=== EKİBİN İKİ AŞAMASI — aradaki fark ekibin plan-tutma kaybı ===")
+    df_sla_ekip = sla_ikili(df_sla, 'ekip_model1', 'ekip_model2')
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11B2] — BİZ ↔ EKİP  (asıl soru: model mi ekip mi)
+
+if 'df_sla' in globals():
+    print("=== PLAN SEVİYESİ:  bizim MODEL-1  ↔  ekibin MODEL-1 ===")
+    sla_ikili(df_sla, 'model1', 'ekip_model1')
+    print("\n=== KİŞİ SEVİYESİ: bizim MODEL-2  ↔  ekibin MODEL-2 ===")
+    sla_ikili(df_sla, 'model2', 'ekip_model2')
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11C] — 5 KATMAN TEK TABLO + katmanlar arası kayıp
+
+if 'df_sla' in globals():
+    df_sla_defter = sla_defteri(df_sla, hedef=SLA_HEDEF, T=SLA_SANIYE)
     _kar = []
     for _k, _et, _kol in SLA_KATMANLAR:
         if f'sl_{_k}' not in df_sla.columns:
             continue
-        _C = float(df_sla['actual_kitle'].sum())
-        _A = float((df_sla['actual_kitle'] * df_sla[f'sl_{_k}']).sum())
-        _kar.append({'kod': _k, 'katman': _et, 'aylik_SL': round(100 * _A / _C, 2),
-                     'cevaplanan': round(_A)})
+        _C, _A, _ac = _sla_toplam(df_sla, _k)
+        _kar.append({'kod': _k, 'katman': _et,
+                     'aylik_SL_%': round(100 * _A / _C, 2),
+                     'cevaplanan': round(_A), 'ACIK_cagri': round(_ac)})
     _kar = pd.DataFrame(_kar)
     if len(_kar) > 1:
         _kar['onceki_katmana_gore'] = _kar['cevaplanan'].diff().round(0)
+    print("\nKATMANLAR ARASI KAYIP")
     show(_kar)
     print("  'onceki_katmana_gore' = o adımda KAYBEDİLEN (−) / kazanılan (+) çağrı")
+    print("  1→2 vardiya yapısı | 2→3 izin/off/takım-tip | 2→4 ekip sapması")
+    print("  4→5 ekip planını tutamaması")
 else:
-    print("df_sla yok — önce HÜCRE 11'i çalıştır.")
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11D] — SLOT BAZLI: SL + İKİ TÜR RR
+
+# katmanlar: ('model1','model2') | ('model2','ekip_model2') | tek katman da olur
+# gun: '2026-08-05' → sadece o gün   |   n: kaç satır   |   sirala: borc/tarih/cagri
+SLOT_KATMAN = ('model1', 'model2')
+SLOT_GUN = None
+SLOT_N = 25
+
+if 'df_sla' in globals():
+    df_sla_slot = sla_slot_detay(df_sla, katmanlar=SLOT_KATMAN, gun=SLOT_GUN,
+                                 n=SLOT_N, sirala='borc')
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11E] — GÜN BAZINDA
+
+if 'df_sla' in globals():
+    df_sla_gun = sla_gunluk(df_sla, katmanlar=SLOT_KATMAN)
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11F] — KREDİ / BORÇ  (tek katman)
+
+SLA_KATMAN = 'model2'     # 'model1' | 'model2' | 'ekip_model1' | 'ekip_model2'
+
+if 'df_sla' in globals():
+    sla_kredi_borc(df_sla, katman=SLA_KATMAN, hedef=SLA_HEDEF)
+    print("\n  NET katkı = −AÇIK. Kredi verenler borç yazanları ÖDÜYOR →")
+    print("  her slotta %80 tutmak GEREKMİYOR; aylık toplam tutsun yeter.")
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11G] — EN BORÇLU SLOTLAR
+
+SLA_N = 15
+
+if 'df_sla' in globals():
+    sla_en_borclu(df_sla, katman=SLA_KATMAN, n=SLA_N)
+    sla_saat_bazinda(df_sla, katman=SLA_KATMAN)
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
+
+
+# %% [HÜCRE 11H] — KRİTİK SLOTLAR + "+1 KİŞİ NEREYE"
+
+if 'df_sla' in globals():
+    sla_marjinal(df_sla, katman=SLA_KATMAN, n=SLA_N, hedef=SLA_HEDEF)
+    print("\n  [4a] telefonda ≤ trafik → kuyruk patlıyor, +1 kişi İŞE YARAMAZ;")
+    print("       '+kisi' kadar eklemek gerekir.")
+    print("  [4b] sıralama HACİM-AĞIRLIKLI: 200 çağrılı slotta +1 kişi,")
+    print("       20 çağrılı slotta +1 kişiden 10 KAT fazla aylık SL satın alır.")
+else:
+    print("df_sla yok — HÜCRE 11'i çalıştır.")
