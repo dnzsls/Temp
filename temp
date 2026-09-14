@@ -8,6 +8,7 @@
 #   5  PLAN      — İHTİYAÇ ↔ EKİP Model-1 ↔ BİZ Model-1   (hap tablo + 3 grafik)
 #   6  KİŞİ      — İHTİYAÇ ↔ EKİP Model-2 ↔ BİZ Model-2   (hap tablo + 3 grafik)
 #   7  SL        — aylık %80 / 30 sn, kaynak başına tek satır
+#   7B RR        — karşılayabileceğim çağrı ÷ gelen çağrı (AHT alt kuyruk detaylı)
 #   8  DETAY     — (opsiyonel) tek kaynağın SL kırılımı
 #
 # GİRDİLER (ham hâliyle notebook'a çek, tarihi ÇEVİRME):
@@ -1974,6 +1975,171 @@ def grafik_kapasite_ihtiyac(df_ust, df_alt, ad_ust, ad_alt, queue='KİTLE',
 
 
 # ---------------------------------------------------------------------------
+# RR — karşılayabileceğim çağrı ÷ gelen çağrı  (HÜCRE 7B)
+# ---------------------------------------------------------------------------
+# karşılayabilir = telefonda × 1.800 sn ÷ AHT          (30 dk'lık slot)
+#   telefonda = kapasite × (1 − shrinkage)
+#   AHT       = o slotun alt kuyruk çağrı payıyla ağırlıklı AHT'si (HÜCRE 3)
+# KUYRUK MODELİ YOK — bekleme hedefi aranmaz, sadece "kadro gelen çağrıya
+# yetişiyor mu". RR = 1,00 → tam yetişiyor ama bekleme payı sıfır.
+#
+# Aya toplamanın iki yolu:
+#   RR              = Σ karşılayabilir ÷ Σ gelen         fazla slot eksiği KAPATIR
+#   cevaplanabilen  = Σ min(karşılayabilir, gelen) ÷ Σ gelen   KAPATMAZ (gerçekçi)
+# RR ≥ 1 ama cevaplanabilen < %100 → kadro MİKTARI yetiyor, DAĞILIMI yetmiyor.
+
+RR_BANTLAR = [(0.00, 0.85, '< 0,85'), (0.85, 0.95, '0,85–0,95'),
+              (0.95, 1.05, '0,95–1,05'), (1.05, 1.20, '1,05–1,20'),
+              (1.20, np.inf, '> 1,20')]
+
+
+def karsilayabilir(df, kap_kol='kapasite_toplam', shrinkage=None):
+    """Her slot için kadronun karşılayabileceği çağrı adedi."""
+    cfg = shrinkage if shrinkage is not None else KITLE_SHRINKAGE
+    shr = df['interval'].str[:2].astype(int).map(
+        lambda h: cfg.get(h, cfg.get('default', 0.0))).values
+    tel = df[kap_kol].values.astype(float) * (1 - shr)
+    aht = df['aht'].values.astype(float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return np.where(aht > 0, tel * INTERVAL_MIN * 60 / aht, 0.0)
+
+
+def _rr_olcu(cagri, kar):
+    cg = np.asarray(cagri, dtype=float)
+    kr = np.asarray(kar, dtype=float)
+    top = float(cg.sum())
+    return {
+        'gelen': top,
+        'karsilayabilir': float(kr.sum()),
+        'RR': float(kr.sum()) / top if top else np.nan,
+        'cevaplanabilen': float(np.minimum(cg, kr).sum()) / top if top else np.nan,
+        'acikta': float(np.clip(cg - kr, 0, None).sum()),
+        'fazla': float(np.clip(kr - cg, 0, None).sum()),
+        'rr1_alti_slot': int((kr < cg).sum()),
+    }
+
+
+def rr_ozeti(tablolar, kod_ekip, kod_biz, verbose=True):
+    """EKİP ↔ BİZ — RR hap tablo (AY TOPLAMI, çağrısı olan gün × slot)."""
+    satir = []
+    for kod in (kod_ekip, kod_biz):
+        t = tablolar[kod]
+        t = t[t['cagri'] > 0]
+        m = _rr_olcu(t['cagri'], karsilayabilir(t))
+        satir.append({
+            'kaynak': KAYNAKLAR[kod],
+            'gelen_cagri': round(m['gelen']),
+            'karsilayabilir_cagri': round(m['karsilayabilir']),
+            'RR': round(m['RR'], 3),
+            'cevaplanabilen_%': round(100 * m['cevaplanabilen'], 1),
+            'acikta_cagri': round(m['acikta']),
+            'fazla_kapasite_cagri': round(m['fazla']),
+            'RR<1_slot': m['rr1_alti_slot'],
+        })
+    out = pd.DataFrame(satir)
+    fark = {'kaynak': 'FARK (BİZ − EKİP)'}
+    for c in out.columns[1:]:
+        fark[c] = round(out.loc[1, c] - out.loc[0, c], 3 if c == 'RR' else 1)
+    out = pd.concat([out, pd.DataFrame([fark])], ignore_index=True)
+
+    if verbose:
+        show(out)
+        e, b = out.loc[0], out.loc[1]
+        print(f"  • RR: EKİP {e['RR']:.2f} · BİZ {b['RR']:.2f}  → toplam kadro gelen "
+              f"çağrının %{100 * e['RR']:.0f} / %{100 * b['RR']:.0f}'ine yetiyor")
+        print(f"  • cevaplanabilen: EKİP %{e['cevaplanabilen_%']} · BİZ "
+              f"%{b['cevaplanabilen_%']}  → açıkta çağrı farkı {fark['acikta_cagri']:+,.0f}")
+        for r in (e, b):
+            if r['RR'] >= 1 and r['cevaplanabilen_%'] < 100:
+                print(f"  ⚠ {r['kaynak']}: RR ≥ 1 ama {r['acikta_cagri']:,} çağrı açıkta → "
+                      f"kadro MİKTARI yetiyor, saatlere DAĞILIMI yetmiyor")
+    return out
+
+
+def rr_saat_tablosu(tablolar, kod_ekip, kod_biz):
+    """Saat bazında RR — hafta içi / hafta sonu, EKİP ile BİZ yan yana.
+    cagri_gun = o saatte ortalama bir günde gelen çağrı."""
+    parca = []
+    for hs, on in ((0, 'HI'), (1, 'HS')):
+        kolon = {}
+        for kod, et in ((kod_ekip, 'EKIP'), (kod_biz, 'BIZ')):
+            t = tablolar[kod]
+            t = t[(t['hafta_sonu'] == hs) & (t['cagri'] > 0)].copy()
+            if t.empty:
+                continue
+            t['_kar'] = karsilayabilir(t)
+            t['saat'] = t['interval'].str[:2]
+            g = t.groupby('saat').agg(c=('cagri', 'sum'), k=('_kar', 'sum'))
+            if f'{on}_cagri_gun' not in kolon:
+                kolon[f'{on}_cagri_gun'] = (g['c'] / t['data_date'].nunique()).round(0)
+            kolon[f'{on}_RR_{et}'] = (g['k'] / g['c']).round(2)
+        if kolon:
+            parca.append(pd.DataFrame(kolon))
+    if not parca:
+        return pd.DataFrame()
+    out = pd.concat(parca, axis=1).reset_index()
+    out['saat'] = out['saat'] + ':00'
+    return out
+
+
+def rr_bantlari(tablolar, kodlar):
+    """Çağrıların yüzde kaçı hangi RR bandındaki slotlarda geldi (çağrı ağırlıklı)."""
+    satir = []
+    for kod in kodlar:
+        t = tablolar[kod]
+        t = t[t['cagri'] > 0]
+        cg = t['cagri'].values.astype(float)
+        rr = karsilayabilir(t) / cg
+        s = {'kaynak': KAYNAKLAR[kod]}
+        for alt, ust, et in RR_BANTLAR:
+            s[et] = round(100 * cg[(rr >= alt) & (rr < ust)].sum() / cg.sum(), 1)
+        satir.append(s)
+    return pd.DataFrame(satir)
+
+
+def alt_kuyruk_is_yuku(df_actual, df_aht, year, month, queue='kitle'):
+    """Alt kuyruk (resource_group_key) kırılımı — çağrı · AHT · iş yükü payı.
+
+    Kadro alt kuyruklara BÖLÜNMEDİĞİ için RR alt kuyruk bazında hesaplanamaz;
+    alt kuyruklar slotun AHT'sini (dolayısıyla karşılayabilir çağrıyı) belirler.
+    """
+    c = DEFAULT_SQ_COLS
+    d_col, t_col = _resolve_col(df_actual, c['date']), _resolve_col(df_actual, c['time'])
+    q_col, n_col = _resolve_col(df_actual, c['sub_queue']), _resolve_col(df_actual, c['calls'])
+    g_col = _resolve_col(df_actual, c['group'])
+    if None in (d_col, t_col, q_col, n_col):
+        return pd.DataFrame()
+    k = df_actual
+    if g_col is not None:
+        k = k[k[g_col].astype(str).str.strip().str.lower() == f"{queue}_cagrilar"]
+    d = pd.DataFrame({
+        'data_date': _to_date_series(k[d_col]).dt.normalize(),
+        'saat': k[t_col].map(_to_slot_30).str[:2].astype(int),
+        'alt_kuyruk': k[q_col].astype(str).str.strip(),
+        'cagri': pd.to_numeric(k[n_col], errors='coerce').fillna(0),
+    })
+    d = d[(d['data_date'].dt.year == year) & (d['data_date'].dt.month == month)]
+    a = df_aht[df_aht['line_based_main_group'] == f"{queue}_cagrilar"].copy()
+    a = pd.DataFrame({'saat': a['saat'].astype(int),
+                      'alt_kuyruk': a['sub_queue'].astype(str).str.strip(),
+                      'aht': pd.to_numeric(a['weighted_avg_aht'], errors='coerce')})
+    m = d.merge(a, on=['saat', 'alt_kuyruk'], how='left')
+    m['is_sn'] = m['cagri'] * m['aht']
+    g = m.groupby('alt_kuyruk').agg(cagri=('cagri', 'sum'), is_sn=('is_sn', 'sum'),
+                                    aht_yok=('aht', lambda s: s.isna().all()))
+    g['aht_sn'] = (g['is_sn'] / g['cagri']).round(0)
+    g.loc[g['aht_yok'], 'aht_sn'] = np.nan
+    g['is_yuku_kisi_saat'] = (g['is_sn'] / 3600).round(0)
+    toplam = g['is_sn'].sum()
+    g['is_yuku_payi_%'] = (100 * g['is_sn'] / toplam).round(1) if toplam else np.nan
+    g['cagri_payi_%'] = (100 * g['cagri'] / g['cagri'].sum()).round(1)
+    g = g.sort_values('is_sn', ascending=False).reset_index()
+    g['cagri'] = g['cagri'].round().astype(int)
+    return g[['alt_kuyruk', 'cagri', 'cagri_payi_%', 'aht_sn', 'is_yuku_kisi_saat',
+              'is_yuku_payi_%']]
+
+
+# ---------------------------------------------------------------------------
 # GİRDİ GÖSTERİMİ (HÜCRE 2)
 # ---------------------------------------------------------------------------
 
@@ -2194,6 +2360,38 @@ if not globals().get('TABLO'):
     print("TABLO yok — HÜCRE 4'ü çalıştır.")
 else:
     SL_OZET, df_sla = sl_ozeti(TABLO, df_ihtiyac)
+
+
+# %% [HÜCRE 7B] — RR: karşılayabileceğim çağrı ÷ gelen çağrı
+# karşılayabilir = telefonda × 1.800 sn ÷ AHT  (AHT alt kuyruk çağrı ağırlıklı)
+# Kuyruk modeli YOK → Erlang'ın sıkışık slottaki kötümserliğinden etkilenmez.
+#   RR              : toplam kadro toplam çağrıya yetiyor mu (fazla, eksiği kapatır)
+#   cevaplanabilen %: fazlalık başka slota taşınamaz → gerçekte cevaplanabilecek pay
+#   RR bantları     : çağrıların yüzde kaçı hangi kadro durumunda geldi
+
+if not globals().get('TABLO'):
+    print("TABLO yok — HÜCRE 4'ü çalıştır.")
+else:
+    print(f"AHT kaynağı: {_aht_ad}")
+    if not _aht_ad.startswith('df_aht · alt kuyruk'):
+        print("  ⚠ AHT alt kuyruk detaylı DEĞİL — df_aht + resource_group_key gerekli.")
+    elif 'df_aht' in globals():
+        print("\nALT KUYRUK İŞ YÜKÜ (ay toplamı) — slot AHT'sini bu karışım belirliyor")
+        show(alt_kuyruk_is_yuku(df_actual, df_aht, YEAR, MONTH, queue=QUEUE))
+
+    RR_OZET = {}
+    for _ke, _kb, _ad in (('ekip_m1', 'biz_m1', 'PLAN SEVİYESİ'),
+                          ('ekip_m2', 'biz_m2', 'KİŞİ SEVİYESİ')):
+        if not (_ke in TABLO and _kb in TABLO):
+            print(f"\n{_ad} — {KAYNAKLAR[_ke]} / {KAYNAKLAR[_kb]} yok, atlandı")
+            continue
+        _o, _n = ortak_gunler(TABLO, [_ke, _kb], verbose=False)
+        print(f"\n{'=' * 20} {_ad} — {_n} ortak gün {'=' * 20}")
+        RR_OZET[_ad] = rr_ozeti(_o, _ke, _kb)
+        print("\n  saat bazında RR (cagri_gun = ortalama bir günde o saatte gelen çağrı)")
+        show(rr_saat_tablosu(_o, _ke, _kb))
+        print("\n  RR bantları — çağrıların yüzde kaçı o kadro durumundaki slotlarda geldi")
+        show(rr_bantlari(_o, [_ke, _kb]))
 
 
 # %% [HÜCRE 8] — DETAY (opsiyonel): tek kaynak için SL kırılımı
