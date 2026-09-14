@@ -2733,17 +2733,83 @@ else:
         print(f"  dtypes:\n{_g.dtypes.to_string()}")
         print(f"\n  ilk 3 satır:")
         show(_g.head(3))
-        # hangi kolon tarih/saat/vardiya olarak SEÇİLECEK — tahmin değil, göster
-        for _et, _ad in (('tarih', DEFAULT_M2_COLS['date']),
-                         ('slot', DEFAULT_M2_COLS['slot']),
-                         ('vardiya', DEFAULT_M2_COLS['shift']),
-                         ('agent', DEFAULT_M2_COLS['agent']),
-                         ('kisi', DEFAULT_M2_COLS['kisi'])):
-            _c = _resolve_col(_g, _ad)
-            print(f"  {_et:<8} → {_c if _c else '— bulunamadı'}"
-                  + (f"   örnek: {_g[_c].dropna().head(3).tolist()}" if _c else ""))
+        # hangi kolon neye SEÇİLECEK — tahmin değil, göster.
+        # Aday listeleri TABLOYA GÖRE: eskiden hepsine Model-2 adayları
+        # uygulanıyordu → df_ekip_model1 / df_actual'da gereksiz
+        # '— bulunamadı' satırları çıkıyordu (ör. kitle_in_kisi_sayisi varken
+        # 'kisi → bulunamadı').
+        #   aday  : (etiket, kolon adayları)
+        #   yollar: (biçim adı, gereken etiketler) — İLK tam olan kullanılır,
+        #           sıra ilgili fonksiyonun öncelik sırasıyla aynı
+        #   zorunlu / opsiyonel: yoldan bağımsız
+        _M2_ADAY = [('tarih', DEFAULT_M2_COLS['date']),
+                    ('slot', DEFAULT_M2_COLS['slot']),
+                    ('vardiya', DEFAULT_M2_COLS['shift']),
+                    ('agent', DEFAULT_M2_COLS['agent']),
+                    ('kisi', DEFAULT_M2_COLS['kisi'])]
+        _M2_YOL = [('SLOT + KİŞİ', ['slot', 'kisi']),
+                   ('VARDİYA + KİŞİ', ['vardiya', 'kisi']),
+                   ('VARDİYA + AGENT', ['vardiya', 'agent'])]
+        _ON_KOLON = {
+            'df_ekip_model2': dict(
+                aday=_M2_ADAY + [('şirket', EKIP_GRUP_ADAY)], yollar=_M2_YOL,
+                zorunlu=['tarih'],
+                opsiyonel={'şirket': 'yoksa tamamı inhouse sayılır'}),
+            'df_model2': dict(aday=_M2_ADAY, yollar=_M2_YOL, zorunlu=['tarih'],
+                              opsiyonel={}),
+            'df_ekip_model1': dict(
+                aday=[('tarih', DEFAULT_PLAN_AGG_COLS['date']),
+                      ('vardiya', DEFAULT_PLAN_AGG_COLS['shift']),
+                      ('inhouse', DEFAULT_PLAN_WIDE_COLS['in']),
+                      ('outsource', DEFAULT_PLAN_WIDE_COLS['out']),
+                      ('şirket', DEFAULT_PLAN_AGG_COLS['group']),
+                      ('kisi', DEFAULT_PLAN_AGG_COLS['kisi'])],
+                yollar=[('GENİŞ', ['inhouse', 'outsource']),
+                        ('GENİŞ (sadece inhouse)', ['inhouse']),
+                        ('GENİŞ (sadece outsource)', ['outsource']),
+                        ('UZUN', ['şirket', 'kisi'])],
+                zorunlu=['tarih', 'vardiya'], opsiyonel={}),
+            'df_actual': dict(
+                aday=[('tarih', DEFAULT_ACTUAL_COLS['date']),
+                      ('saat', DEFAULT_ACTUAL_COLS['time']),
+                      ('kuyruk', DEFAULT_ACTUAL_COLS['group']),
+                      ('çağrı', DEFAULT_ACTUAL_COLS['calls']),
+                      ('kitle_çağrı', DEFAULT_ACTUAL_COLS['kitle']),
+                      ('alt_kuyruk', DEFAULT_SQ_COLS['sub_queue'])],
+                yollar=[('UZUN', ['kuyruk', 'çağrı']),
+                        ('GENİŞ', ['kitle_çağrı'])],
+                zorunlu=['tarih', 'saat'],
+                opsiyonel={'alt_kuyruk': "sadece slot bazlı AHT için (df_aht ile)"}),
+        }
+        _spec = _ON_KOLON.get(ON_KONTROL, _ON_KOLON['df_model2'])
+        _bul = {_et: _resolve_col(_g, _ad) for _et, _ad in _spec['aday']}
+        _yol = next(((_ad, _et) for _ad, _et in _spec['yollar']
+                     if all(_bul[e] for e in _et)), None)
+        print(f"\n  kolon eşleme:")
+        for _et, _ in _spec['aday']:
+            _c = _bul[_et]
+            if _c:
+                _dur = f"{_c}   örnek: {_g[_c].dropna().head(3).tolist()}"
+            elif _et in _spec['zorunlu']:
+                _dur = "✗ YOK (zorunlu)"
+            elif _et in _spec['opsiyonel']:
+                _dur = f"— yok (opsiyonel: {_spec['opsiyonel'][_et]})"
+            elif _yol:
+                _dur = f"— gerekmez ({_yol[0]} biçimi kullanılıyor)"
+            else:
+                _dur = "— bulunamadı"
+            print(f"  {_et:<11} → {_dur}")
+        _eks_z = [e for e in _spec['zorunlu'] if not _bul[e]]
+        if _yol and not _eks_z:
+            print(f"  ✓ biçim: {_yol[0]}")
+        else:
+            if _eks_z:
+                print(f"  ✗ zorunlu kolon yok: {_eks_z}")
+            if not _yol:
+                print(f"  ✗ hiçbir biçim tam değil — beklenen (biri yeter): "
+                      + ' | '.join(f"{a}: {'+'.join(e)}" for a, e in _spec['yollar']))
         # tarih ayrıştırma DENEMESİ (patlarsa sebebi burada okunur)
-        _dc = _resolve_col(_g, DEFAULT_M2_COLS['date'])
+        _dc = _bul['tarih']
         if _dc:
             try:
                 _d = _to_date_series(_g[_dc], ad=f"{ON_KONTROL}.{_dc}", verbose=True)
@@ -2788,14 +2854,56 @@ else:
                   f"outsource {int(_cov['kisi_out'].max())}")
         except Exception as _ex:
             print(f"\n  ✗ COVERAGE HATASI → {type(_ex).__name__}: {_ex}")
-    elif ON_KONTROL == 'df_ekip_model1':
+    elif ON_KONTROL in ('df_ekip_model1', 'df_actual'):
+        # Eskiden sadece ilk 10 satır basılıyordu = 1. günün 00:00–04:30 gece
+        # slotları → bilgi vermiyordu. Artık GÜN BAZINDA özet + ayda eksik gün.
+        _GUN_AD = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz']
+        _ilk = pd.Timestamp(year=YEAR, month=MONTH, day=1)
+        _ay_gunleri = pd.date_range(_ilk, _ilk + pd.offsets.MonthEnd(1), freq='D')
         try:
-            show(build_plan_coverage_kitle(_g, year=YEAR, month=MONTH).head(10))
-        except Exception as _ex:
-            print(f"\n  ✗ HATA → {type(_ex).__name__}: {_ex}")
-    elif ON_KONTROL == 'df_actual':
-        try:
-            show(actual_calls_30(_g, year=YEAR, month=MONTH, queue='kitle').head(10))
+            if ON_KONTROL == 'df_ekip_model1':
+                _p = build_plan_coverage_kitle(_g, year=YEAR, month=MONTH)
+                _pg = _p.groupby('data_date').agg(
+                    kisi_slot_in=('plan_in', 'sum'), kisi_slot_out=('plan_out', 'sum'),
+                    tepe_in=('plan_in', 'max'), tepe_out=('plan_out', 'max'),
+                ).reset_index()
+                _bos = _pg[(_pg['kisi_slot_in'] + _pg['kisi_slot_out']) == 0]
+                _tp = _p.loc[_p['plan_toplam'].idxmax()]
+                _eksik_gun = []                       # tam ızgara → boş gün = planı yok
+            else:
+                _p = actual_calls_30(_g, year=YEAR, month=MONTH, queue='kitle')
+                _pg = _p.groupby('data_date').agg(
+                    cagri=('actual_kitle', 'sum'),
+                    dolu_slot=('actual_kitle', lambda s: int((s > 0).sum())),
+                    tepe_slot_cagri=('actual_kitle', 'max'),
+                ).reset_index()
+                _bos = _pg[_pg['cagri'] == 0]
+                _tp = _p.loc[_p['actual_kitle'].idxmax()] if len(_p) else None
+                _eksik_gun = [d for d in _ay_gunleri
+                              if d not in set(_pg['data_date'])]
+            _pg.insert(1, 'gun', _pg['data_date'].dt.weekday.map(lambda i: _GUN_AD[i]))
+
+            print(f"\n  ✓ gün bazında ({len(_pg)} gün):")
+            show(_pg)
+            if ON_KONTROL == 'df_ekip_model1':
+                print(f"  toplam kişi-slot: inhouse {int(_pg['kisi_slot_in'].sum()):,}, "
+                      f"outsource {int(_pg['kisi_slot_out'].sum()):,}  |  "
+                      f"tepe slot: {_tp['data_date'].date()} {_tp['interval']} "
+                      f"→ {int(_tp['plan_in'])} in + {int(_tp['plan_out'])} out")
+            elif _tp is not None:
+                print(f"  toplam çağrı {int(_pg['cagri'].sum()):,}  |  günlük ort. "
+                      f"{_pg['cagri'].mean():,.0f}  |  tepe slot: "
+                      f"{_tp['data_date'].date()} {_tp['interval']} → "
+                      f"{int(_tp['actual_kitle'])} çağrı")
+            if len(_bos):
+                print(f"  ⚠ {'planı' if ON_KONTROL == 'df_ekip_model1' else 'çağrısı'} "
+                      f"0 olan gün: {', '.join(_bos['data_date'].dt.strftime('%d.%m'))}")
+            if _eksik_gun:
+                print(f"  ⚠ {YEAR}/{MONTH:02d} içinde verisi HİÇ olmayan gün "
+                      f"({len(_eksik_gun)}): "
+                      f"{', '.join(d.strftime('%d.%m') for d in _eksik_gun)}")
+            if not len(_bos) and not _eksik_gun:
+                print(f"  ✓ ayın {len(_ay_gunleri)} gününün hepsi dolu")
         except Exception as _ex:
             print(f"\n  ✗ HATA → {type(_ex).__name__}: {_ex}")
 
