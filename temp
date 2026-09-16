@@ -7,6 +7,7 @@
 #   3  TAHMİN    — tahmin ↔ gerçek çağrı + İKİSİNİN kişi karşılığı (ortalama gün)
 #   4  İHTİYAÇ   — gerçek çağrı + AHT → slot bazında gereken kişi (Erlang)
 #   5  KAPASİTE  — EKİP M1 · EKİP M2 · BİZ M1 · BİZ M2 → slot bazında kişi
+#   5B KADRO     — gün gün inhouse / outsource kişi-saat, dört kaynak yan yana
 #   6  PLAN      — İHTİYAÇ ↔ EKİP Model-1 ↔ BİZ Model-1
 #                  hap tablo (RR + karşılanan çağrı %) + 3 grafik
 #   7  KİŞİ      — İHTİYAÇ ↔ EKİP Model-2 ↔ BİZ Model-2   (aynı düzen)
@@ -1933,6 +1934,61 @@ def sl_serisi(df, kap_kol, shrinkage=None, T=SLA_SANIYE):
     return np.array(out, dtype=float)
 
 
+def gunluk_kadro(tablolar, kodlar=None, verbose=True):
+    """GÜN GÜN inhouse / outsource kadro — dört kaynak yan yana (kişi-saat).
+
+    kişi-saat = Σ kapasite ÷ 2   (30 dk slot = yarım kişi-saat)
+    Kolonlar: <kod>_in · <kod>_out  → o günün inhouse / outsource kadrosu
+    Son satırlar: HAFTA İÇİ ort · HAFTA SONU ort · AY TOPLAM
+
+    ⚠ Planı olmayan gün 0 görünür ve ortalamayı düşürür. Sadece planlı günleri
+    istiyorsan ortak_gunler() çıktısını ver.
+    """
+    kodlar = [k for k in KAYNAKLAR if k in tablolar] if kodlar is None else kodlar
+    if not kodlar:
+        return pd.DataFrame()
+    ilk = tablolar[kodlar[0]]
+    out = (ilk.groupby('data_date', as_index=False)
+              .agg(gun=('gun', 'first'), hafta_sonu=('hafta_sonu', 'first'),
+                   cagri=('cagri', 'sum'), ihtiyac_ks=('gereken', 'sum')))
+    out['ihtiyac_ks'] = out['ihtiyac_ks'] / 2
+    for k in kodlar:
+        g = (tablolar[k].groupby('data_date', as_index=False)
+             .agg(_in=('kapasite_in', 'sum'), _out=('kapasite_out', 'sum')))
+        g[f'{k}_in'] = g['_in'] / 2
+        g[f'{k}_out'] = g['_out'] / 2
+        out = out.merge(g[['data_date', f'{k}_in', f'{k}_out']], on='data_date',
+                        how='left')
+
+    kol = ['cagri', 'ihtiyac_ks'] + [f'{k}_{s}' for k in kodlar for s in ('in', 'out')]
+    # Gün satırları ÖNCE yuvarlanıyor, özet satırları YUVARLANMIŞ değerlerden
+    # hesaplanıyor — böylece AY TOPLAM, ekrandaki kolonu elle toplayınca da tutuyor.
+    out[kol] = out[kol].fillna(0).round(0)
+    out.insert(0, 'tarih', out['data_date'].dt.strftime('%d.%m'))
+
+    satir = []
+    for ad, d, islem in (('HAFTA İÇİ ort', out[out['hafta_sonu'] == 0], 'mean'),
+                         ('HAFTA SONU ort', out[out['hafta_sonu'] == 1], 'mean'),
+                         ('AY TOPLAM', out, 'sum')):
+        if d.empty:
+            continue
+        s = {'tarih': '', 'gun': ad, 'hafta_sonu': None}
+        s.update({c: round(d[c].mean() if islem == 'mean' else d[c].sum())
+                  for c in kol})
+        satir.append(s)
+
+    out = out.drop(columns=['data_date', 'hafta_sonu'])
+    gorunum = pd.concat([out, pd.DataFrame(satir).drop(columns='hafta_sonu')],
+                        ignore_index=True)
+    if verbose:
+        print("GÜNLÜK KADRO — kişi-saat (Σ kapasite ÷ 2) · in = inhouse, out = outsource")
+        show(gorunum)
+        print("  ihtiyac_ks = o günün Erlang ihtiyacı (kişi-saat) — kıyas çizgisi")
+        print("  ⚠ aynı sahibin M1 ile M2'si arasında büyük fark varsa girdi sorunu "
+              "olabilir (eğitim grubu, kısmi, eksik şirket satırı)")
+    return gorunum
+
+
 def karsilastirma_ozeti(tablolar, kod_ekip, kod_biz, verbose=True):
     """İHTİYAÇ ↔ EKİP ↔ BİZ — hap tablo (AY TOPLAMI, gün × slot üzerinden).
 
@@ -2803,6 +2859,16 @@ else:
     show(kapasite_yan_yana(TABLO, hafta_sonu=0))
     print("\nİHTİYAÇ vs KAPASİTE — HAFTA SONU, ortalama gün (kişi)")
     show(kapasite_yan_yana(TABLO, hafta_sonu=1))
+
+
+# %% [HÜCRE 5B] — GÜNLÜK KADRO: inhouse / outsource, dört kaynak yan yana
+# kişi-saat = Σ kapasite ÷ 2. Model-1 ↔ Model-2 farkını gün gün görmek için;
+# aynı sahibin M1/M2'si arasındaki büyük fark girdi sorununa işaret eder.
+
+if not globals().get('TABLO'):
+    print("TABLO yok — HÜCRE 5'i çalıştır.")
+else:
+    GUNLUK_KADRO = gunluk_kadro(TABLO)
 
 
 # %% [HÜCRE 6] — PLAN SEVİYESİ: İHTİYAÇ ↔ EKİP Model-1 ↔ BİZ Model-1
