@@ -1,20 +1,4 @@
-for k, t in TABLO.items():
-    hi = t[t['hafta_sonu'] == 0].groupby('data_date')['kapasite_toplam'].sum()
-    print(f"{k:8} hafta içi planlı gün: {int((hi > 0).sum())}")
-
-
-
-SLOT = '09:00'
-_d = pd.concat([TABLO[k][(TABLO[k]['interval'] == SLOT) & (TABLO[k]['hafta_sonu'] == 0)]
-                .set_index('data_date')['kapasite_toplam'].rename(k) for k in TABLO], axis=1)
-_d.index = _d.index.strftime('%d.%m %a')
-show(_d)
-print(_d.mean().round(1))      # tablodaki ortalama ile aynı çıkmalı
-
-
-
-for _ad in ('df_ekip_model1', 'df_ekip_model2'):
-    _u = vardiya_uzun(globals()[_ad], queue=QUEUE, ad=_ad)
-    _u['sure_saat'] = _u['vardiya'].map(lambda v: len(shift_slots(v)) / 2)
-    print(f"\n{_ad}")
-    show(_u.groupby(['sirket', 'sure_saat'])['kisi'].sum().reset_index())
+print(list(df_ekip_model2.columns))
+for _c in ('line_based_main_group', 'kuyruk', 'queue'):
+    if _c in df_ekip_model2.columns:
+        show(df_ekip_model2.groupby(_c)['kisi_sayisi'].sum().reset_index())
