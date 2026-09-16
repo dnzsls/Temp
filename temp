@@ -1,4 +1,18 @@
-print(list(df_ekip_model2.columns))
-for _c in ('line_based_main_group', 'kuyruk', 'queue'):
-    if _c in df_ekip_model2.columns:
-        show(df_ekip_model2.groupby(_c)['kisi_sayisi'].sum().reset_index())
+_p = {}
+for _ad in ('df_ekip_model1', 'df_ekip_model2'):
+    _u = vardiya_uzun(globals()[_ad], queue=QUEUE, ad=_ad, verbose=False)
+    _p[_ad] = _u.groupby(['data_date', 'sirket'])['kisi'].sum().unstack(fill_value=0)
+_cmp = pd.concat([_p['df_ekip_model1'].add_prefix('m1_'),
+                  _p['df_ekip_model2'].add_prefix('m2_')], axis=1)
+_cmp['out_fark'] = _cmp['m2_outsource'] - _cmp['m1_outsource']
+_cmp['in_fark']  = _cmp['m2_inhouse']  - _cmp['m1_inhouse']
+show(_cmp)
+
+
+for _ad in ('df_ekip_model1', 'df_ekip_model2'):
+    _u = vardiya_uzun(globals()[_ad], queue=QUEUE, ad=_ad, verbose=False)
+    print(f"\n{_ad} — outsource vardiya dağılımı")
+    show(_u[_u['sirket'] == 'outsource'].groupby('vardiya')['kisi'].sum().reset_index())
+
+
+print(sorted(df_ekip_model2['working_main_group'].astype(str).unique()))
