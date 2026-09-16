@@ -46,6 +46,14 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
     H19 takım tek tip: takım o HAFTA tek vardiya tipinde (hafta içi; resmi tatil haftası muaf).
                        Üye ayrılamaz — TEK istisna fiziksel imkânsızlık (sabahçı üye ↔ geç/gece
                        tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
+    H19D min takım   : talebi olan HER hafta içi tipe EN AZ 1 takım atanır (TIP_MIN_TAKIM).
+                       "Her açık kovaya en az 1 kişi" (H10 MIN_KOVA) kuralının TAKIM
+                       seviyesindeki hâli. Takım bölünemediği için küçük talepli bir tip
+                       (ör. 07:30, 13 kişi) hiç takım almadan boş kalabiliyordu: 2026-09-14'te
+                       13 talebe 3 kişi (sadece fiziksel imkânsızlıkla ayrılan üyeler) düştü.
+                       Sayıma SADECE o tipte FİİLEN çalışabilen (kıdem/sabahçı/hamile
+                       yasağı olmayan) ve ③ fazla tavanına SIĞAN takımlar girer; öyle bir
+                       takım yoksa kısıt o tipte KURULMAZ (raporlanır). Fazla kabul edilir.
     H20 tek tip      : agent hafta içi tek vardiya tipinde (hafta sonu + resmi tatil haftası serbest).
                        Gösterge (agent_tip) H19'da kurulur, bu hücre onu kullanır.
     H20E mesai adaleti: ORANSAL TAVAN — N × mesai_a ≤ M + N × MESAI_TOL(1), yani
@@ -2508,6 +2516,36 @@ TIP_ACIK_SERBEST = None      # tip başına BEDAVA açık payı.
                              # yuvarlama israfı ≈ yarım takım. O kadarı bedava,
                              # üstü yığılma sayılır.
 
+# ── ④ MİN TAKIM: talebi olan tip takımsız kalamaz (SERT) — V5'te EKLENDİ ──
+# GÖZLEM (2026-09-14, H25D röntgeni): 07:30 tipinde talep 13, atanan 3 ve o hafta
+# o tipe atanan takım sayısı SIFIR. Gelen 3 kişi, takımının tipini fiziksel olarak
+# yapamadığı için ayrılan (H19 sapan) üyelerdi — yani kova "kazayla" doldu.
+# Konveks açık cezası (②) bunu engelleyememişti: açık 13, serbest pay ~8 →
+# cezalanan kısım yalnız 5 kişi. Tip tamamen boş bırakmak fiilen ucuzdu.
+#
+# KURAL: hafta içi talebi olan her (hafta, tip) için  Σ y[takım, hafta, tip] ≥ 1.
+# H10'daki MIN_KOVA ("talebi olan her kova ≥1 kişi") kuralının y SEVİYESİNDEKİ
+# karşılığı. Kişi seviyesindeki hâli yetmiyordu çünkü kovayı sapan üyeler
+# dolduruyor, asıl karar (takım→tip tahsisi) dokunulmadan kalıyordu.
+#
+# NEDEN SERT: bu modelde y üzerinde YUMUŞAK terim çalışmıyor (W_TIP_FAZLA denemesi
+# 329→387 yaptı, gerekçe yukarıda). Sertlik aramayı doğru bölgeye zorluyor.
+#
+# FAZLA KABUL EDİLİYOR (kullanıcı kararı, 2026-09-16): 13 talebe 16 kişilik takım
+# gelirse 3 fazla olur — "fazla olsun, şu anki eksikten iyi". Fazlayı ③ tavan
+# sınırlar; bu yüzden kural SADECE tavana SIĞAN takımları sayar (ikisi çakışmasın).
+#
+# FİZİBİLİTE: her tipe ayrı bir takım gerekiyor ve bir takım haftada TEK tip
+# seçiyor → (tip ↔ takım) EŞLEŞMESİ gerekir. Aşağıdaki ön kontrol bunu hafta hafta
+# ikili eşleşme (Kuhn) ile ÖLÇER ve eşleşmeyen tipi basar; kısıt kurulmadan önce
+# uyarı alırsın. Çalışabilen/sığan takımı olmayan tipte kısıt hiç kurulmaz.
+TIP_MIN_TAKIM      = True    # False → kural kurulmaz (v4 davranışı)
+TIP_MIN_TAKIM_ESIK = 1       # zirve talebi bu sayıdan AZ olan tipe takım zorlanmaz.
+                             # 1 → talebi olan her tip (kullanıcı isteği).
+                             # Yükseltmek (ör. 5) çok küçük tipleri muaf tutar:
+                             # 4 kişilik bir tip için 16 kişilik takım harcamak
+                             # 12 kişiyi başka tipten çeker.
+
 # ── türetilen paylar (takım boyuna oranlı → gelecek ay kendini ayarlar) ──
 _ort_takim = len(AGENTS) / max(1, df_tam["takim"].nunique())      # ortalama takım boyu
 # yumuşak fazla cezası için serbest bölge (W_TIP_FAZLA=0 iken kullanılmaz)
@@ -2526,7 +2564,10 @@ tip_fazla = {}                                     # (hafta, tip) → fazla IntV
 _n_fazla19d = 0                                    # kurulan fazla-ceza terimi sayısı
 _n_acik_ceza = 0                                   # kurulan KONVEKS açık cezası terimi
 _tavan19d = []                                     # (hafta, tip, zirve, tavan, kaynak)
-_19d_ozet = []                                     # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
+_mt19 = []                                         # ④ (hafta, tip, zirve, sığan takım, en küçük)
+_mt19_atla = []                                    # ④ kural kurulamayan (hafta, tip, zirve, n, sebep)
+_mt19_uygun = {}                                   # ④ hafta → {tip: {sığan takım}} (ön kontrol)
+_19d_ozet = []                                   # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
 if TIP_KAPASITE_SERT and takim_tip:
     # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
     # Ham `len(uyeler)` izinlileri de sayıyordu → tipe yeterli takım atansa bile
@@ -2577,25 +2618,48 @@ if TIP_KAPASITE_SERT and takim_tip:
             # ── SERT TAVAN: zirveyi TAVAN'dan fazla aşamaz ──────────────
             # Tanık (açgözlü) tavanı belirlerse kısıt o tipte gevşer ama ASLA
             # çözümsüz olmaz; BUFFER büyükse sertlik ondan gelir.
+            #
+            # ÜÇÜNCÜ ALT SINIR — "en az bir takım sığsın":
+            # Açgözlü o tipe hiç takım koymamışsa tanık 0 döner ve tavan
+            # BUFFER'da kalır. Zirve küçükse (gece: 4) hiçbir takım
+            # (en küçüğü 10+) 4+5=9'un altına sığmaz → o tipin kapasitesi
+            # ZORUNLU 0 olur. Gündüzde bu sadece açık demek (yumuşak), ama
+            # GECE kovasında H10'un SERT bandı var (talep ± GECE_BUFFER)
+            # → model INFEASIBLE olurdu. Tavan, o tipe girebilen EN KÜÇÜK
+            # takımı her zaman kabul edecek kadar geniş tutuluyor.
+            #
+            # V5: _kat19 / _min_kat / _tv artık TIP_FAZLA_SERT'ten BAĞIMSIZ
+            # hesaplanıyor — ④ min-takım kuralı da aynı sayıları kullanıyor
+            # (iki kural aynı dili konuşsun, biri diğerini çözümsüz yapmasın).
+            _kat19 = {T: takim_etkin_tip.get((T, _wk, _t), 0) for T in _sec_takim
+                      if (T, _wk, _t) in takim_tip
+                      and takim_etkin_tip.get((T, _wk, _t), 0) > 0}
+            _min_kat = min(_kat19.values()) if _kat19 else 0
+            _tv = max(_tf_buffer, _gf19d.get(_t, 0),
+                      max(0, _min_kat - _z))
             if TIP_FAZLA_SERT:
-                # ÜÇÜNCÜ ALT SINIR — "en az bir takım sığsın":
-                # Açgözlü o tipe hiç takım koymamışsa tanık 0 döner ve tavan
-                # BUFFER'da kalır. Zirve küçükse (gece: 4) hiçbir takım
-                # (en küçüğü 10+) 4+5=9'un altına sığmaz → o tipin kapasitesi
-                # ZORUNLU 0 olur. Gündüzde bu sadece açık demek (yumuşak), ama
-                # GECE kovasında H10'un SERT bandı var (talep ± GECE_BUFFER)
-                # → model INFEASIBLE olurdu. Tavan, o tipe girebilen EN KÜÇÜK
-                # takımı her zaman kabul edecek kadar geniş tutuluyor.
-                _kat19 = [takim_etkin_tip.get((T, _wk, _t), 0) for T in _sec_takim
-                          if (T, _wk, _t) in takim_tip
-                          and takim_etkin_tip.get((T, _wk, _t), 0) > 0]
-                _min_kat = min(_kat19) if _kat19 else 0
-                _tv = max(_tf_buffer, _gf19d.get(_t, 0),
-                          max(0, _min_kat - _z))
                 _kt19.append(model.Add(_kap <= _z + _tv))
                 _kay19 = ("buffer" if _tv == _tf_buffer else
                           "tanık" if _tv == _gf19d.get(_t, 0) else "min takım")
                 _tavan19d.append((_wk, _t, _z, _tv, _kay19))
+            # ── ④ MİN TAKIM: talebi olan tip takımsız kalamaz (SERT) ────
+            # SADECE (a) o tipte fiilen çalışabilen ve (b) ③ tavana SIĞAN takımlar
+            # sayılır. (b) şart: tavan açıkken daha büyük bir takımı zorlarsak iki
+            # sert kısıt çakışır ve model INFEASIBLE olur. Sığan takım yoksa kural
+            # o tipte KURULMAZ → aşağıda "atlanan" olarak raporlanır.
+            if TIP_MIN_TAKIM and _z >= TIP_MIN_TAKIM_ESIK:
+                _sigan = [T for T, _k in _kat19.items()
+                          if (not TIP_FAZLA_SERT) or _k <= _z + _tv]
+                _mt19_uygun.setdefault(_wk, {})[_t] = set(_sigan)
+                if _sigan:
+                    _kt19.append(model.Add(
+                        sum(takim_tip[(T, _wk, _t)] for T in _sigan) >= 1))
+                    _mt19.append((_wk, _t, _z, len(_sigan), min(_kat19[T] for T in _sigan)))
+                else:
+                    _mt19_atla.append((_wk, _t, _z, len(_kat19),
+                                       (f"hepsi tavanı aşıyor (tavan {_z + _tv}, "
+                                        f"en küçük takım {_min_kat})" if _kat19
+                                        else "o tipte çalışabilen takım YOK")))
             # ── FAZLA (eski, yumuşak): W_TIP_FAZLA=0 iken kurulmaz ──────
             if W_TIP_FAZLA:
                 _fv = model.NewIntVar(0, len(AGENTS),
@@ -2678,6 +2742,74 @@ if _19d_ozet:
         print(f"    BÜYÜK görünür; ikisi aynı ölçü DEĞİL.")
     else:
         print(f"  tip fazla tavanı: KAPALI (TIP_FAZLA_SERT=False)")
+
+    # ── ④ MİN TAKIM KURALI: rapor + FİZİBİLİTE ÖN KONTROLÜ ───────────
+    # Her tipe AYRI bir takım gerekiyor (takım haftada TEK tip seçer, H19) →
+    # bu bir İKİLİ EŞLEŞME problemi. Sadece "tip sayısı ≤ takım sayısı" demek
+    # YETMEZ: bir tipe girebilen takımlar başka tiplerin de tek adayı olabilir.
+    # Kuhn algoritmasıyla hafta hafta maksimum eşleşme ölçülüyor; eşleşmeyen tip
+    # varsa kısıt o haftada TUTMAZ → model INFEASIBLE olur, uyarı basılıyor.
+    if TIP_MIN_TAKIM:
+        def _kuhn19d(_uygun):
+            """{tip: {takım}} → (eşleşen tip sayısı, {takım: tip}).
+            Her takım en fazla bir tipe sayılır (haftada tek tip seçtiği için)."""
+            _es = {}
+
+            def _artir(_t, _gorulen):
+                for _T in sorted(_uygun.get(_t, ())):
+                    if _T in _gorulen:
+                        continue
+                    _gorulen.add(_T)
+                    if _T not in _es or _artir(_es[_T], _gorulen):
+                        _es[_T] = _t
+                        return True
+                return False
+
+            _n = sum(1 for _t in sorted(_uygun) if _artir(_t, set()))
+            return _n, _es
+
+        print(f"\n  ④ MİN TAKIM [SERT]: {len(_mt19)} (hafta,tip) kısıtı — "
+              f"zirve talebi ≥{TIP_MIN_TAKIM_ESIK} olan tip TAKIMSIZ kalamaz")
+        print(f"     Σ y[takım,hafta,tip] ≥ 1   (H10 MIN_KOVA'nın takım seviyesi)")
+        print(f"     sayılan takım = o tipte ÇALIŞABİLEN + ③ tavana SIĞAN")
+        print(f"     {'hafta':>10} {'zorunlu tip':>12} {'eşleşen':>8} "
+              f"{'seçebilen takım':>16}  durum")
+        _mt_sorun = []
+        for _wk2 in sorted(_mt19_uygun):
+            _u2 = {_t: _s for _t, _s in _mt19_uygun[_wk2].items() if _s}
+            if not _u2:
+                continue
+            _n2, _es2 = _kuhn19d(_u2)
+            _tk2 = len({T for _s in _u2.values() for T in _s})
+            _acik2 = sorted(set(_u2) - set(_es2.values()))
+            if _acik2:
+                _mt_sorun.append((_wk2, _acik2))
+            print(f"     {f'{_wk2[0]}-W{_wk2[1]}':>10} {len(_u2):>12} {_n2:>8} "
+                  f"{_tk2:>16}  "
+                  + ("✓" if not _acik2 else f"⚠ eşleşmeyen: {_acik2}"))
+        if _mt_sorun:
+            print(f"     ⚠ {len(_mt_sorun)} haftada her tipe ayrı takım DÜŞMÜYOR → "
+                  f"model INFEASIBLE olur.")
+            print(f"       Çare: TIP_MIN_TAKIM_ESIK'i yükselt (küçük tipleri muaf tut) "
+                  f"ya da TIP_MIN_TAKIM=False.")
+        else:
+            print(f"     ✓ her haftada her zorunlu tipe AYRI bir takım düşebiliyor "
+                  f"(eşleşme tam)")
+        if _mt19:
+            _mt_fazla = [(f"{_w[0]}-W{_w[1]}", _t, _z, _mk - _z)
+                         for _w, _t, _z, _n, _mk in _mt19 if _mk > _z]
+            print(f"     zorunlu takım zirveyi AŞAN tipler (fazla kabul edilir): "
+                  f"{len(_mt_fazla)}/{len(_mt19)}")
+            for _w3, _t3, _z3, _f3 in sorted(_mt_fazla, key=lambda r: -r[3])[:8]:
+                print(f"       {_w3} {_t3}: zirve {_z3}, en küçük uygun takım "
+                      f"{_z3 + _f3} → en az +{_f3} fazla")
+        if _mt19_atla:
+            print(f"     ⚠ {len(_mt19_atla)} (hafta,tip)'te kural KURULMADI:")
+            for _w4, _t4, _z4, _n4, _sb4 in _mt19_atla[:10]:
+                print(f"       {_w4[0]}-W{_w4[1]} {_t4} (zirve {_z4}): {_sb4}")
+    else:
+        print(f"\n  ④ min takım: KAPALI (TIP_MIN_TAKIM=False) → v4 davranışı: "
+              f"bir tip hiç takım almadan boş kalabilir")
     if W_TIP_FAZLA:
         print(f"  y-seviyesi YUMUŞAK fazla cezası: {_n_fazla19d} terim, "
               f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest}  "
