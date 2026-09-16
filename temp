@@ -2391,11 +2391,19 @@ def grafik_kapasite_ihtiyac(df_ust, df_alt, ad_ust, ad_alt, queue='KİTLE',
 
 
 # ---------------------------------------------------------------------------
-# RR — karşılayabileceğim çağrı ÷ gelen çağrı  (HÜCRE 7B)
+# RR — karşılayabileceğim çağrı ÷ gelen çağrı  (HÜCRE 8B)
 # ---------------------------------------------------------------------------
-# karşılayabilir = telefonda × 1.800 sn ÷ AHT          (30 dk'lık slot)
-#   telefonda = kapasite × (1 − shrinkage)
-#   AHT       = o slotun alt kuyruk çağrı payıyla ağırlıklı AHT'si (HÜCRE 3)
+# Kadroyu ÇAĞRIYA çeviren iki yöntem; ikisinde de telefondaki kişi
+#   telefonda = kapasite × (1 − gün tipi shrinkage)
+#
+#   RR_AHT  : telefonda × 1.800 sn ÷ AHT   — slotun gerçek (alt kuyruk ağırlıklı)
+#             AHT'si; slotun iş karışımını yansıtır
+#   Kap_RR  : telefonda × 15 ÷ 2           — Model-1'in Excel raporundaki kural
+#             (bir kişi saatte 15 çağrı; 15/saat ⇔ AHT 240 sn)
+#   ⚠ Model-1'in Excel'i kaybı rapor_etkisi + kapasite_kaybi ile düşüyor;
+#     BURADA kayıp SHRINKAGE (kullanıcı kararı) → aynı sayıyı beklemeyin,
+#     yöntem farkı bilinçli.
+#
 # KUYRUK MODELİ YOK — bekleme hedefi aranmaz, sadece "kadro gelen çağrıya
 # yetişiyor mu". RR = 1,00 → tam yetişiyor ama bekleme payı sıfır.
 #
@@ -2409,12 +2417,26 @@ RR_BANTLAR = [(0.00, 0.85, '< 0,85'), (0.85, 0.95, '0,85–0,95'),
               (1.20, np.inf, '> 1,20')]
 
 
-def karsilayabilir(df, kap_kol='kapasite_toplam', shrinkage=None):
-    """Her slot için kadronun karşılayabileceği çağrı adedi (gün tipi shrinkage)."""
+# Model-1'in Excel raporundaki çevirim kuralı (config hourly_report →
+# cagri_adedi): bir kişi saatte 15 çağrı karşılar. 15 çağrı/saat ⇔ AHT 240 sn
+# (3.600 ÷ 15) demek; gerçek AHT bundan küçükse bu yöntem daha TEMKİNLİ çıkar.
+CAGRI_SAAT = 15
+
+
+def karsilayabilir(df, kap_kol='kapasite_toplam', shrinkage=None, yontem='aht',
+                   cagri_saat=CAGRI_SAAT):
+    """Her slot için kadronun karşılayabileceği çağrı adedi.
+
+    telefonda = kapasite × (1 − gün tipi shrinkage)     — iki yöntemde de AYNI
+      yontem='aht' : telefonda × 1.800 sn ÷ AHT         (slotun gerçek AHT'si)
+      yontem='15'  : telefonda × cagri_saat ÷ 2         (Model-1 Excel kuralı)
+    """
     gts = [gun_tipi(x) for x in df['data_date'].values]
     shr = np.array([shr_oran(s, g, shrinkage)
                     for s, g in zip(df['interval'].values, gts)])
     tel = df[kap_kol].values.astype(float) * (1 - shr)
+    if str(yontem) == '15':
+        return tel * (cagri_saat * INTERVAL_MIN / 60.0)      # 15/saat → 7,5/slot
     aht = df['aht'].values.astype(float)
     with np.errstate(divide='ignore', invalid='ignore'):
         return np.where(aht > 0, tel * INTERVAL_MIN * 60 / aht, 0.0)
@@ -2435,18 +2457,27 @@ def _rr_olcu(cagri, kar):
     }
 
 
-def rr_ozeti(tablolar, kod_ekip, kod_biz, verbose=True):
-    """EKİP ↔ BİZ — RR hap tablo (AY TOPLAMI, çağrısı olan gün × slot)."""
+def rr_ozeti(tablolar, kod_ekip, kod_biz, cagri_saat=CAGRI_SAAT, verbose=True):
+    """EKİP ↔ BİZ — RR hap tablo (AY TOPLAMI, çağrısı olan gün × slot).
+
+    İki çevirim yan yana (ikisinde de kayıp = gün tipi shrinkage):
+      RR_AHT : telefonda × 1.800 ÷ AHT     — slotun gerçek AHT'si
+      Kap_RR : telefonda × cagri_saat ÷ 2  — Model-1 Excel kuralı (15 çağrı/saat)
+    cevaplanabilen_% ve açıkta çağrı AHT yöntemine göre (fazlalık taşınmaz).
+    """
     satir = []
     for kod in (kod_ekip, kod_biz):
         t = tablolar[kod]
         t = t[t['cagri'] > 0]
         m = _rr_olcu(t['cagri'], karsilayabilir(t))
+        m15 = _rr_olcu(t['cagri'], karsilayabilir(t, yontem='15',
+                                                  cagri_saat=cagri_saat))
         satir.append({
             'kaynak': KAYNAKLAR[kod],
             'gelen_cagri': round(m['gelen']),
             'karsilayabilir_cagri': round(m['karsilayabilir']),
-            'RR': round(m['RR'], 3),
+            'RR_AHT': round(m['RR'], 3),
+            'Kap_RR': round(m15['RR'], 3),
             'cevaplanabilen_%': round(100 * m['cevaplanabilen'], 1),
             'acikta_cagri': round(m['acikta']),
             'fazla_kapasite_cagri': round(m['fazla']),
@@ -2455,26 +2486,38 @@ def rr_ozeti(tablolar, kod_ekip, kod_biz, verbose=True):
     out = pd.DataFrame(satir)
     fark = {'kaynak': 'FARK (BİZ − EKİP)'}
     for c in out.columns[1:]:
-        fark[c] = round(out.loc[1, c] - out.loc[0, c], 3 if c == 'RR' else 1)
+        fark[c] = round(out.loc[1, c] - out.loc[0, c],
+                        3 if c in ('RR_AHT', 'Kap_RR') else 1)
     out = pd.concat([out, pd.DataFrame([fark])], ignore_index=True)
 
     if verbose:
         show(out)
         e, b = out.loc[0], out.loc[1]
-        print(f"  • RR: EKİP {e['RR']:.2f} · BİZ {b['RR']:.2f}  → toplam kadro gelen "
-              f"çağrının %{100 * e['RR']:.0f} / %{100 * b['RR']:.0f}'ine yetiyor")
+        print(f"  • RR_AHT: EKİP {e['RR_AHT']:.2f} · BİZ {b['RR_AHT']:.2f}  → toplam "
+              f"kadro gelen çağrının %{100 * e['RR_AHT']:.0f} / "
+              f"%{100 * b['RR_AHT']:.0f}'ine yetiyor")
+        print(f"  • Kap_RR ({cagri_saat} çağrı/saat): EKİP {e['Kap_RR']:.2f} · BİZ "
+              f"{b['Kap_RR']:.2f}")
+        _t = tablolar[kod_ekip]
+        _t = _t[(_t['cagri'] > 0) & (_t['aht'] > 0)]
+        _ao = float((_t['aht'] * _t['cagri']).sum() / max(1.0, _t['cagri'].sum()))
+        print(f"    {cagri_saat} çağrı/saat ⇔ AHT {3600 / cagri_saat:.0f} sn  |  "
+              f"verideki çağrı ağırlıklı AHT {_ao:.0f} sn → Kap_RR "
+              f"{'DAHA TEMKİNLİ' if _ao < 3600 / cagri_saat else 'DAHA İYİMSER'}")
         print(f"  • cevaplanabilen: EKİP %{e['cevaplanabilen_%']} · BİZ "
               f"%{b['cevaplanabilen_%']}  → açıkta çağrı farkı {fark['acikta_cagri']:+,.0f}")
         for r in (e, b):
-            if r['RR'] >= 1 and r['cevaplanabilen_%'] < 100:
+            if r['RR_AHT'] >= 1 and r['cevaplanabilen_%'] < 100:
                 print(f"  ⚠ {r['kaynak']}: RR ≥ 1 ama {r['acikta_cagri']:,} çağrı açıkta → "
                       f"kadro MİKTARI yetiyor, saatlere DAĞILIMI yetmiyor")
     return out
 
 
-def rr_saat_tablosu(tablolar, kod_ekip, kod_biz):
+def rr_saat_tablosu(tablolar, kod_ekip, kod_biz, yontem='aht',
+                    cagri_saat=CAGRI_SAAT):
     """Saat bazında RR — hafta içi / hafta sonu, EKİP ile BİZ yan yana.
-    cagri_gun = o saatte ortalama bir günde gelen çağrı."""
+    cagri_gun = o saatte ortalama bir günde gelen çağrı.
+    yontem: 'aht' (gerçek AHT) | '15' (Model-1 Excel kuralı → Kap_RR)."""
     parca = []
     for hs, on in ((0, 'HI'), (1, 'HS')):
         kolon = {}
@@ -2483,7 +2526,7 @@ def rr_saat_tablosu(tablolar, kod_ekip, kod_biz):
             t = t[(t['hafta_sonu'] == hs) & (t['cagri'] > 0)].copy()
             if t.empty:
                 continue
-            t['_kar'] = karsilayabilir(t)
+            t['_kar'] = karsilayabilir(t, yontem=yontem, cagri_saat=cagri_saat)
             t['saat'] = t['interval'].str[:2]
             g = t.groupby('saat').agg(c=('cagri', 'sum'), k=('_kar', 'sum'))
             if f'{on}_cagri_gun' not in kolon:
@@ -2805,11 +2848,14 @@ else:
 
 
 # %% [HÜCRE 8B] — RR: karşılayabileceğim çağrı ÷ gelen çağrı
-# karşılayabilir = telefonda × 1.800 sn ÷ AHT  (AHT alt kuyruk çağrı ağırlıklı)
 # Kuyruk modeli YOK → Erlang'ın sıkışık slottaki kötümserliğinden etkilenmez.
-#   RR              : toplam kadro toplam çağrıya yetiyor mu (fazla, eksiği kapatır)
+# İki çevirim, ikisinde de telefonda = kapasite × (1 − gün tipi shrinkage):
+#   RR_AHT          : telefonda × 1.800 sn ÷ AHT (alt kuyruk çağrı ağırlıklı AHT)
+#   Kap_RR          : telefonda × 15 ÷ 2 — Model-1 Excel kuralı (15 çağrı/saat)
+#                     15 çağrı/saat ⇔ AHT 240 sn; gerçek AHT küçükse daha temkinli
 #   cevaplanabilen %: fazlalık başka slota taşınamaz → gerçekte cevaplanabilecek pay
 #   RR bantları     : çağrıların yüzde kaçı hangi kadro durumunda geldi
+# Saat tablosunu 15 çağrı kuralıyla da görmek için: rr_saat_tablosu(..., yontem='15')
 
 if not globals().get('TABLO'):
     print("TABLO yok — HÜCRE 5'i çalıştır.")
