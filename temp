@@ -103,7 +103,8 @@ GİRDİLER (hepsi GERÇEK — dummy yok):
   2) df_agents  : agent master (SQL'den DataFrame). Beklenen kolonlar:
        agent_user_code        agent kimliği (U111111)
        agent_name
-       teamleader_name        takım parçası
+       teamleader_name        takım GÖSTERİM adının parçası (DEĞİŞEBİLİR: soyadı/yazım)
+       teamlead_user_code     takım EŞLEŞME anahtarının parçası (TAKIM_ANAHTAR='kod')
        groupname              takım parçası (+lokasyon)
        working_main_group     lokasyon+kuyruk (okunur)
        line_based_main_group  KUYRUK: kitle_cagrilar | kurumsal_cagrilar | gold_cagrilar
@@ -142,6 +143,38 @@ PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 RESMI_TATILLER   = []          # manuel resmi tatil tarihleri, ör. ["2026-07-15", "2026-08-30"]
 ARIFE_GUNLERI    = []          # arife (yarım gün) tarihleri, ör. ["2026-06-16"]; öğleden sonra resmi tatil
 ARIFE_SON_BASLANGIC = "09:00"  # arife günü flag'liler (süt/hamile/mesai) bu saate KADAR başlayabilir (4 saat → 13:00)
+# ── TAKIM ANAHTARI: takım kimliğinin 2. parçası İSİM mi KOD mu ────────
+# Takım = working_main_group + takım lideri. İkinci parça iki şey olabilir:
+#   "kod"  → teamlead_user_code   (varsayılan, 2026-09-18'de geçildi)
+#   "isim" → teamleader_name      (v4 ve öncesinin davranışı)
+# NEDEN KOD: isim DEĞİŞEBİLİR (soyadı değişikliği, yazım/harf farkı). df_agents
+# ile df_gecmis arasındaki eşleşme koptuğunda hata VERMEZ — o takım H19B geçmiş
+# adaletinde sessizce NÖTR (cezasız) kalır, yani geçmişte çok gece çalışmış bir
+# takım bedava duruma geçer. Kod değişmez.
+# ÖLÇÜLDÜ (2026-09-18, geçici H6B kontrol hücresiyle): bu ayın verisinde iki
+# anahtar AYNI sayıda eşleşiyor (28 takım / 28 eşleşen / 465 kişi) → geçiş bugünü
+# DEĞİŞTİRMEZ, ileriye dönük sigorta. Kontrol hücresi sonra kaldırıldı.
+# WMG KOMBİNİ KALIYOR: aynı lider iki lokasyona yayılmışsa (working_main_group
+# farklı) bunlar AYRI takımdır; wmg'yi çıkarmak onları tek takıma birleştirir.
+# GÖSTERİM AYRI: kod okunamaz (U900) → yazdırılan ve Excel'e giden ad
+# `wmg | teamleader_name` (takim_ad). Eşleşme KODLA, okuma İSİMLE; Excel
+# Sheet4/Sheet5'te ayrıca takim_kod kolonu var.
+# Kod kolonu tabloda YOKSA otomatik isme düşülür (geriye uyumlu, uyarı basılır).
+TAKIM_ANAHTAR = "kod"          # "kod" | "isim"
+TAKIM_KOD_ADAYLARI = ("teamlead_user_code", "teamleader_user_code",
+                      "team_lead_user_code", "teamlead_code")
+
+
+def takim_kod_kolonu(_df):
+    """Tabloda takım lideri KODU hangi kolonda? (yazım farkları tolere edilir)"""
+    if _df is None:
+        return None
+    for _c in TAKIM_KOD_ADAYLARI:
+        if _c in _df.columns:
+            return _c
+    return None
+
+
 # HAFTA İÇİ coverage esnekliği — takım tipi SERT olduğu için genişletildi (5→10, 15→25):
 # takım artık bölünemediğinden model boşluğu "birkaç kişi kaydırarak" kapatamıyor,
 # tip başına kişi sayısı takım boyutlarına yuvarlanıyor. Dar serbest bölge bunu
@@ -539,9 +572,13 @@ else:
     print("df_onceki yok (önceki ay taşıması devre dışı kalacak — H8C)")
 
 # df_gecmis: TAKIM bazlı geçmiş vardiya dağılımı — H19B geç-vardiya adaleti için.
-# Kolonlar: teamleader_name | working_main_group | shifts_adj | total_gun_sayisi
-#   ör. "büşra şen | samsun_kitle | 09:00-18:00 | 45"
-# Takım anahtarı H6 ile AYNI kurulur: working_main_group + " | " + teamleader_name.
+# Kolonlar: teamleader_name | teamlead_user_code | working_main_group |
+#           shifts_adj | total_gun_sayisi
+#   ör. "büşra şen | U900 | samsun_kitle | 09:00-18:00 | 45"
+# Takım anahtarı H6 ile AYNI kurulur (TAKIM_ANAHTAR, H0): kod varsa
+# working_main_group + " | " + teamlead_user_code, yoksa isimle.
+# İKİ TARAF AYRIŞIRSA hata alınmaz, sadece o takım H19B'de cezasız kalır →
+# tek kural, tek yer.
 df_gecmis = globals().get("df_gecmis")
 if df_gecmis is not None:
     df_gecmis = df_gecmis.copy()
@@ -556,11 +593,27 @@ if df_gecmis is not None:
         df_gecmis["gun_agent_ratio"] = (pd.to_numeric(df_gecmis["gun_agent_ratio"],
                                                       errors="coerce")
                                         .fillna(0.0).astype(float))
-    df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
-                          + df_gecmis["teamleader_name"])          # H6 ile aynı anahtar
+    # ── TAKIM ANAHTARI (H6 ile AYNI kural — TAKIM_ANAHTAR, H0) ────────
+    _g_kod = takim_kod_kolonu(df_gecmis) if TAKIM_ANAHTAR == "kod" else None
+    if _g_kod:
+        df_gecmis[_g_kod] = df_gecmis[_g_kod].astype(str).str.strip()
+        df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
+                              + df_gecmis[_g_kod])                 # EŞLEŞME
+    else:
+        df_gecmis["takim"] = (df_gecmis["working_main_group"] + " | "
+                              + df_gecmis["teamleader_name"])
+    df_gecmis["takim_ad"] = (df_gecmis["working_main_group"] + " | "
+                             + df_gecmis["teamleader_name"])       # GÖSTERİM
     print(f"\ndf_gecmis: {df_gecmis.shape[0]} satır  |  "
           f"{df_gecmis['takim'].nunique()} takım  |  "
           f"toplam {df_gecmis['total_gun_sayisi'].sum()} gün")
+    print(f"  takım anahtarı: "
+          + (f"KOD ({_g_kod})" if _g_kod else "İSİM (teamleader_name)")
+          + ("  ⚠ TAKIM_ANAHTAR='kod' ama df_gecmis'te kod kolonu YOK "
+             f"{TAKIM_KOD_ADAYLARI} → isme düşüldü; H6 kodu kullanırsa "
+             f"GEÇMİŞ HİÇ EŞLEŞMEZ"
+             if TAKIM_ANAHTAR == "kod" and not _g_kod else "")
+          + "  (H6 ile aynı olmalı)")
     print(f"  H19B ölçü sütunu 'gun_agent_ratio': "
           + (f"VAR (toplam {df_gecmis['gun_agent_ratio'].sum():,.1f}) → kullanılacak"
              if "gun_agent_ratio" in df_gecmis.columns
@@ -686,207 +739,73 @@ print(f"PT elendi: {int(pt_mask.sum())}  |  eğitim elendi: {int(egitim_mask.sum
 print(df_tam[["agent_user_code", "agent_name", "teamleader_name"]].head())
 
 
-# %% [HÜCRE 6] — TAKIM KOLONU (working_main_group + teamleader_name) ────
-df_tam["takim"] = (df_tam["working_main_group"].str.strip() + " | "
-                   + df_tam["teamleader_name"].str.strip())
-print(f"takım sayısı: {df_tam['takim'].nunique()}")
-print("takım → kişi sayısı:")
-print(df_tam["takim"].value_counts())
-
-
-# %% [HÜCRE 6B] — GEÇİCİ KONTROL: teamlead_user_code ↔ teamleader_name ──
-# GEÇİCİ TEŞHİS HÜCRESİ — hiçbir kısıt kurmaz, hiçbir değişkeni değiştirmez.
-# NE ZAMAN SİLİNİR: takım anahtarı KODA geçtikten ve bu hücre "sorun yok"
-# dedikten sonra.
-#
-# NEDEN: takım anahtarı bugün `working_main_group | teamleader_name`. İsim
-# değişebilen bir alan (soyadı değişikliği, yazım/harf farkı) → df_agents ile
-# df_gecmis arasındaki eşleşme sessizce kopuyor ve o takım H19B'de CEZASIZ
-# (nötr) kalıyor. Kod değişmez, o yüzden anahtarı `teamlead_user_code` yapmak
-# istiyoruz. Bu hücre geçmeden ÖNCE ölçüyor: kod ile isim birbirini tutuyor mu,
-# yeni anahtar eşleşmeyi gerçekten artırıyor mu.
-#
-# ALTI KONTROL (üstteki sorunu açıklıyorsa alttakine bakmaya gerek yok):
-#   [1] KOLON/BOŞLUK  — kod kolonu var mı, boş satır var mı
-#   [2] KOD → İSİM    — aynı koda birden çok isim yazılmış mı (yazım farkı)
-#   [3] İSİM → KOD    — aynı isim iki ayrı koda mı bağlı (adaş lider)
-#   [4] ÇAPRAZ İSİM   — aynı kod df_agents ve df_gecmis'te farklı mı yazılmış
-#                       (kod anahtarının kazancı TAM OLARAK burası)
-#   [5] ÇAPRAZ WMG    — working_main_group yazımı iki tarafta aynı mı
-#                       (anahtarın öbür yarısı; burada fark varsa kod da kurtarmaz)
-#   [6] ANAHTAR KIYASI— eski (wmg|isim) vs yeni (wmg|kod): df_agents takımlarının
-#                       kaçı df_gecmis'te eşleşiyor → KARAR SAYISI
-_6b_ADAY_KOL = ("teamlead_user_code", "teamleader_user_code",
-                "team_lead_user_code", "teamlead_code")
-
-
-def _6b_kod_kol(_df):
-    """Tabloda takım lideri KODU hangi kolonda? (yazım farkları tolere edilir)"""
-    for _c in _6b_ADAY_KOL:
-        if _c in _df.columns:
-            return _c
-    return None
-
-
-def _6b_n(_s):
-    """görünmez fark temizliği: baş/son boşluk + çoklu boşluk tek boşluğa."""
-    return " ".join(str(_s).split())
-
-
-_6b_W = 100
-print("=" * _6b_W)
-print("H6B — GEÇİCİ KONTROL: teamlead_user_code ↔ teamleader_name "
-      "(anahtarı koda çevirmeden önce)")
-print("=" * _6b_W)
-
-_6b_ak = _6b_kod_kol(df_tam)
-_6b_gk = _6b_kod_kol(df_gecmis) if df_gecmis is not None else None
-
-# ── [1] KOLON / BOŞLUK ────────────────────────────────────────────────
-print(f"\n[1] KOLON VE BOŞLUK")
-print(f"    df_agents kod kolonu : {_6b_ak or '⚠ YOK'}")
-print(f"    df_gecmis kod kolonu : "
-      f"{_6b_gk or ('⚠ YOK' if df_gecmis is not None else '— df_gecmis yok')}")
-_6b_devam = bool(_6b_ak)
-if not _6b_ak:
-    print(f"    ⚠ df_agents'te kod kolonu yok → SQL'e ekle. Aranan adlar: "
-          f"{_6b_ADAY_KOL}")
+# %% [HÜCRE 6] — TAKIM ANAHTARI + GÖSTERİM ADI ─────────────────────────
+# İKİ AYRI KAVRAM — karıştırılırsa sessiz hata olur:
+#   takim     = EŞLEŞME anahtarı → "wmg | teamlead_user_code"  (TAKIM_ANAHTAR, H0)
+#               takimlar / takim_tip / agent_takim / df_gecmis hep BUNU kullanır.
+#   takim_ad  = GÖSTERİM adı     → "wmg | teamleader_name"
+#               roster kolonu, print'ler, Excel Sheet4/Sheet5 BUNU gösterir.
+# Kod okunamaz, isim değişebilir → eşleşme kodla, okuma isimle.
+# df_gecmis anahtarı H3'te AYNI kuralla kuruldu.
+_t6_kod = takim_kod_kolonu(df_tam) if TAKIM_ANAHTAR == "kod" else None
+_t6_wmg = df_tam["working_main_group"].astype(str).str.strip()
+_t6_isim = df_tam["teamleader_name"].astype(str).str.strip()
+df_tam["takim_ad"] = _t6_wmg + " | " + _t6_isim                # GÖSTERİM
+if _t6_kod is None:
+    if TAKIM_ANAHTAR == "kod":
+        print(f"⚠ TAKIM_ANAHTAR='kod' ama df_agents'te kod kolonu YOK "
+              f"{TAKIM_KOD_ADAYLARI} → İSİM anahtarına düşüldü (eski davranış).")
+    _t6_parca = _t6_isim                                       # anahtarın 2. parçası
 else:
-    _6b_bos_a = int(df_tam[_6b_ak].map(lambda v: _6b_n(v) in ("", "nan", "None")).sum())
-    print(f"    df_agents: {len(df_tam)} satır, boş/okunamayan kod {_6b_bos_a}")
-    if _6b_bos_a:
-        print(f"      ⚠ boş kodlu agentlar (ilk 10): "
-              f"{df_tam.loc[df_tam[_6b_ak].map(lambda v: _6b_n(v) in ('', 'nan', 'None')), 'agent_user_code'].head(10).tolist()}")
-        print(f"      → bu agentlar KOD anahtarında takımsız kalır; önce veriyi düzelt.")
-if _6b_gk:
-    _6b_bos_g = int(df_gecmis[_6b_gk].map(lambda v: _6b_n(v) in ("", "nan", "None")).sum())
-    print(f"    df_gecmis: {len(df_gecmis)} satır, boş/okunamayan kod {_6b_bos_g}")
+    _t6_k = df_tam[_t6_kod].astype(str).str.strip()
+    _t6_k = _t6_k.where(~_t6_k.str.lower().isin(("", "nan", "none", "null")))
+    # BOŞ KOD GRUPTAN DOLDURULUR: aynı gösterim adına (aynı wmg + aynı lider)
+    # sahip bir üyenin kodu varsa o kod TÜM gruba yazılır. Satır satır isme
+    # düşmek takımı İKİYE BÖLERDİ (kodu olanlar bir takım, olmayanlar başka) →
+    # H19 bütünlüğü bozulur, H19D tip kapasitesi yanlış hesaplanır.
+    _t6_mod = _t6_k.groupby(df_tam["takim_ad"]).agg(
+        lambda s: s.dropna().iloc[0] if s.notna().any() else None)
+    _t6_parca = _t6_k.fillna(df_tam["takim_ad"].map(_t6_mod))
+    _t6_bos = _t6_parca.isna()
+    if _t6_bos.any():                        # takımda HİÇ kod yok → isme düş
+        print(f"⚠ {int(_t6_bos.sum())} agentın takım lideri kodu YOK (takımının "
+              f"hiçbir üyesinde yazılı değil) → o takımlarda İSİM anahtarı "
+              f"kullanıldı: {sorted(set(df_tam.loc[_t6_bos, 'takim_ad']))[:5]}")
+        _t6_parca = _t6_parca.where(~_t6_bos, _t6_isim)
+df_tam["takim"] = _t6_wmg + " | " + _t6_parca                  # EŞLEŞME anahtarı
 
-if _6b_devam:
-    # kod → isim / wmg haritaları (her iki tablo için, tekilleştirilmiş)
-    _6b_a_isim, _6b_a_wmg = {}, {}
-    for _r6 in df_tam.itertuples(index=False):
-        _k = _6b_n(getattr(_r6, _6b_ak))
-        if _k in ("", "nan", "None"):
-            continue
-        _6b_a_isim.setdefault(_k, set()).add(_6b_n(getattr(_r6, "teamleader_name")))
-        _6b_a_wmg.setdefault(_k, set()).add(_6b_n(getattr(_r6, "working_main_group")))
-    _6b_g_isim, _6b_g_wmg = {}, {}
-    if _6b_gk:
-        for _r6 in df_gecmis.itertuples(index=False):
-            _k = _6b_n(getattr(_r6, _6b_gk))
-            if _k in ("", "nan", "None"):
-                continue
-            _6b_g_isim.setdefault(_k, set()).add(_6b_n(getattr(_r6, "teamleader_name")))
-            _6b_g_wmg.setdefault(_k, set()).add(_6b_n(getattr(_r6, "working_main_group")))
+# anahtar → gösterim / lider kodu: print'ler ve Excel bu haritaları kullanır
+takim_ad_map = dict(zip(df_tam["takim"], df_tam["takim_ad"]))
+takim_kod_map = dict(zip(df_tam["takim"],
+                         _t6_parca if _t6_kod
+                         else pd.Series("", index=df_tam.index)))
 
-    # ── [2] KOD → İSİM (aynı kod, birden çok isim yazımı) ─────────────
-    _6b_cok = {_k: _v for _k, _v in _6b_a_isim.items() if len(_v) > 1}
-    print(f"\n[2] KOD → İSİM  (df_agents içinde)")
-    print(f"    {len(_6b_a_isim)} kod  |  birden çok isimle görünen kod: {len(_6b_cok)}")
-    for _k, _v in list(_6b_cok.items())[:10]:
-        print(f"      ⚠ {_k}: {sorted(_v)}")
-    if not _6b_cok:
-        print(f"    ✓ her kod tek isim → tablo içinde tutarlı")
 
-    # ── [3] İSİM → KOD (adaş lider: aynı isim iki kod) ────────────────
-    _6b_i2k = {}
-    for _k, _v in _6b_a_isim.items():
-        for _i in _v:
-            _6b_i2k.setdefault(_i, set()).add(_k)
-    _6b_adas = {_i: _v for _i, _v in _6b_i2k.items() if len(_v) > 1}
-    print(f"\n[3] İSİM → KOD  (adaş lider var mı)")
-    print(f"    birden çok koda bağlı isim: {len(_6b_adas)}")
-    for _i, _v in list(_6b_adas.items())[:10]:
-        print(f"      ⚠ '{_i}' → {sorted(_v)}   (isim anahtarı bu iki takımı BİRLEŞTİRİR)")
-    if not _6b_adas:
-        print(f"    ✓ adaş yok → isim anahtarı bu ay yanlış birleştirme yapmıyor")
+def takim_gor(T, kisa=None):
+    """anahtar → okunur ad; kisa verilirse o uzunluğa kırpar (tablo hizası)."""
+    _s = takim_ad_map.get(T, T)
+    return _s if kisa is None else _s[:kisa]
 
-    # ── [4] ÇAPRAZ İSİM: aynı kod, iki tabloda farklı isim ────────────
-    print(f"\n[4] ÇAPRAZ İSİM  (df_agents ↔ df_gecmis, aynı kod)")
-    if not _6b_gk:
-        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
-    else:
-        _6b_ortak = sorted(set(_6b_a_isim) & set(_6b_g_isim))
-        _6b_fark = [(_k, sorted(_6b_a_isim[_k]), sorted(_6b_g_isim[_k]))
-                    for _k in _6b_ortak
-                    if {_i.lower() for _i in _6b_a_isim[_k]}
-                    != {_i.lower() for _i in _6b_g_isim[_k]}]
-        print(f"    iki tabloda da olan kod: {len(_6b_ortak)}  |  "
-              f"İSMİ FARKLI yazılmış: {len(_6b_fark)}")
-        for _k, _ai, _gi in _6b_fark[:15]:
-            print(f"      • {_k}: agents={_ai}  gecmis={_gi}")
-        if _6b_fark:
-            print(f"    → KOD anahtarının kazancı tam olarak bu {len(_6b_fark)} takım: "
-                  f"isimle eşleşmiyorlardı, kodla eşleşecekler.")
-        else:
-            print(f"    ✓ isimler birebir aynı → kod anahtarı eşleşmeyi ARTIRMAZ "
-                  f"(ama isim ileride değişirse korur)")
-        _6b_yalniz_a = sorted(set(_6b_a_isim) - set(_6b_g_isim))
-        _6b_yalniz_g = sorted(set(_6b_g_isim) - set(_6b_a_isim))
-        print(f"    sadece df_agents'te olan kod: {len(_6b_yalniz_a)}"
-              f"{'  → ' + str(_6b_yalniz_a[:8]) if _6b_yalniz_a else ''}")
-        print(f"      (bu takımların geçmişi YOK → H19B'de nötr kalır)")
-        print(f"    sadece df_gecmis'te olan kod: {len(_6b_yalniz_g)}"
-              f"  (ayrılmış lider / başka kuyruk — sorun değil)")
 
-    # ── [5] ÇAPRAZ WMG: anahtarın öbür yarısı ─────────────────────────
-    print(f"\n[5] ÇAPRAZ working_main_group  (anahtarın öbür yarısı)")
-    if not _6b_gk:
-        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
-    else:
-        _6b_wf = [(_k, sorted(_6b_a_wmg.get(_k, [])), sorted(_6b_g_wmg.get(_k, [])))
-                  for _k in sorted(set(_6b_a_wmg) & set(_6b_g_wmg))
-                  if {_w.lower() for _w in _6b_a_wmg[_k]}
-                  != {_w.lower() for _w in _6b_g_wmg[_k]}]
-        print(f"    wmg yazımı FARKLI olan kod: {len(_6b_wf)}")
-        for _k, _aw, _gw in _6b_wf[:10]:
-            print(f"      ⚠ {_k}: agents={_aw}  gecmis={_gw}")
-        if _6b_wf:
-            print(f"    → anahtar 'wmg | kod' olduğu için bu takımlar KODLA DA "
-                  f"eşleşmez. Önce wmg yazımını düzelt ya da anahtardan wmg'yi çıkar.")
-        else:
-            print(f"    ✓ wmg iki tarafta aynı yazılmış")
-        _6b_cok_wmg = {_k: _v for _k, _v in _6b_a_wmg.items() if len(_v) > 1}
-        print(f"    bir liderin BİRDEN ÇOK wmg'si (takım bölünüyor): "
-              f"{len(_6b_cok_wmg)}"
-              + (f"  → {list(_6b_cok_wmg.items())[:5]}" if _6b_cok_wmg else ""))
+def takim_lider(T):
+    """anahtar → yalnız takım lideri adı (print'lerde kısa gösterim)."""
+    return takim_ad_map.get(T, T).split(" | ")[-1]
 
-    # ── [6] ANAHTAR KIYASI — karar sayısı ─────────────────────────────
-    print(f"\n[6] ANAHTAR KIYASI  (df_agents takımları df_gecmis'te eşleşiyor mu)")
-    if not _6b_gk:
-        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
-    else:
-        _6b_a_isim_key, _6b_a_kod_key = {}, {}      # anahtar → kişi sayısı
-        for _r6 in df_tam.itertuples(index=False):
-            _w = _6b_n(getattr(_r6, "working_main_group"))
-            _i = _6b_n(getattr(_r6, "teamleader_name"))
-            _k = _6b_n(getattr(_r6, _6b_ak))
-            _6b_a_isim_key[f"{_w} | {_i}"] = _6b_a_isim_key.get(f"{_w} | {_i}", 0) + 1
-            _6b_a_kod_key[f"{_w} | {_k}"] = _6b_a_kod_key.get(f"{_w} | {_k}", 0) + 1
-        _6b_g_isim_key = {f"{_6b_n(getattr(_r6, 'working_main_group'))} | "
-                          f"{_6b_n(getattr(_r6, 'teamleader_name'))}"
-                          for _r6 in df_gecmis.itertuples(index=False)}
-        _6b_g_kod_key = {f"{_6b_n(getattr(_r6, 'working_main_group'))} | "
-                         f"{_6b_n(getattr(_r6, _6b_gk))}"
-                         for _r6 in df_gecmis.itertuples(index=False)}
-        print(f"    {'anahtar':<22} {'takım':>6} {'eşleşen':>8} {'eşleşen kişi':>13}")
-        for _ad6, _ak6, _gk6 in (("wmg | isim (bugün)", _6b_a_isim_key, _6b_g_isim_key),
-                                 ("wmg | kod  (yeni)", _6b_a_kod_key, _6b_g_kod_key)):
-            _es = [_k for _k in _ak6 if _k in _gk6]
-            print(f"    {_ad6:<22} {len(_ak6):>6} {len(_es):>8} "
-                  f"{sum(_ak6[_k] for _k in _es):>13}")
-        _6b_kazanc = (len([_k for _k in _6b_a_kod_key if _k in _6b_g_kod_key])
-                      - len([_k for _k in _6b_a_isim_key if _k in _6b_g_isim_key]))
-        if _6b_kazanc > 0:
-            print(f"    → KOD anahtarı {_6b_kazanc} takım DAHA eşleştiriyor → geçiş faydalı")
-        elif _6b_kazanc == 0:
-            print(f"    → İki anahtar AYNI sayıda eşleştiriyor; geçiş bugünü değiştirmez, "
-                  f"ileride isim değişirse korur")
-        else:
-            print(f"    ⚠ KOD anahtarı {-_6b_kazanc} takım DAHA AZ eşleştiriyor → "
-                  f"df_gecmis'teki kodlar eksik/hatalı, geçiş YAPILMAMALI")
-print("=" * _6b_W)
+
+print(f"takım anahtarı: "
+      + (f"KOD ({_t6_kod})" if _t6_kod else "İSİM (teamleader_name)")
+      + "  |  gösterim adı: working_main_group | teamleader_name")
+print(f"takım sayısı: {df_tam['takim'].nunique()}  "
+      f"(gösterim adı sayısı: {df_tam['takim_ad'].nunique()})")
+if df_tam["takim"].nunique() != df_tam["takim_ad"].nunique():
+    # Ayrıştıysa: aynı isim iki koda (ADAŞ lider) ya da iki isim aynı koda bağlı.
+    # İsim anahtarı adaşları BİRLEŞTİRİRDİ; kod anahtarı ayırıyor (doğrusu bu).
+    print(f"  ⚠ anahtar ile gösterim adı sayısı FARKLI → adaş lider ya da tek "
+          f"kodda iki isim var. Excel'de aynı ada iki satır görünür, "
+          f"takim_kod kolonu ayırır.")
+print("takım → kişi sayısı (gösterim adıyla):")
+print(df_tam.groupby("takim_ad")["agent_user_code"].size()
+      .sort_values(ascending=False))
 
 
 # %% [HÜCRE 7] — İZİN GÜNLERİNİ BİRLEŞTİR ───────────────────────────────
@@ -1474,11 +1393,12 @@ for _, _8d_row in df_tam.iterrows():
 _8d_arife_kis = _8d_hs_yasak | _8d_mesai_yok         # H16B arife_kisitli ile aynı
 
 # agent → isim / takım: liste çıktısı kodla değil İSİMLE okunabilsin.
-# df_tam H6'da 'takim' kolonunu kuruyor → burada hazır.
+# df_tam H6'da 'takim' (EŞLEŞME anahtarı) ve 'takim_ad' (GÖSTERİM) kolonlarını
+# kuruyor → burada GÖSTERİM kullanılıyor (bu tablo salt okunur).
 _8d_ad = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
                   df_tam["agent_name"].astype(str).str.strip()))
 _8d_tk = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
-                  df_tam["takim"].astype(str).str.strip()))
+                  df_tam["takim_ad"].astype(str).str.strip()))
 
 _8d_top = len(AGENTS)
 _8d = []
@@ -1968,7 +1888,7 @@ if df_kidem is not None and MIN_KIDEM_AY:
     # takım kırılımı: hangi takımda kaç junior var → gece o takıma verilirse
     # kaç kişi ayrılmak zorunda kalır (W_TAKIM cezası buradan gelir)
     _a_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
-                        df_tam["takim"]))
+                        df_tam["takim_ad"]))     # print okunur olsun (gösterim)
     _tk_junior = {}
     for a in junior_agents:
         _T = _a_takim.get(a)
@@ -2634,7 +2554,7 @@ if df_gecmis is not None and W_GECMIS:
                   f"sabit → pay/paydada sadeleşiyor)")
         else:
             print(f"    takım oranlarında ham günden EN BÜYÜK sapma: {100 * _fark:.2f} "
-                  f"puan ({_fark_T[1]}, {_fark_T[0].split(' | ')[-1]})")
+                  f"puan ({_fark_T[1]}, {takim_lider(_fark_T[0])})")
         # ASIL ETKİ: kıyas ORTALAMASI. Ham günde büyük takım ortalamayı domine
         # eder (gün-ağırlıklı); normalize sütunda her takım EŞİT ağırlıkta olur.
         # Ceza = W × (oran − ortalama) olduğu için katsayılar buradan değişir.
@@ -2651,7 +2571,7 @@ if df_gecmis is not None and W_GECMIS:
               f"{_n_gec[_k]} (takım,hafta,tip) terimi")
         if _cz:
             _ilk = sorted(_cz.items(), key=lambda kv: -kv[1])[:5]
-            print(f"       en cezalı 5: {[(T.split(' | ')[-1], v) for T, v in _ilk]}")
+            print(f"       en cezalı 5: {[(takim_lider(T), v) for T, v in _ilk]}")
 else:
     print("geç vardiya geçmiş adaleti: KAPALI "
           f"({'df_gecmis yok' if df_gecmis is None else 'W_GECMIS=0'})")
@@ -4349,9 +4269,14 @@ df_sonuc = pd.DataFrame(sonuc)                      # tidy: agent × tarih × va
 print(f"toplam atama: {len(df_sonuc)}")
 print(df_sonuc.head(20).to_string(index=False))
 
-# agent → takım eşlemesi (roster'da takımı göstermek için)
+# agent → takım. İKİ HARİTA, karıştırılmamalı:
+#   agent_takim    → takım EŞLEŞME anahtarı (kod bazlı). takimlar / takim_tip /
+#                    _secim sözlüklerine bu değerle girilir (H25B/H25D bunu kullanır).
+#   agent_takim_ad → GÖSTERİM adı "wmg | teamleader_name" → roster kolonu, Excel.
 agent_takim = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
                        df_tam["takim"]))
+agent_takim_ad = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(),
+                          df_tam["takim_ad"]))
 
 # roster matrisi: TÜM agentlar × gün; hücre = izin / saat / off
 # index = (takım, agent) → aynı takım üyeleri yan yana
@@ -4362,7 +4287,7 @@ for a in AGENTS:
     izinli = izin_map.get(a, set())
     off_tipli = off_tip_map.get(a, {})               # tarih → off_t / off_t2
     soft = off_soft_map.get(a, set())                # off_t (yumuşak) günleri
-    tk = agent_takim.get(a, "")
+    tk = agent_takim_ad.get(a, "")               # roster GÖSTERİM adıyla okunur
     for ds in PLAN_GUNLER:
         d = dt.date.fromisoformat(ds)
         if d in izinli:
@@ -4395,7 +4320,7 @@ print(f"off_t talebi: {len(offt_karsilandi)} karşılandı  |  "
       f"{len(offt_karsilanmadi)} KARŞILANMADI (Excel'de kırmızı)")
 
 roster = pd.DataFrame(hucreler).pivot(index="agent", columns="tarih", values="deger")
-roster.insert(0, "takim", roster.index.map(lambda a: agent_takim.get(a, "")))  # takım = kolon
+roster.insert(0, "takim", roster.index.map(lambda a: agent_takim_ad.get(a, "")))  # GÖSTERİM adı
 roster = roster.sort_values("takim")                                           # takıma göre grupla
 print(f"\nroster: {roster.shape[0]} agent × {roster.shape[1]-1} gün (izin/saat/off)")
 print(roster.head(15))
@@ -4644,11 +4569,14 @@ else:
 
 # %% [HÜCRE 24] — TAKIM BAZLI DAĞILIM (günlük takım → vardiya) ─────────
 # Bir takım o gün hangi vardiya(lar)da, kaç kişi. Bölünme buradan görünür.
-df_sonuc["takim"] = df_sonuc["agent"].map(agent_takim)
+df_sonuc["takim"] = df_sonuc["agent"].map(agent_takim)        # EŞLEŞME anahtarı
+df_sonuc["takim_ad"] = df_sonuc["agent"].map(agent_takim_ad)  # GÖSTERİM adı
 
-# takım × gün × saat → kaç kişi (sadece çalışanlar)
-df_takim = (df_sonuc.groupby(["takim", "tarih", "saat"]).size()
-            .reset_index(name="kisi"))
+# takım × gün × saat → kaç kişi (sadece çalışanlar).
+# Bu hücrenin çıktıları SALT OKUNUR → gösterim adıyla gruplanıyor; anahtar
+# (kod) kolonu df_sonuc'ta duruyor ve Sheet4/Sheet5 + H19B onu kullanıyor.
+df_takim = (df_sonuc.groupby(["takim_ad", "tarih", "saat"]).size()
+            .reset_index(name="kisi").rename(columns={"takim_ad": "takim"}))
 
 # takım roster: satır=takım, sütun=gün, hücre = "saat×kişi" (bölünmüşse '|' ile ayrık)
 df_takim["hucre"] = df_takim["saat"] + "×" + df_takim["kisi"].astype(str)
@@ -4726,7 +4654,7 @@ print(f"\n[2] GEÇ TİP ADALETİ  (geç = başlangıç ≥ {GEC_BASLANGIC}, gece
 print(f"    {'takım':<34} {'üye':>4} {'hamile/süt':>11} {'kıdemsiz':>9} "
       f"{'geç hafta':>10} {'ayrılan':>8}")
 for T in sorted(takimlar, key=lambda t: (_gec_hafta24[t], -_sut_hamile24[t])):
-    print(f"    {T[:34]:<34} {len(takimlar[T]):>4} {_sut_hamile24[T]:>11} "
+    print(f"    {takim_gor(T, 34):<34} {len(takimlar[T]):>4} {_sut_hamile24[T]:>11} "
           f"{_junior24[T]:>9} {_gec_hafta24[T]:>10} {_ayr24[T]:>8}")
 # korelasyon özeti: hamile/süt olan vs olmayan takımların ortalama geç haftası
 _ile = [_gec_hafta24[T] for T in takimlar if _sut_hamile24[T] > 0]
@@ -5391,7 +5319,7 @@ for _ds, _tip in _hedefler:
         _not = ("bedelsiz" if _ka >= 0 else
                 (f"sınırda: {-_ka} kişi off'tan çekilmeli" if _km >= 0 else
                  f"⚠ verici {-_km} açık (off'ta da yok)"))
-        print(f"    {_T[:28]:<28} {_b:>4} {_u:>6} {_s:>7} "
+        print(f"    {takim_gor(_T, 28):<28} {_b:>4} {_u:>6} {_s:>7} "
               f"{f'{_pa:+d}→{_ka:+d}':>17} {f'{_pm:+d}→{_km:+d}':>17} {_ke:>7}  {_not}")
     # TOPLAM: aynı vericiden birden çok takım alınırsa pay TÜKENİR → verici
     # bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
@@ -5447,9 +5375,14 @@ df_takim_detay["izinli"] = df_takim_detay.apply(
 sut_hamile_boyut = {T: sum(1 for a in uyeler if a in hafta_sonu_yasak)
                     for T, uyeler in takimlar.items()}
 df_takim_detay["sut_hamile"] = df_takim_detay["takim"].map(sut_hamile_boyut)
-df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep", "takim",
+# GÖSTERİM: gruplama ve takimlar/izin_map aramaları ANAHTARLA (kod) yapıldı;
+# okunur ad ayrı kolonda, anahtar da izlenebilirlik için duruyor.
+df_takim_detay["takim_ad"] = df_takim_detay["takim"].map(
+    lambda T: takim_ad_map.get(T, T))
+df_takim_detay = df_takim_detay[["tarih", "vardiya", "saat", "talep",
+                                 "takim_ad", "takim",
                                  "takim_kisi", "izinli", "sut_hamile", "atanan"]]
-df_takim_detay = df_takim_detay.sort_values(["tarih", "vardiya", "takim"])
+df_takim_detay = df_takim_detay.sort_values(["tarih", "vardiya", "takim_ad"])
 print(f"TABLO A (takım kırılımı): {len(df_takim_detay)} satır")
 print(df_takim_detay.head(20).to_string(index=False))
 
@@ -5727,8 +5660,10 @@ _bu_ay_tv = {(_T, _v): int(_n) for (_T, _v), _n
 _vardiya_kol = sorted({_v for _, _v in _bu_ay_tv})
 
 _tv_satir = []
-for _T in sorted(takimlar):
-    _r = {"takim": _T, "uye": len(takimlar[_T])}
+for _T in sorted(takimlar, key=lambda T: takim_ad_map.get(T, T)):
+    _r = {"takim": takim_ad_map.get(_T, _T),          # okunur ad (GÖSTERİM)
+          "takim_kod": takim_kod_map.get(_T, ""),     # eşleşme bu kodla yapıldı
+          "uye": len(takimlar[_T])}
     _top = 0
     for _v in _vardiya_kol:
         _b = _bu_ay_tv.get((_T, _v), 0)
@@ -5740,7 +5675,8 @@ for _T in sorted(takimlar):
     _tv_satir.append(_r)
 df_takim_vardiya = pd.DataFrame(_tv_satir)
 if len(df_takim_vardiya):                          # en alta TOPLAM satırı
-    _tr = {"takim": "— TOPLAM —", "uye": int(df_takim_vardiya["uye"].sum())}
+    _tr = {"takim": "— TOPLAM —", "takim_kod": "",
+           "uye": int(df_takim_vardiya["uye"].sum())}
     for _v in _vardiya_kol:
         _s = sum(_n for (_T2, _v2), _n in _bu_ay_tv.items() if _v2 == _v)
         _tr[_v] = "" if _s == 0 else int(_s)
@@ -5809,8 +5745,10 @@ else:
 _b_or = _kutu_oran(_tv_hi, vardiya_kol="saat")     # bu ay — kişi-gün payı
 
 _ad_satir = []
-for _T in sorted(takimlar):
-    _r = {"takim": _T, "uye": len(takimlar[_T]), "olcu": _olcu_ad}
+for _T in sorted(takimlar, key=lambda T: takim_ad_map.get(T, T)):
+    _r = {"takim": takim_ad_map.get(_T, _T),          # okunur ad (GÖSTERİM)
+          "takim_kod": takim_kod_map.get(_T, ""),     # eşleşme bu kodla yapıldı
+          "uye": len(takimlar[_T]), "olcu": _olcu_ad}
     _var = _g_or is not None and _T in _g_or.index and _g_or.at[_T, "top"] > 0
     _r["gecmis_olcu_top"] = round(float(_g_or.at[_T, "top"]), 1) if _var else 0
     for _k in ("aksam", "gece"):
@@ -5911,6 +5849,12 @@ LEJANT = [
      "fazla_fark + eksik_fark → o günün GERÇEK uyumsuzluk büyüklüğü. Tip tahsisi "
      "(H19/H19D) sorunları bu kolonda görünür; net_fark'ta saklanır"),
     ("--- takim_vardiya SAYFASI ---", None, None, ""),
+    ("takim / takim_kod",  None, None,
+     "takim = OKUNUR ad (working_main_group | teamleader_name) · takim_kod = takım "
+     "lideri KODU (teamlead_user_code). Eşleşme — df_gecmis geçmiş adaleti, H19B — "
+     "KODLA yapılır, gösterim isimle: lider ismi/soyadı değişse bile geçmiş verisi "
+     "kopmaz. Aynı ada iki satır görünüyorsa adaş lider var, takim_kod ayırır. "
+     "Eski davranış: TAKIM_ANAHTAR='isim' (H0)"),
     ("84",                None, None,
      "Hücre = BU AY o vardiyada geçen KİŞİ-GÜN (12 kişi × 7 gün = 84). Tek pencere, "
      "tek birim → roster'dan doğrulanabilir. Boş → bu ay hiç yapılmadı. "
@@ -5939,8 +5883,9 @@ LEJANT = [
      "Bu ayın çizelgesi AYNI oran biçiminde (kişi-gün payı) — geçmiş oranıyla "
      "kıyaslanabilir: bu ay oranı geçmişi yukarı mı çekiyor"),
     ("durum",             None, None,
-     "✓ geçmiş verisi eşleşti · ⚠ takım anahtarı (working_main_group | teamleader_name) "
-     "df_gecmis'te bulunamadı → o takım modelde NÖTR kalır"),
+     "✓ geçmiş verisi eşleşti · ⚠ takım ANAHTARI (working_main_group | "
+     "teamlead_user_code, TAKIM_ANAHTAR='kod') df_gecmis'te bulunamadı → o takım "
+     "H19B'de NÖTR (cezasız) kalır. Kodun İKİ tabloda da yazılı olduğunu kontrol et"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -6089,7 +6034,8 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     # takim_vardiya: tek pencere (bu ay kişi-gün) → boyama gerekmiyor, sadece düzen
     _wtv = _xl.sheets["takim_vardiya"]
     _wtv.column_dimensions["A"].width = 38         # takım adı sığsın
-    _wtv.freeze_panes = "C2"                       # takım + üye sabit kalsın
+    _wtv.column_dimensions["B"].width = 12         # takim_kod
+    _wtv.freeze_panes = "D2"                       # takım + kod + üye sabit kalsın
 
     # takim_gecmis_adalet: cezası olan hücreler KIRMIZI (modele giren sayı)
     _wad = _xl.sheets["takim_gecmis_adalet"]
@@ -6104,7 +6050,8 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
             if isinstance(_cv.value, (int, float)) and _cv.value and _cv.value > 0:
                 _cv.fill = _KIRMIZI
     _wad.column_dimensions["A"].width = 38
-    _wad.freeze_panes = "C2"
+    _wad.column_dimensions["B"].width = 12         # takim_kod
+    _wad.freeze_panes = "D2"
 
     # LEJANT: gösterim hücresini kendi rengiyle boya (örnek kutucuk gibi)
     _wl = _xl.sheets["LEJANT"]
@@ -6675,4 +6622,3 @@ if _cift32:
     print(f"    → bu desendekiler için çare off cezası DEĞİL, hafta sonu günlerini")
     print(f"      farklı hafta sonlarına dağıtmak (yeni bir kural gerektirir).")
 print("=" * 78)
-
