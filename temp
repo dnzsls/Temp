@@ -654,6 +654,201 @@ print("takım → kişi sayısı:")
 print(df_tam["takim"].value_counts())
 
 
+# %% [HÜCRE 6B] — GEÇİCİ KONTROL: teamlead_user_code ↔ teamleader_name ──
+# GEÇİCİ TEŞHİS HÜCRESİ — hiçbir kısıt kurmaz, hiçbir değişkeni değiştirmez.
+# NE ZAMAN SİLİNİR: takım anahtarı KODA geçtikten ve bu hücre "sorun yok"
+# dedikten sonra.
+#
+# NEDEN: takım anahtarı bugün `working_main_group | teamleader_name`. İsim
+# değişebilen bir alan (soyadı değişikliği, yazım/harf farkı) → df_agents ile
+# df_gecmis arasındaki eşleşme sessizce kopuyor ve o takım H19B'de CEZASIZ
+# (nötr) kalıyor. Kod değişmez, o yüzden anahtarı `teamlead_user_code` yapmak
+# istiyoruz. Bu hücre geçmeden ÖNCE ölçüyor: kod ile isim birbirini tutuyor mu,
+# yeni anahtar eşleşmeyi gerçekten artırıyor mu.
+#
+# ALTI KONTROL (üstteki sorunu açıklıyorsa alttakine bakmaya gerek yok):
+#   [1] KOLON/BOŞLUK  — kod kolonu var mı, boş satır var mı
+#   [2] KOD → İSİM    — aynı koda birden çok isim yazılmış mı (yazım farkı)
+#   [3] İSİM → KOD    — aynı isim iki ayrı koda mı bağlı (adaş lider)
+#   [4] ÇAPRAZ İSİM   — aynı kod df_agents ve df_gecmis'te farklı mı yazılmış
+#                       (kod anahtarının kazancı TAM OLARAK burası)
+#   [5] ÇAPRAZ WMG    — working_main_group yazımı iki tarafta aynı mı
+#                       (anahtarın öbür yarısı; burada fark varsa kod da kurtarmaz)
+#   [6] ANAHTAR KIYASI— eski (wmg|isim) vs yeni (wmg|kod): df_agents takımlarının
+#                       kaçı df_gecmis'te eşleşiyor → KARAR SAYISI
+_6b_ADAY_KOL = ("teamlead_user_code", "teamleader_user_code",
+                "team_lead_user_code", "teamlead_code")
+
+
+def _6b_kod_kol(_df):
+    """Tabloda takım lideri KODU hangi kolonda? (yazım farkları tolere edilir)"""
+    for _c in _6b_ADAY_KOL:
+        if _c in _df.columns:
+            return _c
+    return None
+
+
+def _6b_n(_s):
+    """görünmez fark temizliği: baş/son boşluk + çoklu boşluk tek boşluğa."""
+    return " ".join(str(_s).split())
+
+
+_6b_W = 100
+print("=" * _6b_W)
+print("H6B — GEÇİCİ KONTROL: teamlead_user_code ↔ teamleader_name "
+      "(anahtarı koda çevirmeden önce)")
+print("=" * _6b_W)
+
+_6b_ak = _6b_kod_kol(df_tam)
+_6b_gk = _6b_kod_kol(df_gecmis) if df_gecmis is not None else None
+
+# ── [1] KOLON / BOŞLUK ────────────────────────────────────────────────
+print(f"\n[1] KOLON VE BOŞLUK")
+print(f"    df_agents kod kolonu : {_6b_ak or '⚠ YOK'}")
+print(f"    df_gecmis kod kolonu : "
+      f"{_6b_gk or ('⚠ YOK' if df_gecmis is not None else '— df_gecmis yok')}")
+_6b_devam = bool(_6b_ak)
+if not _6b_ak:
+    print(f"    ⚠ df_agents'te kod kolonu yok → SQL'e ekle. Aranan adlar: "
+          f"{_6b_ADAY_KOL}")
+else:
+    _6b_bos_a = int(df_tam[_6b_ak].map(lambda v: _6b_n(v) in ("", "nan", "None")).sum())
+    print(f"    df_agents: {len(df_tam)} satır, boş/okunamayan kod {_6b_bos_a}")
+    if _6b_bos_a:
+        print(f"      ⚠ boş kodlu agentlar (ilk 10): "
+              f"{df_tam.loc[df_tam[_6b_ak].map(lambda v: _6b_n(v) in ('', 'nan', 'None')), 'agent_user_code'].head(10).tolist()}")
+        print(f"      → bu agentlar KOD anahtarında takımsız kalır; önce veriyi düzelt.")
+if _6b_gk:
+    _6b_bos_g = int(df_gecmis[_6b_gk].map(lambda v: _6b_n(v) in ("", "nan", "None")).sum())
+    print(f"    df_gecmis: {len(df_gecmis)} satır, boş/okunamayan kod {_6b_bos_g}")
+
+if _6b_devam:
+    # kod → isim / wmg haritaları (her iki tablo için, tekilleştirilmiş)
+    _6b_a_isim, _6b_a_wmg = {}, {}
+    for _r6 in df_tam.itertuples(index=False):
+        _k = _6b_n(getattr(_r6, _6b_ak))
+        if _k in ("", "nan", "None"):
+            continue
+        _6b_a_isim.setdefault(_k, set()).add(_6b_n(getattr(_r6, "teamleader_name")))
+        _6b_a_wmg.setdefault(_k, set()).add(_6b_n(getattr(_r6, "working_main_group")))
+    _6b_g_isim, _6b_g_wmg = {}, {}
+    if _6b_gk:
+        for _r6 in df_gecmis.itertuples(index=False):
+            _k = _6b_n(getattr(_r6, _6b_gk))
+            if _k in ("", "nan", "None"):
+                continue
+            _6b_g_isim.setdefault(_k, set()).add(_6b_n(getattr(_r6, "teamleader_name")))
+            _6b_g_wmg.setdefault(_k, set()).add(_6b_n(getattr(_r6, "working_main_group")))
+
+    # ── [2] KOD → İSİM (aynı kod, birden çok isim yazımı) ─────────────
+    _6b_cok = {_k: _v for _k, _v in _6b_a_isim.items() if len(_v) > 1}
+    print(f"\n[2] KOD → İSİM  (df_agents içinde)")
+    print(f"    {len(_6b_a_isim)} kod  |  birden çok isimle görünen kod: {len(_6b_cok)}")
+    for _k, _v in list(_6b_cok.items())[:10]:
+        print(f"      ⚠ {_k}: {sorted(_v)}")
+    if not _6b_cok:
+        print(f"    ✓ her kod tek isim → tablo içinde tutarlı")
+
+    # ── [3] İSİM → KOD (adaş lider: aynı isim iki kod) ────────────────
+    _6b_i2k = {}
+    for _k, _v in _6b_a_isim.items():
+        for _i in _v:
+            _6b_i2k.setdefault(_i, set()).add(_k)
+    _6b_adas = {_i: _v for _i, _v in _6b_i2k.items() if len(_v) > 1}
+    print(f"\n[3] İSİM → KOD  (adaş lider var mı)")
+    print(f"    birden çok koda bağlı isim: {len(_6b_adas)}")
+    for _i, _v in list(_6b_adas.items())[:10]:
+        print(f"      ⚠ '{_i}' → {sorted(_v)}   (isim anahtarı bu iki takımı BİRLEŞTİRİR)")
+    if not _6b_adas:
+        print(f"    ✓ adaş yok → isim anahtarı bu ay yanlış birleştirme yapmıyor")
+
+    # ── [4] ÇAPRAZ İSİM: aynı kod, iki tabloda farklı isim ────────────
+    print(f"\n[4] ÇAPRAZ İSİM  (df_agents ↔ df_gecmis, aynı kod)")
+    if not _6b_gk:
+        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
+    else:
+        _6b_ortak = sorted(set(_6b_a_isim) & set(_6b_g_isim))
+        _6b_fark = [(_k, sorted(_6b_a_isim[_k]), sorted(_6b_g_isim[_k]))
+                    for _k in _6b_ortak
+                    if {_i.lower() for _i in _6b_a_isim[_k]}
+                    != {_i.lower() for _i in _6b_g_isim[_k]}]
+        print(f"    iki tabloda da olan kod: {len(_6b_ortak)}  |  "
+              f"İSMİ FARKLI yazılmış: {len(_6b_fark)}")
+        for _k, _ai, _gi in _6b_fark[:15]:
+            print(f"      • {_k}: agents={_ai}  gecmis={_gi}")
+        if _6b_fark:
+            print(f"    → KOD anahtarının kazancı tam olarak bu {len(_6b_fark)} takım: "
+                  f"isimle eşleşmiyorlardı, kodla eşleşecekler.")
+        else:
+            print(f"    ✓ isimler birebir aynı → kod anahtarı eşleşmeyi ARTIRMAZ "
+                  f"(ama isim ileride değişirse korur)")
+        _6b_yalniz_a = sorted(set(_6b_a_isim) - set(_6b_g_isim))
+        _6b_yalniz_g = sorted(set(_6b_g_isim) - set(_6b_a_isim))
+        print(f"    sadece df_agents'te olan kod: {len(_6b_yalniz_a)}"
+              f"{'  → ' + str(_6b_yalniz_a[:8]) if _6b_yalniz_a else ''}")
+        print(f"      (bu takımların geçmişi YOK → H19B'de nötr kalır)")
+        print(f"    sadece df_gecmis'te olan kod: {len(_6b_yalniz_g)}"
+              f"  (ayrılmış lider / başka kuyruk — sorun değil)")
+
+    # ── [5] ÇAPRAZ WMG: anahtarın öbür yarısı ─────────────────────────
+    print(f"\n[5] ÇAPRAZ working_main_group  (anahtarın öbür yarısı)")
+    if not _6b_gk:
+        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
+    else:
+        _6b_wf = [(_k, sorted(_6b_a_wmg.get(_k, [])), sorted(_6b_g_wmg.get(_k, [])))
+                  for _k in sorted(set(_6b_a_wmg) & set(_6b_g_wmg))
+                  if {_w.lower() for _w in _6b_a_wmg[_k]}
+                  != {_w.lower() for _w in _6b_g_wmg[_k]}]
+        print(f"    wmg yazımı FARKLI olan kod: {len(_6b_wf)}")
+        for _k, _aw, _gw in _6b_wf[:10]:
+            print(f"      ⚠ {_k}: agents={_aw}  gecmis={_gw}")
+        if _6b_wf:
+            print(f"    → anahtar 'wmg | kod' olduğu için bu takımlar KODLA DA "
+                  f"eşleşmez. Önce wmg yazımını düzelt ya da anahtardan wmg'yi çıkar.")
+        else:
+            print(f"    ✓ wmg iki tarafta aynı yazılmış")
+        _6b_cok_wmg = {_k: _v for _k, _v in _6b_a_wmg.items() if len(_v) > 1}
+        print(f"    bir liderin BİRDEN ÇOK wmg'si (takım bölünüyor): "
+              f"{len(_6b_cok_wmg)}"
+              + (f"  → {list(_6b_cok_wmg.items())[:5]}" if _6b_cok_wmg else ""))
+
+    # ── [6] ANAHTAR KIYASI — karar sayısı ─────────────────────────────
+    print(f"\n[6] ANAHTAR KIYASI  (df_agents takımları df_gecmis'te eşleşiyor mu)")
+    if not _6b_gk:
+        print(f"    — df_gecmis'te kod kolonu yok, kıyas yapılamadı")
+    else:
+        _6b_a_isim_key, _6b_a_kod_key = {}, {}      # anahtar → kişi sayısı
+        for _r6 in df_tam.itertuples(index=False):
+            _w = _6b_n(getattr(_r6, "working_main_group"))
+            _i = _6b_n(getattr(_r6, "teamleader_name"))
+            _k = _6b_n(getattr(_r6, _6b_ak))
+            _6b_a_isim_key[f"{_w} | {_i}"] = _6b_a_isim_key.get(f"{_w} | {_i}", 0) + 1
+            _6b_a_kod_key[f"{_w} | {_k}"] = _6b_a_kod_key.get(f"{_w} | {_k}", 0) + 1
+        _6b_g_isim_key = {f"{_6b_n(getattr(_r6, 'working_main_group'))} | "
+                          f"{_6b_n(getattr(_r6, 'teamleader_name'))}"
+                          for _r6 in df_gecmis.itertuples(index=False)}
+        _6b_g_kod_key = {f"{_6b_n(getattr(_r6, 'working_main_group'))} | "
+                         f"{_6b_n(getattr(_r6, _6b_gk))}"
+                         for _r6 in df_gecmis.itertuples(index=False)}
+        print(f"    {'anahtar':<22} {'takım':>6} {'eşleşen':>8} {'eşleşen kişi':>13}")
+        for _ad6, _ak6, _gk6 in (("wmg | isim (bugün)", _6b_a_isim_key, _6b_g_isim_key),
+                                 ("wmg | kod  (yeni)", _6b_a_kod_key, _6b_g_kod_key)):
+            _es = [_k for _k in _ak6 if _k in _gk6]
+            print(f"    {_ad6:<22} {len(_ak6):>6} {len(_es):>8} "
+                  f"{sum(_ak6[_k] for _k in _es):>13}")
+        _6b_kazanc = (len([_k for _k in _6b_a_kod_key if _k in _6b_g_kod_key])
+                      - len([_k for _k in _6b_a_isim_key if _k in _6b_g_isim_key]))
+        if _6b_kazanc > 0:
+            print(f"    → KOD anahtarı {_6b_kazanc} takım DAHA eşleştiriyor → geçiş faydalı")
+        elif _6b_kazanc == 0:
+            print(f"    → İki anahtar AYNI sayıda eşleştiriyor; geçiş bugünü değiştirmez, "
+                  f"ileride isim değişirse korur")
+        else:
+            print(f"    ⚠ KOD anahtarı {-_6b_kazanc} takım DAHA AZ eşleştiriyor → "
+                  f"df_gecmis'teki kodlar eksik/hatalı, geçiş YAPILMAMALI")
+print("=" * _6b_W)
+
+
 # %% [HÜCRE 7] — İZİN GÜNLERİNİ BİRLEŞTİR ───────────────────────────────
 # Her agent için tek izin kümesi: özel-off + tekrarlı(Pzt/Cuma) + tam-ay(idari/doğum)
 
