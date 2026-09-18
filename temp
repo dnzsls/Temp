@@ -6675,3 +6675,4 @@ if _cift32:
     print(f"    → bu desendekiler için çare off cezası DEĞİL, hafta sonu günlerini")
     print(f"      farklı hafta sonlarına dağıtmak (yeni bir kural gerektirir).")
 print("=" * 78)
+
