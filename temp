@@ -981,6 +981,11 @@ W_OFF_T_MIN    = 12        # en ÇOK izin isteyen (izni en son onaylanır)
 KIDEM_TABAN_AY = 6         # oran hesabında bölen en az bu kadar ay sayılır
 
 w_offt = {}                # agent → kişiye özel W_OFF_T (yoksa sabit W_OFF_T)
+# H29 Excel roster kolonlarına AÇILAN ölçüler (kural değil, GÖSTERİM):
+# "off_t'si verilemeyen kişi gerçekten çok mu istiyor?" sorusu tabloda cevaplansın.
+# GEÇMİŞTEN türeyen her şeye `gecmis_` öneki (kullanıcı kuralı, 2026-09-18).
+off_gecmis_talep = {}      # agent → GEÇMİŞ izin talebi (ham gün, df_off_gecmis)
+off_gecmis_oran  = {}      # agent → talep ÷ max(kıdem ay, KIDEM_TABAN_AY)
 if not (OFF_T_ONCELIK and df_off_gecmis is not None):
     print("off_t önceliği: KAPALI ("
           + ("OFF_T_ONCELIK=False" if not OFF_T_ONCELIK else "df_off_gecmis yok")
@@ -1016,6 +1021,7 @@ else:
         _hazir = _7b_sayi(_a7, "off_kidem_ratio")
         if pd.notna(_talep) and pd.notna(_kid):              # ASIL yol
             _oran[_a7] = _talep / max(_kid, KIDEM_TABAN_AY)
+            off_gecmis_talep[_a7] = float(_talep)            # Excel kolonu
             _7b_kaynak["talep÷kıdem (taban uygulanmış)"] += 1
             if pd.notna(_hazir) and abs(_hazir - _oran[_a7]) > 0.01:
                 _7b_sapma.append((_a7, _hazir, _oran[_a7]))
@@ -1024,6 +1030,7 @@ else:
             _7b_kaynak["hazır off_kidem_ratio (yedek)"] += 1
         elif pd.notna(_kid):                                 # TALEP KAYDI YOK, kıdem VAR
             _oran[_a7] = 0.0                                 #   → hiç istememiş = 0
+            off_gecmis_talep[_a7] = 0.0                      # Excel kolonu (0 istemiş)
             _7b_talep_yok.append(_a7)
             _7b_kaynak["talep kaydı YOK → 0 istedi (en yüksek öncelik)"] += 1
         else:                                                # ikisi de yok → veri yok
@@ -1045,6 +1052,7 @@ else:
                                     - (W_OFF_T_MAX - W_OFF_T_MIN) * _p))
     for _a7 in _7b_bilinmeyen:
         w_offt[_a7] = W_OFF_T_MIN
+    off_gecmis_oran.update(_oran)                            # H29 Excel kolonu
 
     # ── RAPOR ─────────────────────────────────────────────────────────
     _7b_W = 100
@@ -5488,6 +5496,293 @@ print("lokasyon × saat (ay boyu toplam):")
 display(ozet_saat)
 
 
+# %% [HÜCRE 28B] — KURAL DENETİMİ (SALT OKUNUR, çözümden BAĞIMSIZ) ─────
+# NE İŞE YARAR: modelin kurduğu SERT kuralları, ÇÖZÜM ÇIKTISINDAN (roster /
+# df_sonuc / df_cov) YENİDEN sayıp ihlal arar. Kısıt kurmaz, hiçbir değişkeni
+# değiştirmez. Sonuç Excel'e `kural_denetimi` sayfası olarak yazılır (H29).
+#
+# NEDEN GEREKLİ: çözücünün bulduğu çözüm, KURULAN kısıtları zaten sağlar —
+# asıl risk kısıtın YANLIŞ kurulmuş olması ya da raporun modelden BAŞKA bir ölçü
+# kullanması. Bu dosyada tam olarak bu üç kez yaşandı (mesai_gun'ün hafta/ay
+# ölçüsü, sınır haftası kredisi, tip kapasitesinde ham↔etkin takım boyu).
+# Bağımsız sayım ikisini de yakalar; çıktıyı elle taramaya gerek kalmaz.
+#
+# OKUMA: beklenen HER satırda 0. İhlal çıkarsa iki ihtimal var —
+#   (a) kural gerçekten çiğnenmiş → kısıt eksik/yanlış kurulmuş,
+#   (b) denetimin ölçüsü modelinkinden farklı → hangisi doğru, ona bakılır.
+# 'aciklama' kolonu kuralın KAPALI olduğu durumları da yazar (o zaman ihlal normal).
+_KD = []                                   # denetim satırları
+
+
+def _kd_ekle(kural, kapsam, ihlaller, aciklama=""):
+    """ihlaller: [(kim, detay), ...] — boş liste = kural sağlanmış."""
+    _KD.append({"kural": kural, "kapsam": kapsam, "ihlal": len(ihlaller),
+                "ornek": " | ".join(f"{_k}: {_d}" for _k, _d in ihlaller[:3]),
+                "aciklama": aciklama})
+
+
+def _kd_parse(a, c):
+    """roster hücresi → (bas, bit) ÇALIŞMA ise; off/izin/off_t/off_t2 → None."""
+    _v = roster.at[a, c] if c in roster.columns else None
+    if not isinstance(_v, str):
+        return None
+    return _vardiya_parse(_v.replace("mesai ", ""))
+
+
+_kd_agent = list(roster.index)
+_kd_gv = {}                                # agent → {tarih(date): (bas, bit)}
+for _a in _kd_agent:
+    _g = {}
+    for _c in _gun:
+        _p = _kd_parse(_a, _c)
+        if _p:
+            _g[dt.date.fromisoformat(_c)] = _p
+    _kd_gv[_a] = _g
+_kd_gunler = sorted(dt.date.fromisoformat(_c) for _c in _gun)
+
+# ── KİŞİ-GÜN KURALLARI ───────────────────────────────────────────────
+_i = [(a, f"{d}: {_kd_gv[a][d][0]} vardiyası "
+          f"({'izin' if d in izin_map.get(a, set()) else 'off_t2'} günü)")
+      for a in _kd_agent for d in _kd_gv[a]
+      if d in izin_map.get(a, set()) or d in off_block_map.get(a, set())]
+_kd_ekle("H9  izin/off_t2 gününde atama YOK", "agent×gün", _i,
+         "bloklu güne H9 değişken açmaz; ihlal çıkarsa roster ile model ayrışmış")
+
+_dup = df_sonuc.groupby(["agent", "tarih"]).size()
+_kd_ekle("H11 günde ≤1 vardiya", "agent×gün",
+         [(a, f"{ds}: {n} vardiya") for (a, ds), n in _dup[_dup > 1].items()])
+
+_i, _kd_pen = [], ([AY_ILK - dt.timedelta(days=_k) for _k in range(6, 0, -1)]
+                   + _kd_gunler)
+for a in _kd_agent:
+    _cal = set(_kd_gv[a]) | set(onceki_calisti.get(a, set()))
+    for _s in _kd_pen:
+        if _s + dt.timedelta(days=6) > _kd_gunler[-1]:
+            break
+        _n = sum(1 for _k in range(7) if _s + dt.timedelta(days=_k) in _cal)
+        if _n > 6:
+            _i.append((a, f"{_s}..{_s + dt.timedelta(days=6)}: {_n} gün"))
+            break                          # agent başına tek örnek yeter
+_kd_ekle("H12 7 ardışık günde ≤6 çalışma", "agent×pencere", _i,
+         "önceki ay taşıması (onceki_calisti) DAHİL")
+
+_i = []
+for a in _kd_agent:
+    _g = _kd_gv[a]
+    for d in sorted(_g):
+        _n = d + dt.timedelta(days=1)
+        if _n in _g and bas_dakika(_g[_n][0]) + 1440 - bitis_abs(*_g[d]) < DINLENME:
+            _i.append((a, f"{d} {_g[d][0]}-{_g[d][1]} → {_n} {_g[_n][0]}"))
+    _sv = onceki_son_vardiya.get(a)        # önceki ayın son günü → ayın 1'i
+    if _sv and AY_ILK in _g:
+        _b1, _e1 = _sv.split("-")
+        if bas_dakika(_g[AY_ILK][0]) + 1440 - bitis_abs(_b1, _e1) < DINLENME:
+            _i.append((a, f"önceki ay {_sv} → {AY_ILK} {_g[AY_ILK][0]}"))
+_kd_ekle("H15 11 saat dinlenme", "ardışık gün çifti", _i,
+         "önceki ayın son günü dahil")
+
+_i = [(a, f"{d}: {_p[0]}-{_p[1]}") for a in sorted(sabah_agents) if a in _kd_gv
+      for d, _p in _kd_gv[a].items()
+      if not (dakika(_p[0]) < dakika(_p[1]) and dakika(_p[1]) <= LIMIT)]
+_kd_ekle("H13 sabahçı: bitiş ≤20:00, geceye sarkmaz", "agent×gün", _i)
+
+_i = [(a, f"{d}: {_p[0]}") for a in sorted(junior_agents) if a in _kd_gv
+      for d, _p in _kd_gv[a].items() if _p[0] in GECE_TIPLERI]
+_kd_ekle(f"H14B kıdem <{MIN_KIDEM_AY} ay → GECE yasak", "agent×gün", _i)
+
+_i = [(a, f"{d}: {_p[0]}") for a in sorted(hafta_sonu_yasak) if a in _kd_gv
+      for d, _p in _kd_gv[a].items() if d.weekday() >= 5]
+_kd_ekle("H14 hamile/süt hafta sonu çalışmaz", "agent×gün", _i)
+
+_i = [(a, f"{d}: {_p[0]}") for a in sorted(mesai_yok) if a in _kd_gv
+      for d, _p in _kd_gv[a].items() if d in TATIL]
+_kd_ekle("H16 mesaiye kalamaz resmi tatilde çalışmaz", "agent×gün", _i)
+
+_i = []
+for a in _kd_agent:
+    for d in sorted(ARIFE):
+        _p = _kd_gv[a].get(d)
+        if not _p:
+            continue
+        _yarim = (_p[0], _p[1]) == ARIFE_YARIM_SAAT
+        if a in arife_kisitli and not _yarim:
+            _i.append((a, f"{d}: kısıtlı ama TAM vardiya {_p[0]}-{_p[1]}"))
+        elif a not in arife_kisitli and _yarim:
+            _i.append((a, f"{d}: normal agent YARIM vardiya almış"))
+        elif a in mesai_yok and d.weekday() >= 5:
+            _i.append((a, f"{d}: mesai, hafta sonu arifede çalışmış"))
+_kd_ekle("H16B arife atama kuralı", "agent×arife günü", _i,
+         "kısıtlı SADECE 09:00-13:00 · normal agent yarım vardiya ALAMAZ")
+
+# ── HAFTA KURALLARI ──────────────────────────────────────────────────
+def _kd_hafta_tip(a, gunler):
+    """agent'ın o haftaki HAFTA İÇİ vardiya tipleri (başlangıç kümesi)."""
+    return {_kd_gv[a][dt.date.fromisoformat(ds)][0] for ds in gunler
+            if dt.date.fromisoformat(ds).weekday() < 5
+            and dt.date.fromisoformat(ds) in _kd_gv.get(a, {})}
+
+
+_i = [(a, f"{wk[0]}-W{wk[1]}: {sorted(_t)}")
+      for a in _kd_agent for wk, gunler in haftalar.items()
+      if wk not in tatil_haftalari
+      for _t in [_kd_hafta_tip(a, gunler)] if len(_t) > 1]
+_kd_ekle("H20 agent hafta içi TEK tip", "agent×hafta", _i,
+         "resmi tatil haftası muaf")
+
+_i, _kd_takim_tip = [], {}                 # (takım,hafta) → üyelerin MOD tipi
+for T, uyeler in takimlar.items():
+    for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari or wk == KILIT_HAFTA:
+            continue                       # H19 o hafta zaten aranmıyor
+        _ut = {}
+        for a in uyeler:
+            _t = _kd_hafta_tip(a, gunler)
+            if len(_t) == 1:
+                _ut[a] = next(iter(_t))
+        if not _ut:
+            continue
+        _mod = _Counter22(_ut.values()).most_common(1)[0][0]
+        _kd_takim_tip[(T, wk)] = _mod
+        for a, _t in _ut.items():
+            # SAPMA yalnız FİZİKSEL imkânsızlıkta meşru (H19): takımın tipi o
+            # üyeye YASAK (tip_yasak) ya da o hafta o tipte hiç değişkeni yok.
+            if _t == _mod or (a, _mod) in tip_yasak or (a, wk, _mod) not in agent_tip:
+                continue
+            _i.append((a, f"{takim_gor(T, 20)} {wk[0]}-W{wk[1]}: "
+                          f"takım {_mod}, üye {_t}"))
+_kd_ekle("H19 takım hafta içi TEK tip (sapma yalnız fiziksel imkânsızlıkta)",
+         "üye×hafta", _i, "tatil + sınır haftası muaf; takım tipi = üyelerin MOD tipi")
+
+_i = [(a, f"{wk[0]}-W{wk[1]}: {_o} off")
+      for a in _kd_agent for wk, gunler in haftalar.items()
+      for _o in [sum(1 for ds in gunler if roster.at[a, ds] == "off"
+                     and dt.date.fromisoformat(ds) not in TATIL)]
+      if _o > MAX_HAFTA_OFF]
+_kd_ekle(f"H20B haftalık off ≤{MAX_HAFTA_OFF}", "agent×hafta", _i,
+         "off_t/off_t2/izin/tatil sayılmaz"
+         if HAFTA_OFF_SERT else "⚠ KURAL KAPALI (HAFTA_OFF_SERT=False) → ihlal normal")
+
+_kd_ak = dakika(AKSAM_BASLANGIC)
+_i = [(a, f"{_n} hafta akşam/gece") for a in _kd_agent
+      for _n in [sum(1 for wk, gunler in haftalar.items()
+                     if any(dt.date.fromisoformat(ds) in _kd_gv[a]
+                            and dakika(_kd_gv[a][dt.date.fromisoformat(ds)][0]) >= _kd_ak
+                            for ds in gunler))]
+      if _n > MAX_AKSAM_HAFTA]
+_kd_ekle(f"H16D akşam/gece ≤{MAX_AKSAM_HAFTA} HAFTA", "agent", _i,
+         f"akşam = başlangıç ≥{AKSAM_BASLANGIC} (gece dahil); ölçü HAFTA, gün değil")
+
+_i = []
+for a in sorted(mesai_yok):
+    if a not in _kd_gv:
+        continue
+    for wk, gunler in haftalar.items():
+        _wd = sum(1 for ds in gunler
+                  if dt.date.fromisoformat(ds).weekday() < 5
+                  and dt.date.fromisoformat(ds) not in TATIL
+                  and roster.at[a, ds] not in ("izin", "off_t2"))
+        _cal = sum(1 for ds in gunler if dt.date.fromisoformat(ds) in _kd_gv[a])
+        _tav = _wd
+        if wk == SINIR_HAFTA and a in onceki_gun:      # H16C ile AYNI taşıma
+            _tav = max(0, _wd + onceki_musait_hi.get(a, 0) - onceki_gun[a])
+        if _cal > _tav:
+            _i.append((a, f"{wk[0]}-W{wk[1]}: {_cal} gün > tavan {_tav}"))
+_kd_ekle("H16C mesaiye kalamaz haftalık tavan", "agent×hafta", _i,
+         "≤ müsait hafta içi gün → hafta sonu MESAİ olamaz")
+
+# ── AY KURALLARI ─────────────────────────────────────────────────────
+_i = [(a, f"çalışma {int(_cal_top[a])} ∉ [{kota_map[a]}, {ust_map[a]}]")
+      for a in _kd_agent if a in kota_map
+      and not (kota_map[a] <= int(_cal_top[a]) <= ust_map[a])]
+_kd_ekle("H17 kota ≤ çalışma ≤ ust", "agent", _i,
+         "kota/ust H17'nin kendi sözlüğünden okunuyor (yeniden hesaplanmıyor)")
+
+_i = [(a, f"mesai {int(roster_2.at[a, 'mesai_gun'])}") for a in _kd_agent
+      if int(roster_2.at[a, "mesai_gun"]) > MAX_MESAI]
+_kd_ekle(f"H17 mesai ≤ MAX_MESAI({MAX_MESAI})", "agent", _i,
+         "ölçü = roster_2.mesai_gun (resmi tatil hariç, sınır haftası alacağı düşülmüş)")
+
+_kd_mu = [a for a in _kd_agent if a in kota_map and a not in ozel_agents]
+_kd_M = sum(int(roster_2.at[a, "mesai_gun"]) for a in _kd_mu)
+_kd_tav = (_kd_M // len(_kd_mu) + MESAI_TOL) if _kd_mu else 0
+_i = ([(a, f"mesai {int(roster_2.at[a, 'mesai_gun'])} > tavan {_kd_tav}")
+       for a in _kd_mu if int(roster_2.at[a, "mesai_gun"]) > _kd_tav]
+      if MESAI_TOL < MAX_MESAI else [])
+_kd_ekle(f"H20E oransal mesai tavanı (ortalama+{MESAI_TOL})", "agent", _i,
+         f"fiili toplam {_kd_M} ÷ {len(_kd_mu)} = "
+         f"{_kd_M / max(1, len(_kd_mu)):.2f} → tavan {_kd_tav}"
+         + ("" if MESAI_TOL < MAX_MESAI else "  |  kısıt KURULMADI (TOL ≥ MAX_MESAI)"))
+
+_i = ([(a, "tam Cmt+Pzr off yok") for a in _kd_agent
+       if not any(all(roster.at[a, _c] in _OFF_LIKE for _c in (_cmt, _pzr))
+                  for _cmt, _pzr in hs_ciftleri)]
+      if CIFT_HS_OFF else [])
+_kd_ekle("H18 ayda ≥1 TAM hafta sonu off", "agent", _i,
+         "" if CIFT_HS_OFF else "KURAL KAPALI (CIFT_HS_OFF=False)")
+
+# ── COVERAGE SERT BANDLARI (kova bazlı) ──────────────────────────────
+_hs_i, _gc_i, _mk_i = [], [], []
+for _r in df_cov.itertuples():
+    _d = dt.date.fromisoformat(_r.tarih)
+    _det = f"{_r.saat} talep {_r.talep} atanan {_r.atanan}"
+    if _d.weekday() >= 5:
+        if abs(_r.fark) > HS_TOL:
+            _hs_i.append((_r.tarih, _det))
+    elif _r.saat.split("-")[0] in GECE_BASLANGIC and abs(_r.fark) > GECE_BUFFER:
+        _gc_i.append((_r.tarih, _det))
+    if _r.atanan < min(MIN_KOVA, _r.talep):
+        _mk_i.append((_r.tarih, _det))
+_kd_ekle(f"H10 hafta sonu bandı talep ±{HS_TOL}", "kova", _hs_i)
+_kd_ekle(f"H10 gece bandı talep ±{GECE_BUFFER}", "kova", _gc_i, "hafta içi gece")
+_kd_ekle(f"H10 MIN_KOVA ≥{MIN_KOVA}", "kova", _mk_i,
+         "talebi olan kova boş kalamaz")
+
+_i = []
+if TIP_MIN_TAKIM:
+    for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari or wk == KILIT_HAFTA:
+            continue
+        _hi = [ds for ds in gunler if dt.date.fromisoformat(ds).weekday() < 5]
+        for _t in hafta_tipler.get(wk, []):
+            _z = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                          if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                      for ds in _hi), default=0)
+            if _z < TIP_MIN_TAKIM_ESIK:
+                continue
+            if not any(_m == _t for (_T2, _w2), _m in _kd_takim_tip.items()
+                       if _w2 == wk):
+                _i.append((f"{wk[0]}-W{wk[1]}", f"{_t}: zirve {_z}, takım YOK"))
+_kd_ekle("H19D ④ talebi olan her tipe ≥1 takım", "hafta×tip", _i,
+         "H19D'de 'kural KURULMADI' diye raporlanan (hiç sığan takım yok) tipler "
+         "burada ihlal görünür — o durum bilinçli, H19D çıktısıyla karşılaştır"
+         if TIP_MIN_TAKIM else "KURAL KAPALI (TIP_MIN_TAKIM=False)")
+
+df_kural_denetimi = pd.DataFrame(_KD)
+_kd_bozuk = df_kural_denetimi[df_kural_denetimi["ihlal"] > 0]
+
+_kd_W = 100
+print("=" * _kd_W)
+print("H28B — KURAL DENETİMİ (sert kurallar, çözümden BAĞIMSIZ sayım)")
+print("=" * _kd_W)
+print(f"  {'kural':<58} {'kapsam':>18} {'ihlal':>7}")
+for _r in df_kural_denetimi.itertuples():
+    print(f"  {_r.kural[:58]:<58} {_r.kapsam:>18} {_r.ihlal:>7}"
+          + ("" if _r.ihlal == 0 else "  ⚠"))
+if len(_kd_bozuk):
+    print(f"\n  ⚠ {len(_kd_bozuk)} kuralda ihlal var — ilk örnekler:")
+    for _r in _kd_bozuk.itertuples():
+        print(f"     {_r.kural}")
+        print(f"        {_r.ornek}")
+        if _r.aciklama:
+            print(f"        NOT: {_r.aciklama}")
+    print(f"\n  → Önce 'aciklama'ya bak: kural KAPALI olabilir (o zaman normal).")
+    print(f"    Değilse ya kısıt eksik/yanlış kurulmuş ya da denetimin ölçüsü")
+    print(f"    modelinkinden farklı — ikisi de düzeltilmeli.")
+else:
+    print(f"\n  ✓ {len(df_kural_denetimi)} sert kuralın HEPSİ sağlanıyor (0 ihlal)")
+print("=" * _kd_W)
+
+
 # %% [HÜCRE 29] — EXCEL ÇIKTISI (roster + plan_vs_gerçekleşen) ──────────
 # Sheet1 "roster"           : roster_2 (agent × gün çizelge + flag + calisma/mesai/off özet)
 # Sheet2 "plan_vs_gerceklesen": her kova için PLANLANAN (Stage-1 talebi) vs
@@ -5835,6 +6130,18 @@ LEJANT = [
      "'sabahçı' → H13: sabah_calisir_flg=1, bitişi >20:00 olan vardiya yasak → gece de kapalı. "
      "'kıdem+sabahçı' → ikisi birden. "
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
+    ("off_t_talep",       None, None,
+     "BU AYIN toplam off_t talebi (verilen + verilemeyen). Geçmiş DEĞİL"),
+    ("gecmis_off_talep_gun", None, None,
+     "GEÇMİŞ aylarda talep edilen izin günü (df_off_gecmis, kümüle). BOŞ = tabloda "
+     "kaydı yok → 'hiç izin istememiş' sayıldı (en yüksek öncelik)"),
+    ("gecmis_off_oran",   None, None,
+     "gecmis_off_talep_gun ÷ max(kıdem ay, KIDEM_TABAN_AY) — H7B'nin sıraladığı ölçü. "
+     "Kıdem tabanı yeni başlayanın oranını şişirmesin diye var"),
+    ("gecmis_off_agirlik", None, None,
+     "H7B'nin verdiği KİŞİSEL W_OFF_T (bant 12-24). YÜKSEK = o günü çalıştırmak "
+     "pahalı = izni ÖNCE onaylanır. Hücresi KIRMIZI olan (off_t verilememiş) kişinin "
+     "buradaki değeri düşükse kural doğru çalışmış: geçmişte çok istemiş"),
     ("--- gun_ozet SAYFASI ---", None, None, ""),
     ("fazla_fark",        None, None,
      "O GÜN ihtiyaçtan FAZLA atanan kişi-gün = Σ max(0, kova farkı). Kişi sahada "
@@ -5886,6 +6193,15 @@ LEJANT = [
      "✓ geçmiş verisi eşleşti · ⚠ takım ANAHTARI (working_main_group | "
      "teamlead_user_code, TAKIM_ANAHTAR='kod') df_gecmis'te bulunamadı → o takım "
      "H19B'de NÖTR (cezasız) kalır. Kodun İKİ tabloda da yazılı olduğunu kontrol et"),
+    ("--- kural_denetimi SAYFASI ---", None, None, ""),
+    ("ihlal",             None, None,
+     "O SERT kuralın çözümde kaç kez çiğnendiği. Sayım ÇÖZÜMDEN BAĞIMSIZ: roster'dan "
+     "yeniden hesaplanıyor, modelin 'kurdum' demesine güvenilmiyor. BEKLENEN 0. "
+     "Sıfır değilse iki ihtimal var — (a) kısıt eksik/yanlış kurulmuş, (b) denetimin "
+     "ölçüsü modelinkinden farklı; önce 'aciklama' kolonunu oku"),
+    ("kapsam / ornek",    None, None,
+     "kapsam = kuralın birimi (agent×gün, agent×hafta, kova...). ornek = ilk 3 ihlal "
+     "kaydı; oradan roster'daki hücreye bakılır"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -5984,6 +6300,18 @@ for _a in _agents_sirali:
     if _a in sabah_agents:
         _gy.append("sabahçı")
     _r["gece_yasak"] = "+".join(_gy)                    # "" | kıdem | sabahçı | kıdem+sabahçı
+    # OFF TALEBİ — bu ay + GEÇMİŞ (H7B). Amaç: KIRMIZI hücreli (off_t'si
+    # karşılanmayan) kişinin gerçekten "çok isteyen" olup olmadığı aynı satırda
+    # görünsün. gecmis_off_agirlik DÜŞÜKSE kural doğru çalışmış demektir.
+    _r["off_t_talep"] = (int(roster_2.at[_a, "off_t_gun"])
+                         + int(roster_2.at[_a, "off_t_verilemeyen"]))
+    _gt29 = off_gecmis_talep.get(_a)
+    _go29 = off_gecmis_oran.get(_a)
+    _r["gecmis_off_talep_gun"] = (round(float(_gt29), 1)
+                                  if _gt29 is not None and pd.notna(_gt29) else None)
+    _r["gecmis_off_oran"] = (round(float(_go29), 2)
+                             if _go29 is not None and pd.notna(_go29) else None)
+    _r["gecmis_off_agirlik"] = w_offt.get(_a)           # boş = H7B kapalı (sabit W_OFF_T)
     for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
         _r[_k] = roster_2.at[_a, _k]
     for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
@@ -6007,6 +6335,7 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
     df_takim_vardiya.to_excel(_xl, sheet_name="takim_vardiya", index=False)
     df_takim_adalet.to_excel(_xl, sheet_name="takim_gecmis_adalet", index=False)
+    df_kural_denetimi.to_excel(_xl, sheet_name="kural_denetimi", index=False)
     pd.DataFrame([{"gösterim": g, "anlam": d} for g, _k, _c, d in LEJANT]) \
         .to_excel(_xl, sheet_name="LEJANT", index=False)
 
@@ -6053,6 +6382,22 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     _wad.column_dimensions["B"].width = 12         # takim_kod
     _wad.freeze_panes = "D2"
 
+    # kural_denetimi: ihlal > 0 olan satır KIRMIZI (0 beklenir → göze batsın)
+    _wkd = _xl.sheets["kural_denetimi"]
+    _kd_bas = [_c.value for _c in _wkd[1]]
+    if "ihlal" in _kd_bas:
+        _ci = _kd_bas.index("ihlal") + 1
+        for _r4 in range(2, _wkd.max_row + 1):
+            if (isinstance(_wkd.cell(row=_r4, column=_ci).value, (int, float))
+                    and _wkd.cell(row=_r4, column=_ci).value > 0):
+                for _c4 in range(1, _wkd.max_column + 1):
+                    _wkd.cell(row=_r4, column=_c4).fill = _KIRMIZI
+    _wkd.column_dimensions["A"].width = 54         # kural adı
+    _wkd.column_dimensions["B"].width = 16
+    _wkd.column_dimensions["D"].width = 70         # örnek
+    _wkd.column_dimensions["E"].width = 60         # açıklama
+    _wkd.freeze_panes = "A2"
+
     # LEJANT: gösterim hücresini kendi rengiyle boya (örnek kutucuk gibi)
     _wl = _xl.sheets["LEJANT"]
     for _i, (_g, _k, _c, _d) in enumerate(LEJANT, start=2):
@@ -6095,7 +6440,11 @@ print(f"  Sheet5 'takim_gecmis_adalet': {len(df_takim_adalet)} takım  |  ölç�
       f"{int(((df_takim_adalet['ceza_aksam'] > 0) | (df_takim_adalet['ceza_gece'] > 0)).sum())}"
       f"  |  akşam ort %{100 * _ort_ad['aksam']:.1f} · gece ort %{100 * _ort_ad['gece']:.1f}"
       + ("   ⚠ df_gecmis yok → geçmiş oranları boş" if df_gecmis is None else ""))
-print(f"  Sheet6 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
+print(f"  Sheet6 'kural_denetimi': {len(df_kural_denetimi)} SERT kural denetlendi  |  "
+      f"toplam ihlal {int(df_kural_denetimi['ihlal'].sum())} "
+      f"({int((df_kural_denetimi['ihlal'] > 0).sum())} kuralda)"
+      + ("  ✓" if int(df_kural_denetimi['ihlal'].sum()) == 0 else "  ⚠ SAYFAYA BAK"))
+print(f"  Sheet7 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırmızı): "
       f"{len(offt_karsilanmadi)}")
 
 
