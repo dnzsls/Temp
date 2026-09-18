@@ -620,6 +620,46 @@ if df_kidem is not None:
 else:
     print(f"df_kidem yok (kıdem/gece kuralı devre dışı kalacak — H14B)")
 
+# df_off_gecmis: agent bazlı GEÇMİŞ izin talebi — H7B off_t önceliği için.
+# Kolonlar: agent_user_code | izin_talep_gun_sayisi | off_kidem_ratio | kidem_ay
+#   izin_talep_gun_sayisi = agentın geçmişte TALEP ETTİĞİ izin günü (kümüle;
+#                           şimdilik yalnız Ağustos, aylar biriktikçe büyüyecek)
+#   off_kidem_ratio       = izin_talep_gun_sayisi ÷ kidem_ay (SQL'de hesaplanmış;
+#                           kıdemi bilinmeyen agentlarda NULL geliyor)
+# NE İŞE YARAR: iki agent aynı güne off_t istediğinde ve kova sadece birine
+# izin verebiliyorsa, GEÇMİŞTE AZ İSTEYEN öne geçsin. H7B bunu kişiye özel
+# W_OFF_T ağırlığına çevirir; bu hücre sadece okuyup temizler.
+# Tablo yoksa H7B hiçbir şey yapmaz → herkes eski sabit W_OFF_T ile devam eder.
+df_off_gecmis = globals().get("df_off_gecmis")
+if df_off_gecmis is not None:
+    df_off_gecmis = df_off_gecmis.copy()
+    df_off_gecmis.columns = [str(c).strip().lower() for c in df_off_gecmis.columns]
+    df_off_gecmis["agent_user_code"] = (df_off_gecmis["agent_user_code"]
+                                        .astype(str).str.strip())
+    for _c in ("izin_talep_gun_sayisi", "off_kidem_ratio", "kidem_ay"):
+        if _c in df_off_gecmis.columns:                  # hepsi sayısal, boşlar NaN
+            df_off_gecmis[_c] = pd.to_numeric(df_off_gecmis[_c], errors="coerce")
+    _og_bos_r = (int(df_off_gecmis["off_kidem_ratio"].isna().sum())
+                 if "off_kidem_ratio" in df_off_gecmis.columns else None)
+    _og_bos_k = (int(df_off_gecmis["kidem_ay"].isna().sum())
+                 if "kidem_ay" in df_off_gecmis.columns else None)
+    print(f"\ndf_off_gecmis: {df_off_gecmis.shape[0]} satır  |  "
+          f"{df_off_gecmis['agent_user_code'].nunique()} agent  |  "
+          f"kolonlar: {list(df_off_gecmis.columns)}")
+    if "izin_talep_gun_sayisi" in df_off_gecmis.columns:
+        print(f"  izin_talep_gun_sayisi: toplam "
+              f"{df_off_gecmis['izin_talep_gun_sayisi'].sum():.0f} gün  |  "
+              f"min {df_off_gecmis['izin_talep_gun_sayisi'].min():.0f}  "
+              f"medyan {df_off_gecmis['izin_talep_gun_sayisi'].median():.0f}  "
+              f"maks {df_off_gecmis['izin_talep_gun_sayisi'].max():.0f}")
+    if _og_bos_r is not None:
+        print(f"  off_kidem_ratio boş: {_og_bos_r} satır"
+              + (f"  |  kidem_ay boş: {_og_bos_k} satır" if _og_bos_k is not None else "")
+              + "  → H7B df_kidem'den doldurmayı dener, yine olmazsa EN DÜŞÜK öncelik")
+    print(df_off_gecmis.head())
+else:
+    print("df_off_gecmis yok (off_t önceliği devre dışı — herkes sabit W_OFF_T, H7B)")
+
 
 # %% [HÜCRE 4] — KUYRUĞA SÜZ ────────────────────────────────────────────
 # line_based_main_group == "kitle_cagrilar" olanları tut.
@@ -965,6 +1005,159 @@ print(f"tüm-ay izinli (idari/doğum): {tam_ay}")
 print("en çok izinli 10 agent:")
 print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
       .sort_values("izin_gun_sayisi", ascending=False).head(10).to_string(index=False))
+
+
+# %% [HÜCRE 7B] — OFF_T ÖNCELİĞİ: KİŞİYE GÖRE W_OFF_T (df_off_gecmis) ───
+# SORUN: off_t (yumuşak off talebi) cezası HERKESTE AYNI (W_OFF_T=20). İki agent
+# aynı güne off_t istediğinde ve kova sadece birine izin verebiliyorsa, model
+# ikisini de 20'ye mal olan EŞİT seçenek görüyor → hangisini çalıştıracağı
+# rastgele. Oysa geçmişte AZ izin isteyenin öne geçmesi gerekiyor.
+#
+# ÇÖZÜM: cezayı kişiye özel yap. Ceza, o gün agentı ÇALIŞTIRMANIN fiyatı:
+#   yüksek ağırlık → çalıştırmak pahalı → izni ÖNCE onaylanır
+#   düşük ağırlık  → çalıştırmak ucuz  → izni EN SON onaylanır
+# Yeni değişken/kısıt YOK; H20B(3)'teki mevcut terimin KATSAYISI değişiyor.
+#
+# ÖLÇÜ: oran = geçmiş izin TALEBİ (gün) ÷ kıdem (ay)
+#   Neden kıdeme bölünüyor: 24 aylık agentın 6 günü ile 6 aylık agentın 6 günü
+#   aynı şey değil. Kullanıcı kararı (2026-09-18).
+#   KIDEM TABANI (KIDEM_TABAN_AY): çok yeni agentta bölen küçülüp oran şişiyor
+#   (1 ay kıdem + 2 gün talep → 2.0 → "çok isteyen" görünür). Bölen en az
+#   KIDEM_TABAN_AY alınır → yeni başlayan haksız yere sona atılmaz.
+#   Bu yüzden oran df_off_gecmis'teki hazır off_kidem_ratio'dan DEĞİL, talep ve
+#   kıdemden YENİDEN hesaplanır; hazır sütun sadece yedek (talep/kıdem yoksa).
+#
+# EŞLEME — YÜZDELİK SIRA (kullanıcı seçimi: "A ile başla"):
+#   agentlar orana göre sıralanır; en az isteyen W_OFF_T_MAX, en çok isteyen
+#   W_OFF_T_MIN alır, arası doğrusal. Oranın MUTLAK büyüklüğü değil SIRASI
+#   önemli → veri kümüle olup oranlar büyüdükçe eşik elle güncellenmez,
+#   dağılım kendini ayarlar. Eşit oranlı agentlar AYNI ağırlığı alır → model
+#   aralarında serbesttir (kullanıcı: "eşit cezada rastgele seçsin").
+#
+# BANT NEDEN 12–24 (kalibrasyon — bozmadan önce oku):
+#   • ÜST uç < W_EKSIK_HI/HS (25) olmalı: aksi hâlde off_t vermek coverage
+#     eksiğinden pahalı olur ve model kovayı boşaltıp izin verir.
+#   • ALT uç, hafta içi off cezasının (W_HI_OFF+surplus = 4..14) ALTINA
+#     inebilir — BİLİNÇLİ: en çok isteyen agentın off_t'si sıkı günde (ceza 14)
+#     verilmez, bol günde (ceza 4) yine verilir. "En sona koy" bu demek.
+#   • Bant daraltmak (ör. 16–22) ayrımı zayıflatır, genişletmek yukarıdaki iki
+#     sınırı bozar.
+#
+# BOŞ ORAN → EN DÜŞÜK ÖNCELİK (kullanıcı kararı): oran hesaplanamayan agent
+# W_OFF_T_MIN alır. Önce df_kidem'den kıdem doldurmayı dener (o veri H14B için
+# zaten var) → gerçekten bilinmeyen kalanlar sona düşer.
+OFF_T_ONCELIK  = True      # False → herkes sabit W_OFF_T (v4/eski davranış)
+W_OFF_T_MAX    = 24        # en AZ izin isteyen (izni önce onaylanır) — < W_EKSIK_HI
+W_OFF_T_MIN    = 12        # en ÇOK izin isteyen (izni en son onaylanır)
+KIDEM_TABAN_AY = 6         # oran hesabında bölen en az bu kadar ay sayılır
+
+w_offt = {}                # agent → kişiye özel W_OFF_T (yoksa sabit W_OFF_T)
+if not (OFF_T_ONCELIK and df_off_gecmis is not None):
+    print("off_t önceliği: KAPALI ("
+          + ("OFF_T_ONCELIK=False" if not OFF_T_ONCELIK else "df_off_gecmis yok")
+          + f") → tüm agentlar sabit W_OFF_T={W_OFF_T} ile")
+else:
+    from collections import Counter as _Counter7b
+
+    _7b_kod = df_tam["agent_user_code"].astype(str).str.strip().tolist()
+    _7b_t = (df_off_gecmis.dropna(subset=["agent_user_code"])
+             .drop_duplicates("agent_user_code").set_index("agent_user_code"))
+    _7b_kidem_yedek = (dict(zip(df_kidem["agent_user_code"], df_kidem["kidem_ay"]))
+                       if df_kidem is not None else {})
+
+    def _7b_sayi(_a, _kol):
+        """tabloda o agentın o kolonu → float ya da NaN (kolon yoksa da NaN)."""
+        if _a not in _7b_t.index or _kol not in _7b_t.columns:
+            return float("nan")
+        return float(pd.to_numeric(_7b_t.at[_a, _kol], errors="coerce"))
+
+    _oran, _7b_bilinmeyen = {}, []
+    _7b_kaynak = _Counter7b()
+    _7b_kidem_dolduruldu = []
+    _7b_sapma = []                       # (agent, hazır oran, yeniden hesap) — taban etkisi
+    for _a7 in _7b_kod:
+        _talep = _7b_sayi(_a7, "izin_talep_gun_sayisi")
+        _kid = _7b_sayi(_a7, "kidem_ay")
+        if pd.isna(_kid):                                    # tabloda yok → df_kidem
+            _kv = _7b_kidem_yedek.get(_a7)
+            if _kv is not None and pd.notna(_kv):
+                _kid = float(_kv)
+                _7b_kidem_dolduruldu.append(_a7)
+        _hazir = _7b_sayi(_a7, "off_kidem_ratio")
+        if pd.notna(_talep) and pd.notna(_kid):              # ASIL yol
+            _oran[_a7] = _talep / max(_kid, KIDEM_TABAN_AY)
+            _7b_kaynak["talep÷kıdem (taban uygulanmış)"] += 1
+            if pd.notna(_hazir) and abs(_hazir - _oran[_a7]) > 0.01:
+                _7b_sapma.append((_a7, _hazir, _oran[_a7]))
+        elif pd.notna(_hazir):                               # YEDEK: hazır sütun
+            _oran[_a7] = _hazir
+            _7b_kaynak["hazır off_kidem_ratio (yedek)"] += 1
+        else:                                                # hiçbiri yok
+            _7b_bilinmeyen.append(_a7)
+            _7b_kaynak["BİLİNMEYEN → en düşük öncelik"] += 1
+
+    # ── YÜZDELİK SIRA → AĞIRLIK ───────────────────────────────────────
+    # rank(method="average"): eşit oranlar AYNI sırayı (dolayısıyla aynı
+    # ağırlığı) alır → model o kişiler arasında kayıtsız kalır.
+    if _oran:
+        _s7 = pd.Series(_oran)
+        _r7 = _s7.rank(method="average")                     # 1 = en AZ isteyen
+        _n7 = len(_s7)
+        for _a7, _rr in _r7.items():
+            _p = 0.0 if _n7 <= 1 else (float(_rr) - 1) / (_n7 - 1)   # 0..1
+            w_offt[_a7] = int(round(W_OFF_T_MAX
+                                    - (W_OFF_T_MAX - W_OFF_T_MIN) * _p))
+    for _a7 in _7b_bilinmeyen:
+        w_offt[_a7] = W_OFF_T_MIN
+
+    # ── RAPOR ─────────────────────────────────────────────────────────
+    _7b_W = 100
+    print("=" * _7b_W)
+    print(f"H7B — OFF_T ÖNCELİĞİ  (kişiye özel W_OFF_T; bant {W_OFF_T_MIN}–"
+          f"{W_OFF_T_MAX}, sabit değer {W_OFF_T} yerine)")
+    print("=" * _7b_W)
+    print(f"  ölçü: geçmiş izin TALEBİ (gün) ÷ max(kıdem ay, {KIDEM_TABAN_AY})  "
+          f"→ yüzdelik sıra → ağırlık")
+    print(f"  yüksek ağırlık = çalıştırmak pahalı = izni ÖNCE onaylanır")
+    print(f"  oran kaynağı: {dict(_7b_kaynak)}")
+    if _7b_kidem_dolduruldu:
+        print(f"    • {len(_7b_kidem_dolduruldu)} agentın kıdemi df_off_gecmis'te "
+              f"boştu, df_kidem'den dolduruldu")
+    if _7b_bilinmeyen:
+        print(f"    ⚠ {len(_7b_bilinmeyen)} agentta oran HESAPLANAMADI → "
+              f"W_OFF_T={W_OFF_T_MIN} (en düşük öncelik): "
+              f"{_7b_bilinmeyen[:10]}{' ...' if len(_7b_bilinmeyen) > 10 else ''}")
+        print(f"      kalıcı çözüm: bu agentların kıdemini/talebini veriye gir.")
+    if _7b_sapma:
+        print(f"    • {len(_7b_sapma)} agentta hazır off_kidem_ratio ile yeniden "
+              f"hesap FARKLI (kıdem tabanı {KIDEM_TABAN_AY} ay devrede) — en büyük 3:")
+        for _a7, _h, _y in sorted(_7b_sapma, key=lambda r: -(r[1] - r[2]))[:3]:
+            print(f"        {_a7}: tabloda {_h:.2f} → kullanılan {_y:.2f} "
+                  f"(yeni başlayan cezası kaldırıldı)")
+    _7b_dag = _Counter7b(w_offt.values())
+    print(f"  ağırlık dağılımı (ağırlık → agent): "
+          f"{dict(sorted(_7b_dag.items(), reverse=True))}")
+    if _oran:
+        _sirali = sorted(_oran.items(), key=lambda kv: kv[1])
+        print(f"  EN AZ isteyen 5 (izni önce onaylanır):")
+        for _a7, _o7 in _sirali[:5]:
+            print(f"     {_a7}: oran {_o7:.2f} → ağırlık {w_offt[_a7]}")
+        print(f"  EN ÇOK isteyen 5 (izni en son):")
+        for _a7, _o7 in _sirali[-5:][::-1]:
+            print(f"     {_a7}: oran {_o7:.2f} → ağırlık {w_offt[_a7]}")
+    # kalibrasyon sağlaması — bant komşu ağırlıklarla çelişmesin
+    if W_OFF_T_MAX >= W_EKSIK_HI:
+        print(f"  ⚠ W_OFF_T_MAX({W_OFF_T_MAX}) ≥ W_EKSIK_HI({W_EKSIK_HI}) → off_t "
+              f"vermek coverage eksiğinden pahalı; model kovayı boşaltıp izin verir.")
+    else:
+        print(f"  ✓ üst uç {W_OFF_T_MAX} < eksik cezası {W_EKSIK_HI} → coverage "
+              f"her zaman önce gelir")
+    print(f"  NOT: alt uç {W_OFF_T_MIN}, hafta içi off cezasının üst ucunun "
+          f"({W_HI_OFF + W_SURPLUS_OFF}) ALTINDA → en çok isteyenin off_t'si SIKI "
+          f"günde verilmez, BOL günde verilir (bilinçli).")
+    print(f"  NOT: aynı ağırlığa düşen agentlar arasında model SERBEST — eşitlikte "
+          f"tercih yapmaz.")
+    print("=" * _7b_W)
 
 
 # %% [HÜCRE 8] — MODEL GİRDİLERİNİ HAZIRLA ─────────────────────────────
@@ -3508,14 +3701,21 @@ for a in AGENTS:
 #     Ceza o gün ÇALIŞMAYA konuyor → model önce bu günleri off bırakmaya çalışır.
 #     W_OFF_T, hafta içi off cezasından (4..14) yüksek seçilmeli; yoksa off vermek
 #     zaten pahalı olduğu için talep hiç karşılanmaz.
+#     AĞIRLIK KİŞİYE ÖZEL (H7B): w_offt[a] — geçmişte AZ izin isteyen yüksek
+#     ağırlık alır (çalıştırmak pahalı → izni önce onaylanır), çok isteyen düşük.
+#     H7B kapalıysa / df_off_gecmis yoksa sözlük boş → herkes sabit W_OFF_T.
 n3 = 0
+_n3_ozel = 0                                       # kişiye özel ağırlık kullanılan terim
 for a in AGENTS:
+    _w3 = w_offt.get(a, W_OFF_T)                   # kişiye özel yoksa sabit
     for d in sorted(off_soft_map.get(a, set())):
         ds = d.isoformat()
         gunluk = [x[(a, ds, v)] for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
         if gunluk:
-            amac.append(W_OFF_T * sum(gunluk))     # o gün çalıştırılırsa ceza
+            amac.append(_w3 * sum(gunluk))         # o gün çalıştırılırsa ceza
             n3 += 1
+            if _w3 != W_OFF_T:
+                _n3_ozel += 1
 
 print(f"haftalık off: SERT tavan {n1_sert} (agent,hafta) kısıtı "
       f"(≤{MAX_HAFTA_OFF} off, off_t/off_t2/izin/tatil hariç)"
@@ -3524,7 +3724,11 @@ print(f"haftalık off dengesi (yumuşak): {n1} (agent,hafta) fazla-off cezası (
       + (f"  |  sınır haftası taşıması: {n1_tas} agent" if n1_tas else ""))
 print(f"hafta içi off (surplus ağırlıklı): {n2} (agent,gün) ceza terimi "
       f"(taban {W_HI_OFF} + surplus {W_SURPLUS_OFF}×(1−w) → sıkı gün pahalı)")
-print(f"off_t (yumuşak talep): {n3} (agent,gün) talep — karşılanmazsa ağ. {W_OFF_T}")
+print(f"off_t (yumuşak talep): {n3} (agent,gün) talep — karşılanmazsa ceza"
+      + (f"  |  {_n3_ozel} terimde KİŞİYE ÖZEL ağırlık (H7B, bant "
+         f"{min(w_offt.values())}–{max(w_offt.values())}), "
+         f"{n3 - _n3_ozel} terimde sabit {W_OFF_T}"
+         if w_offt else f" ağ. {W_OFF_T} (herkes aynı; H7B kapalı)"))
 
 
 # %% [HÜCRE 20C] — HAFTA SONU ADALETİ (agent bazında, adil-pay üstü ceza) ─
