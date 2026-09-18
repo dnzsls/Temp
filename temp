@@ -1043,9 +1043,19 @@ print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
 #   • Bant daraltmak (ör. 16–22) ayrımı zayıflatır, genişletmek yukarıdaki iki
 #     sınırı bozar.
 #
-# BOŞ ORAN → EN DÜŞÜK ÖNCELİK (kullanıcı kararı): oran hesaplanamayan agent
-# W_OFF_T_MIN alır. Önce df_kidem'den kıdem doldurmayı dener (o veri H14B için
-# zaten var) → gerçekten bilinmeyen kalanlar sona düşer.
+# ÜÇ AYRI "BOŞ" DURUMU — ilk koşuda (2026-09-18) karıştırılmıştı, düzeltildi:
+#   (a) TALEP KAYDI YOK, kıdem biliniyor → agent geçmişte HİÇ izin İSTEMEMİŞ.
+#       Bu "bilinmiyor" DEĞİL, veri: talep = 0 → oran 0 → EN YÜKSEK öncelik.
+#       ÖLÇÜLDÜ: 465 agentın 324'ü df_off_gecmis'te YOK (tablo yalnız talep
+#       edenleri tutuyor). İlk sürüm bunları "bilinmeyen" sayıp EN DÜŞÜK
+#       önceliğe atıyordu → ağırlık dağılımı {12: 328} çıktı, yani hiç izin
+#       istemeyenler en sona düştü ve kural TERSİNE çalıştı.
+#   (b) TALEP VAR, kıdem yok → df_kidem'den doldurulur (H14B verisi hazır).
+#   (c) İKİSİ DE YOK → gerçekten veri yok → W_OFF_T_MIN (en düşük öncelik,
+#       kullanıcı kararı).
+# EŞİTLİK: oranı aynı olan agentlar (özellikle 0 olanlar) rank(method="min")
+# ile AYNI ve EN İYİ sırayı alır → hepsi W_OFF_T_MAX. "average" olsaydı 324
+# kişi orta sıraya düşer ve bandın üst ucu hiç kullanılmazdı.
 OFF_T_ONCELIK  = True      # False → herkes sabit W_OFF_T (v4/eski davranış)
 W_OFF_T_MAX    = 24        # en AZ izin isteyen (izni önce onaylanır) — < W_EKSIK_HI
 W_OFF_T_MIN    = 12        # en ÇOK izin isteyen (izni en son onaylanır)
@@ -1074,6 +1084,7 @@ else:
     _oran, _7b_bilinmeyen = {}, []
     _7b_kaynak = _Counter7b()
     _7b_kidem_dolduruldu = []
+    _7b_talep_yok = []                   # talep kaydı yok → 0 istemiş sayıldı
     _7b_sapma = []                       # (agent, hazır oran, yeniden hesap) — taban etkisi
     for _a7 in _7b_kod:
         _talep = _7b_sayi(_a7, "izin_talep_gun_sayisi")
@@ -1092,16 +1103,22 @@ else:
         elif pd.notna(_hazir):                               # YEDEK: hazır sütun
             _oran[_a7] = _hazir
             _7b_kaynak["hazır off_kidem_ratio (yedek)"] += 1
-        else:                                                # hiçbiri yok
+        elif pd.notna(_kid):                                 # TALEP KAYDI YOK, kıdem VAR
+            _oran[_a7] = 0.0                                 #   → hiç istememiş = 0
+            _7b_talep_yok.append(_a7)
+            _7b_kaynak["talep kaydı YOK → 0 istedi (en yüksek öncelik)"] += 1
+        else:                                                # ikisi de yok → veri yok
             _7b_bilinmeyen.append(_a7)
-            _7b_kaynak["BİLİNMEYEN → en düşük öncelik"] += 1
+            _7b_kaynak["BİLİNMEYEN (kıdem de yok) → en düşük öncelik"] += 1
 
     # ── YÜZDELİK SIRA → AĞIRLIK ───────────────────────────────────────
-    # rank(method="average"): eşit oranlar AYNI sırayı (dolayısıyla aynı
-    # ağırlığı) alır → model o kişiler arasında kayıtsız kalır.
+    # rank(method="min"): eşit oranlar AYNI ve EN İYİ sırayı alır → aralarında
+    # model kayıtsız kalır (kullanıcı: "eşit cezada rastgele seçsin").
+    # "average" DEĞİL: oranı 0 olan (hiç izin istemeyen) kalabalık grup orta
+    # sıraya düşüyor ve bandın üst ucu (W_OFF_T_MAX) hiç kullanılmıyordu.
     if _oran:
         _s7 = pd.Series(_oran)
-        _r7 = _s7.rank(method="average")                     # 1 = en AZ isteyen
+        _r7 = _s7.rank(method="min")                         # 1 = en AZ isteyen
         _n7 = len(_s7)
         for _a7, _rr in _r7.items():
             _p = 0.0 if _n7 <= 1 else (float(_rr) - 1) / (_n7 - 1)   # 0..1
@@ -1123,6 +1140,11 @@ else:
     if _7b_kidem_dolduruldu:
         print(f"    • {len(_7b_kidem_dolduruldu)} agentın kıdemi df_off_gecmis'te "
               f"boştu, df_kidem'den dolduruldu")
+    if _7b_talep_yok:
+        print(f"    • {len(_7b_talep_yok)} agentın TALEP KAYDI YOK → 'hiç izin "
+              f"istememiş' sayıldı (oran 0 → en yüksek öncelik "
+              f"{W_OFF_T_MAX}). df_off_gecmis yalnız talep EDENLERİ tutuyorsa "
+              f"bu normaldir.")
     if _7b_bilinmeyen:
         print(f"    ⚠ {len(_7b_bilinmeyen)} agentta oran HESAPLANAMADI → "
               f"W_OFF_T={W_OFF_T_MIN} (en düşük öncelik): "
