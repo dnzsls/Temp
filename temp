@@ -2677,6 +2677,9 @@ TAKIM_HINT = True                                  # False → hiç ipucu verme 
 # haftanın her gününü taşıması gerekir.
 takim_etkin = {}                                   # (takım, hafta) → etkin üye (tipten bağımsız)
 takim_etkin_tip = {}                               # (takım, hafta, TİP) → o tipte çalışabilen üye
+                                                   #   EN DAR gün → ALT SINIR bunu kullanır
+takim_etkin_tip_max = {}                           # aynısı, EN KALABALIK gün → ③ TAVAN bunu kullanır
+                                                   #   (gerekçe H19D TIP_FAZLA_KALABALIK_GUN)
 # TİPE DUYARLI SAYIM ŞART — yoksa model INFEASIBLE oluyordu (ölçüldü):
 #   H19D geceye 12 kişilik takım atayıp "kapasite 12 ≥ talep 11, tamam" diyordu.
 #   Ama o takımın 5'i kıdemsiz (H14B gece yasağı) + 2'si sabahçı (H13) →
@@ -2695,16 +2698,19 @@ for _T, _uy in takimlar.items():
                 if any((a, ds, v) in x for v in gun_vardiyalari[ds]))
             for ds in _hi2)
         for _t2 in hafta_tipler.get(_wk2, []):
-            takim_etkin_tip[(_T, _wk2, _t2)] = min(
-                sum(1 for a in _uy
-                    if any(_kova_calisabilir(a, ds, v)
-                           for v in gun_vardiyalari[ds]
-                           if (ds, v) in talep and saat[(ds, v)][0] == _t2))
-                for ds in _hi2)
+            _gunluk19c = [sum(1 for a in _uy
+                              if any(_kova_calisabilir(a, ds, v)
+                                     for v in gun_vardiyalari[ds]
+                                     if (ds, v) in talep and saat[(ds, v)][0] == _t2))
+                          for ds in _hi2]
+            takim_etkin_tip[(_T, _wk2, _t2)] = min(_gunluk19c)       # en dar gün
+            takim_etkin_tip_max[(_T, _wk2, _t2)] = max(_gunluk19c)   # en kalabalık gün
 
 _hint = {}                                         # y değişkeni → 0/1
 _hint_ozet = []                                    # (hafta, açık_önce, açık_sonra)
 _greedy_fazla = {}                                 # hafta → {tip: açgözlünün ürettiği FAZLA}
+_greedy_fazla_ust = {}                             # aynı tahsisin fazlası, EN KALABALIK gün ölçüsüyle
+                                                   #   → H19D tavanının tanığı (tavanla AYNI ölçü)
 # Açgözlü tahsis sadece AÇIĞI değil FAZLAYI da üretiyor: bir takım zirveyi
 # aşan bir tipe düştüğünde aradaki fark fazladır. H19D'nin SERT tip tavanı
 # bunu FİZİBİLİTE TANIĞI olarak kullanır — tavan asla bu değerin altına
@@ -2735,6 +2741,7 @@ if TAKIM_HINT and takim_tip:
         def _kap_tip(T, t):                        # takımın o tipteki gerçek katkısı
             return takim_etkin_tip.get((T, _wk, t), takim_etkin.get((T, _wk), _boyut[T]))
 
+        _sec_g = {}                                # takım → açgözlünün seçtiği tip
         for T in sorted(takimlar,
                         key=lambda t: -max((_kap_tip(t, _x) for _x in _ihtiyac),
                                            default=0)):
@@ -2742,6 +2749,7 @@ if TAKIM_HINT and takim_tip:
             if not _uygun:
                 continue                           # takımın o hafta seçeneği yok
             _sec = max(_uygun, key=lambda t: _kalan.get(t, 0))
+            _sec_g[T] = _sec
             _kalan[_sec] = _kalan.get(_sec, 0) - _kap_tip(T, _sec)
             for _t in _uygun:                      # (3) hint: seçilen 1, diğerleri 0
                 _hint[takim_tip[(T, _wk, _t)]] = 1 if _t == _sec else 0
@@ -2749,6 +2757,14 @@ if TAKIM_HINT and takim_tip:
                            sum(max(0, v) for v in _kalan.values())))
         # _kalan[t] = ihtiyaç − atanan  →  negatifi FAZLA demek
         _greedy_fazla[_wk] = {_t: max(0, -_v) for _t, _v in _kalan.items()}
+        # AYNI tahsisin fazlası EN KALABALIK gün ölçüsüyle. Kapasite ifadesi
+        # (yedek zinciri dahil) H19D'nin _kap_ust'u ile BİREBİR aynı olmalı;
+        # yoksa tanık kendi ölçtüğü tavanı aşabilir ve garanti bozulur.
+        _greedy_fazla_ust[_wk] = {
+            _t: max(0, sum(takim_etkin_tip_max.get(
+                               (T, _wk, _t), takim_etkin.get((T, _wk), _boyut[T]))
+                           for T, _s in _sec_g.items() if _s == _t) - _ihtiyac[_t])
+            for _t in _ihtiyac}
     for _var, _val in _hint.items():
         model.AddHint(_var, _val)
 
@@ -2763,6 +2779,16 @@ if _hint:
 else:
     print(f"takım-tip başlangıç ipucu: KAPALI "
           f"({'TAKIM_HINT=False' if not TAKIM_HINT else 'takim_tip boş'})")
+
+# EN DAR ↔ EN KALABALIK gün farkı — alt sınır ilkini, H19D tavanı ikincisini
+# kullanıyor. Fark büyükse eski ölçü (tavan da en dar gün) fazlayı o kadar
+# görmüyordu demektir.
+_fark19c = [takim_etkin_tip_max[_k] - takim_etkin_tip[_k] for _k in takim_etkin_tip
+            if takim_etkin_tip_max.get(_k, 0) > 0]
+if _fark19c:
+    print(f"  takım kapasitesi EN DAR ↔ EN KALABALIK gün farkı: ortalama "
+          f"{sum(_fark19c) / len(_fark19c):.1f} kişi, en büyük {max(_fark19c)}  "
+          f"(alt sınır en dar, tavan en kalabalık günü kullanır — H19D)")
 
 
 # %% [HÜCRE 19D] — TİP KAPASİTE KISITI (önce zirve talebi karşıla) ─────
@@ -2865,6 +2891,20 @@ TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay
 # Tavan bağlamazsa BUFFER'ı düşürmeden önce aşağıdaki tabloya bak: hangi
 # (hafta,tip) tavana dayanmış, kaçında tanık BUFFER'ı ezmiş.
 TIP_FAZLA_SERT   = True      # False → tavan kurulmaz (eski davranış)
+# ── TAVAN ÖLÇÜSÜ: EN KALABALIK gün (2026-09-21) ─────────────────────
+# Takımın sahaya çıkan kişisi günden güne değişir (izin/off_t2). İki kural FARKLI
+# kötü senaryoya karşı korur, o yüzden FARKLI gün ölçüsü ister:
+#   ALT SINIR (zirveyi karşıla) → EN DAR gün       : eksik riski en izinli günde
+#   ③ TAVAN (fazlayı kes)       → EN KALABALIK gün : fazla riski herkesin geldiği gün
+# BULGU (gerçek koşu, 2026-09-17, W38): 07:30 zirve 13, tavan 13+12=25. İki takım
+# en dar günlerine göre sayıldığı için "sığıyor" göründü, ikisi de 07:30'a kondu;
+# normal günde 23 kişi sahaya çıktı (talep 13) ve aynı gün 15:00'te 21 eksik kaldı.
+# Eskiden iki kural da EN DAR günü kullanıyordu — alt sınır için doğru, tavan için ters.
+# TANIK AYNI ÖLÇÜDE (H19C `_greedy_fazla_ust`): tavan hiçbir zaman açgözlü tahsisin
+# en-kalabalık-gün fazlasının altına inmez → açgözlü çözüm tavanı hep sağlar, kural
+# çözümsüzlük yapamaz. "En küçük takım sığsın" tabanı ve ④ min-takım sayımı da aynı
+# ölçüye geçti (üçü aynı dili konuşmalı).
+TIP_FAZLA_KALABALIK_GUN = True   # False → eski davranış (tavan da en dar gün)
 TIP_FAZLA_BUFFER = None      # tip, haftanın zirve talebini en fazla bu kadar aşabilir.
                              # None → ORTALAMA TAKIM × 0.75'ten TÜRETİLİR.
                              # Sabit 5'ti; 17 kişilik takımlarla imkânsızdı: bir tipe
@@ -2975,6 +3015,8 @@ if TIP_KAPASITE_SERT and takim_tip:
     # o gün sahada daha az kişi oluyordu (H25D [3]: 183 atanmış, 15 izinli, 168 sahada).
     _boyut19d = {T: len(u) for T, u in takimlar.items()}   # ham (yedek)
     _greedy = {w: a for w, _, a in _hint_ozet}     # H19C açgözlü artığı (yoksa boş)
+    # ③ tavanın kapasite ölçüsü: en kalabalık gün (varsayılan) ya da eski en dar gün
+    _etkin_ust = takim_etkin_tip_max if TIP_FAZLA_KALABALIK_GUN else takim_etkin_tip
     for _wk in sorted(haftalar):
         # SINIR HAFTASI MUAF: o hafta tipler H19E ile önceki aydan geliyor, takım
         # seçimi (y) yok → "zirveyi karşıla" kısıtının dayanacağı değişken de yok.
@@ -3003,7 +3045,9 @@ if TIP_KAPASITE_SERT and takim_tip:
         # Tip sayısına bağlı — sezgiselin performansına DEĞİL.
         _pay19d = TIP_PAY_TIP_BASI * len(_zirve19d)
         _butce = max(_greedy.get(_wk, 0), _yapisal + _pay19d) + TIP_ACIK_TOLERANS
-        _gf19d = _greedy_fazla.get(_wk, {})         # tanık: açgözlünün tip fazlaları
+        # tanık: açgözlünün tip fazlaları — tavanla AYNI ölçüde (aşağıdaki _kap_ust)
+        _gf19d = (_greedy_fazla_ust if TIP_FAZLA_KALABALIK_GUN
+                  else _greedy_fazla).get(_wk, {})
         _acik_var, _kt19 = [], []
         _acik_tip = []                              # (tip, açık değişkeni) — konveks ceza için
         for _t, _z in _zirve19d.items():
@@ -3011,6 +3055,10 @@ if TIP_KAPASITE_SERT and takim_tip:
             # (kıdemsiz gece yapamaz, sabahçı geç tip yapamaz → 0 sayılır)
             _kap = sum(takim_etkin_tip.get((T, _wk, _t), _etk[T]) * takim_tip[(T, _wk, _t)]
                        for T in _sec_takim if (T, _wk, _t) in takim_tip)
+            # TAVAN için aynı kapasite, EN KALABALIK gün ölçüsüyle (alt sınır _kap'ta
+            # en dar günde kalıyor). Yedek zinciri H19C _greedy_fazla_ust ile AYNI.
+            _kap_ust = sum(_etkin_ust.get((T, _wk, _t), _etk[T]) * takim_tip[(T, _wk, _t)]
+                           for T in _sec_takim if (T, _wk, _t) in takim_tip)
             _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
@@ -3035,11 +3083,13 @@ if TIP_KAPASITE_SERT and takim_tip:
             _kat19 = {T: takim_etkin_tip.get((T, _wk, _t), 0) for T in _sec_takim
                       if (T, _wk, _t) in takim_tip
                       and takim_etkin_tip.get((T, _wk, _t), 0) > 0}
-            _min_kat = min(_kat19.values()) if _kat19 else 0
+            # tavan tarafı (sığma testi + "en küçük takım" tabanı) EN KALABALIK gün
+            _kat19_ust = {T: _etkin_ust.get((T, _wk, _t), _k) for T, _k in _kat19.items()}
+            _min_kat = min(_kat19_ust.values()) if _kat19_ust else 0
             _tv = max(_tf_buffer, _gf19d.get(_t, 0),
                       max(0, _min_kat - _z))
             if TIP_FAZLA_SERT:
-                _kt19.append(model.Add(_kap <= _z + _tv))
+                _kt19.append(model.Add(_kap_ust <= _z + _tv))   # en kalabalık gün
                 _kay19 = ("buffer" if _tv == _tf_buffer else
                           "tanık" if _tv == _gf19d.get(_t, 0) else "min takım")
                 _tavan19d.append((_wk, _t, _z, _tv, _kay19))
@@ -3049,13 +3099,14 @@ if TIP_KAPASITE_SERT and takim_tip:
             # sert kısıt çakışır ve model INFEASIBLE olur. Sığan takım yoksa kural
             # o tipte KURULMAZ → aşağıda "atlanan" olarak raporlanır.
             if TIP_MIN_TAKIM and _z >= TIP_MIN_TAKIM_ESIK:
-                _sigan = [T for T, _k in _kat19.items()
+                _sigan = [T for T, _k in _kat19_ust.items()
                           if (not TIP_FAZLA_SERT) or _k <= _z + _tv]
                 _mt19_uygun.setdefault(_wk, {})[_t] = set(_sigan)
                 if _sigan:
                     _kt19.append(model.Add(
                         sum(takim_tip[(T, _wk, _t)] for T in _sigan) >= 1))
-                    _mt19.append((_wk, _t, _z, len(_sigan), min(_kat19[T] for T in _sigan)))
+                    _mt19.append((_wk, _t, _z, len(_sigan),
+                                  min(_kat19_ust[T] for T in _sigan)))
                 else:
                     _mt19_atla.append((_wk, _t, _z, len(_kat19),
                                        (f"hepsi tavanı aşıyor (tavan {_z + _tv}, "
@@ -3121,6 +3172,10 @@ if _19d_ozet:
               f"kapasite ≤ zirve + TAVAN")
         print(f"    TAVAN = max( BUFFER({_tf_buffer}) , açgözlü tanığı , "
               f"en küçük takım − zirve )")
+        print(f"    TAVAN ÖLÇÜSÜ: takımın "
+              + ("EN KALABALIK günündeki kişi (fazla o gün oluşur)"
+                 if TIP_FAZLA_KALABALIK_GUN else "EN DAR günündeki kişi (eski ölçü)")
+              + "  |  alt sınır (zirveyi karşıla) her zaman EN DAR gün")
         print(f"    BUFFER {_tf_buffer} = " + (f"ortalama takım({_ort_takim:.1f}) × 0.75 "
               f"[TÜRETİLDİ]" if TIP_FAZLA_BUFFER is None else "elle verildi"))
         _kay_say = _Counter19d(_k for *_r, _k in _tavan19d)
