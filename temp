@@ -401,6 +401,30 @@ MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar 
 # NOT: agent master ve özel off SQL'den gelir → bu dosyadan ÖNCE notebook'ta
 #      df_agents ve df_off DataFrame'leri tanımlı olmalı.
 
+# ── OFF_T ÖNCELİĞİ (H7B) — gerekçe ve bant kalibrasyonu H7B'de ─────────
+OFF_T_ONCELIK  = True          # False → herkes sabit W_OFF_T
+W_OFF_T_MAX    = 24            # en AZ izin isteyen (izni önce onaylanır) — < W_EKSIK_HI olmalı
+W_OFF_T_MIN    = 12            # en ÇOK izin isteyen (izni en son onaylanır)
+KIDEM_TABAN_AY = 6             # oran = talep ÷ max(kıdem, bu) → yeni başlayan şişmesin
+
+# ── TAKIM → TİP DAĞILIMI (H19D) — dört kuralın gerekçesi H19D'de ───────
+W_TIP_ACIK2        = 25        # ② bir tipte serbest payı aşan her açık kişiye ceza
+TIP_ACIK_SERBEST   = 4         # ② tip başına BEDAVA açık. None → ortalama takım / 2 (≈8)
+                               #    8 → 4 (2026-09-21 koşusu): eksik 673→647, fazla 230→201,
+                               #    W38 08:00 −21 → −3 (açık tiplere yayıldı)
+TIP_FAZLA_BUFFER   = None      # ③ tavan payı: zirveyi en fazla bu kadar aş.
+                               #    None → ortalama takım × 0.75 (≈12)
+TIP_MIN_TAKIM      = True      # ④ talebi olan her tipe ≥1 takım (False → kural yok)
+TIP_MIN_TAKIM_ESIK = 1         # ④ zirvesi bundan küçük tip muaf (1 → talebi olan her tip)
+
+# ── HAFTALIK OFF (H20B) ─────────────────────────────────────────────────
+HAFTA_OFF_SERT = True          # SERT: haftada en fazla MAX_HAFTA_OFF model off'u
+MAX_HAFTA_OFF  = 2             # (off_t / off_t2 / izin / resmi tatil sayılmaz)
+
+# ── ÇÖZÜCÜ (H21) ────────────────────────────────────────────────────────
+COZUM_SURE_SN  = 2700          # süre sınırı (sn). Süre asıl sorun değil — 2700'de de
+                               # gap kapanmıyor; iyileşme kurallardan geliyor.
+
 FIZIBILITE_MODU = False        # "ÇÖZÜM VAR MI?" modu — normalde KAPALI.
                                # True → amaç fonksiyonu HİÇ KURULMAZ; çözücü sadece
                                # tüm sert kuralları sağlayan BİR çözüm arar.
@@ -975,10 +999,7 @@ print(df_tam[["agent_user_code", "izin_gun_sayisi"]]
 # EŞİTLİK: oranı aynı olan agentlar (özellikle 0 olanlar) rank(method="min")
 # ile AYNI ve EN İYİ sırayı alır → hepsi W_OFF_T_MAX. "average" olsaydı 324
 # kişi orta sıraya düşer ve bandın üst ucu hiç kullanılmazdı.
-OFF_T_ONCELIK  = True      # False → herkes sabit W_OFF_T (v4/eski davranış)
-W_OFF_T_MAX    = 24        # en AZ izin isteyen (izni önce onaylanır) — < W_EKSIK_HI
-W_OFF_T_MIN    = 12        # en ÇOK izin isteyen (izni en son onaylanır)
-KIDEM_TABAN_AY = 6         # oran hesabında bölen en az bu kadar ay sayılır
+# AYARLAR H0'da: OFF_T_ONCELIK, W_OFF_T_MAX, W_OFF_T_MIN, KIDEM_TABAN_AY
 
 w_offt = {}                # agent → kişiye özel W_OFF_T (yoksa sabit W_OFF_T)
 # H29 Excel roster kolonlarına AÇILAN ölçüler (kural değil, GÖSTERİM):
@@ -2426,7 +2447,7 @@ for wk, gunler in haftalar.items():
 # (agent_tip VAR **ve** tip_yasak'ta DEĞİL) → iki yer aynı dili konuşur.
 # Tüm takım sabahçıysa geç tipler seçenekten düşer → takım gündüze gider,
 # `yapamaz` boş kalır → sv == 0 → AYRILAN SIFIR.
-TAKIM_TIP_MIN_ORAN = 0.0   # 0   → en az 1 üye yapabilsin (varsayılan, istenen)
+TAKIM_TIP_MIN_ORAN = 0.0   # SABİT — ayar DEĞİL (kullanıcı kuralı: 0 → en az 1 üye yapabilsin)
                            # 0.5 → üyelerin yarısı yapabilsin. Yükseltmek kapıyı
                            #       daha da kapatır AMA sabahçı/kıdemsiz ağırlıklı
                            #       takımları geç tipten tamamen çıkarır → akşam/gece
@@ -2665,7 +2686,8 @@ else:
 # kullanır, tutmazsa yok sayar → risk yok, takım bölünmesi yok, ağırlık değişmiyor.
 # Hücre ayrıca açgözlü tahsisin bıraktığı açığı basar: çözücünün bulduğuyla
 # (H25B [3]) karşılaştırınca ipucunun ne kadar iyi olduğu görünür.
-TAKIM_HINT = True                                  # False → hiç ipucu verme (eski davranış)
+TAKIM_HINT = True          # SABİT — ayar DEĞİL. H19D tavanının tanığı bundan gelir;
+                           #   False → tanık yok, model çözümsüz kalabilir.
 
 # TAKIMIN O HAFTADAKİ ETKİN BOYUTU — hem bu hücre hem H19D bunu kullanır.
 #   etkin = o haftanın EN DAR hafta içi gününde kaç üyesinin değişkeni var
@@ -2791,224 +2813,73 @@ if _fark19c:
           f"(alt sınır en dar, tavan en kalabalık günü kullanır — H19D)")
 
 
-# %% [HÜCRE 19D] — TİP KAPASİTE KISITI (önce zirve talebi karşıla) ─────
-# SORUN (H25D ile ölçüldü): 3 Ağustos 08:00'da talep 59, atanan 26. O tipe
-# sadece 2 takım (30 üye) atanmış; 15:00'te ise 96 üye var, zirve talep 56 →
-# 40 kişilik pay. Merve Muştu'nun takımı (13 uygun) taşınsaydı kazanç
-# 13 × W_EKSIK_HI(25) × 5 gün = 1625, bedeli ~0. Model bu 1625'i masada
-# bırakmış → TERCİH değil, BULAMAMA.
+# %% [HÜCRE 19D] — TİP KAPASİTE KURALLARI (takım → tip dağılımı) ──────
+# Dört kural, hepsi y[takım,hafta,tip] üzerinde. Asıl karar orada; eksik cezası
+# x üzerinde durduğu için aramaya ulaşmıyordu (gap %72 — tercih değil BULAMAMA:
+# 3 Ağustos 08:00'da 13 kişilik takım taşınsa 1625 puan kazanç, model bırakmıştı).
+#   ① ALT SINIR   kapasite(EN DAR gün) + açık ≥ zirve talep       (açık serbest)
+#   ② AÇIK CEZASI W_TIP_ACIK2 × max(0, açık − TIP_ACIK_SERBEST)    (konveks, YAYAR)
+#   ③ TAVAN       kapasite(EN KALABALIK gün) ≤ zirve + TAVAN         (SERT)
+#   ④ MİN TAKIM   talebi olan her tipe ≥1 takım                      (SERT)
+# AYARLAR H0'da: W_TIP_ACIK2, TIP_ACIK_SERBEST, TIP_FAZLA_BUFFER,
+#                TIP_MIN_TAKIM, TIP_MIN_TAKIM_ESIK.
 #
-# NEDEN BULAMIYOR: eksik cezası `x` üzerinde (118 bin değişken), asıl karar ise
-# `y[takım,hafta,tip]` üzerinde (~1160 ikili). LP gevşemesinde y KESİRLİ olabildiği
-# için "takımın yarısı 08:00'de" gibi bir çözüm eksiği sıfır gösteriyor → alt sınır
-# hiçbir zaman "bu tahsis kötü" demiyor, gap kapanmıyor (2700 sn'de %72).
-# H19C ipucu doğru noktayı gösteriyor ama KISIT DEĞİL; arama uzaklaşıp dönemiyor.
+# kapasite = takımın o tipte FİİLEN çalışabilen üyesi (izin/off_t2/kıdem/sabahçı/
+# hamile düşülmüş — H19C takim_etkin_tip). H25B [3] HAM takım boyu basar →
+# oradaki fazla buradakinden büyük görünür; ikisi aynı ölçü DEĞİL.
 #
-# ÇÖZÜM: kısıtı doğrudan y üzerine koy.
-#   kapasite(hafta,tip) = Σ_takım  üye × y[takım,hafta,tip]
-#   kapasite + açık ≥ ZİRVE TALEP            (her tip için)
-#   Σ_tip açık(hafta) ≤ BÜTÇE(hafta)         (haftalık toplam)
-# "Açık kalabilir mi?" → EVET, ama sadece KAÇINILMAZ olduğu kadar. Bütçe:
-#   BÜTÇE = max( yapısal açık , açgözlü tahsisin bıraktığı açık ) + TOLERANS
-#     yapısal açık = max(0, Σ zirve − o hafta tip seçebilen toplam üye)
-#         → kapasite gerçekten yetmiyorsa fark buradan gelir, model o kadar
-#           eksik bırakabilir (mecburiyet ölçülüp tam o kadarına izin veriliyor).
-#     açgözlü açık = H19C'nin LPT tahsisinin bıraktığı (varsa) → FİZİBİLİTE TANIĞI:
-#         o çözüm bu bütçeyi sağladığı için kısıt ASLA INFEASIBLE yapmaz.
-#         Takımlar bölünemez olduğu için tam paketleme her zaman mümkün değil;
-#         bu terim o yuvarlama payını ölçüp bütçeye ekliyor (tahmin değil, tanık).
-# AĞIRLIK YOK — sert kısıt. Eksik cezası (W_EKSIK_HI) zaten x tarafında duruyor,
-# bu kısıt onu ARAMA için görünür kılıyor; amaç fonksiyonuna terim EKLENMİYOR.
-TIP_KAPASITE_SERT = True     # False → kısıt kurulmaz (eski davranış)
-# ── BÜTÇE FORMÜLÜ — v3'te HATALIYDI, burada düzeltildi ───────────────
-# v3: BÜTÇE = max(yapısal, açgözlü) + TOLERANS(0)
-#   Sorun: açgözlü MATEMATİKSEL OLARAK her zaman ≥ yapısal (bir sezgisel teorik
-#   minimumdan iyi olamaz) → max() hiçbir zaman yapısal'ı seçmiyor, o terim ÖLÜ.
-#   Bütçe %100 sezgiselin O GÜNKÜ performansına bağlanmış oluyordu.
-#   ÖLÇÜLDÜ (aynı ay, iki farklı pickle; talep/kapasite BİREBİR AYNI):
-#     yapısal  : 19 13  9 14 12   ← değişmedi (gerçek zorluk)
-#     açgözlü  : 24 27 17 32 25   → 22 20 15 25 28   ← sezgisel şansı
-#     BÜTÇE    : 125             → 110               ← 15 kişi-gün DARALDI
-#   Yani sezgisel daha iyi paketleyince kısıt SERTLEŞTİ. Model 2700 sn'de tek
-#   çözüm bile bulamadı; TIP_ACIK_TOLERANS=3 (eski seviyeye dönüş) çözdü.
-#   Kavram karışıklığı: "en az bir çözüm sığıyor" (fizibilite) ile "yeterince
-#   çözüm sığıyor" (çözücünün manevra alanı) aynı şey sanılmıştı.
+# TARİHÇE (tekrar denenmesin diye; kodları 2026-09-21'de silindi):
+#   • ② eskiden SERT BÜTÇEYDİ (Σ açık ≤ BÜTÇE). Toplama bakıyordu, dağılıma değil
+#     ("8 tipte 4'er" = "1 tipte 32"); bütçe daralınca iyi dağılımı da yasakladı →
+#     UNKNOWN (FİZİBİLİTE testinde engel olduğu kanıtlandı). Yerine konveks ceza.
+#   • ③ önce YUMUŞAK DOĞRUSAL cezaydı (W_TIP_FAZLA=3): eksik 329→387 KÖTÜLEŞTİ.
+#     Σfazla − Σaçık sabit olduğu için doğrusal ceza sabit ekler, yığılmayı ayırt
+#     etmez. Ders: y üzerinde DOĞRUSAL yumuşak terim çalışmıyor — ya SERT kural
+#     ya KONVEKS ceza (② bu yüzden konveks).
+#   • ③ tavan 2026-09-21'e kadar EN DAR günü kullanıyordu. W38'de iki takım izinli
+#     günlerine göre 07:30'a "sığdı" (11+12 ≤ 25), normal günde 32 kişilik kapasite
+#     çıktı (talep 13), aynı gün 15:00 21 eksik kaldı. Alt sınır için en dar gün
+#     doğru (eksik izinli günde olur), tavan için en kalabalık gün (fazla herkesin
+#     geldiği günde olur).
 #
-# v4: BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS
-#   • açgözlü  → FİZİBİLİTE TANIĞI olarak KALIYOR (alt sınır): o çözüm bütçeyi
-#     sağladığı için kısıt asla INFEASIBLE yapamaz. Ama artık TEK belirleyici değil.
-#   • yapısal + PAY → ZORUNLULUK tabanı. Sezgiselden bağımsız, veriye dayalı.
-#     Sezgisel şanslı bir gün geçirse bile bütçe bunun altına düşemez.
-#   Artık max() gerçekten çalışıyor: bazen açgözlü, bazen taban seçiliyor.
-TIP_PAY_TIP_BASI = 2         # tip BAŞINA yuvarlama payı (kişi).
-                             # Gerekçe: takım bölünemez (H19) → her tipte bir
-                             # miktar israf KAÇINILMAZ. Ölçülen gerçek israf
-                             # (açgözlü − yapısal) hafta başına 6-16 arasında,
-                             # tip sayısı ~8 → tip başına ~1-2 kişi.
-                             # 0 → v3 davranışı (taban devre dışı, sadece açgözlü)
-TIP_ACIK_TOLERANS = 0        # bütçeye TÜM formülün üstüne eklenen ek pay.
-                             # PAY devreye girdiği için artık 0 yeterli;
-                             # v3'te bu 3 yapılarak elle telafi ediliyordu.
-# ── TİP FAZLA TAVANI — "zirveyi çok aşma" (SERT) ─────────────────────
-# İSTEK (net hâli): bir tip, o haftanın EN YOĞUN günündeki ihtiyacından çok
-# fazla kişi almasın. Ölçülen: W32'de 09:00 zirve 175 iken 208 kişi (+33),
-# aynı hafta 10:30 26 istiyor 17 alıyor (−9) ve o hafta GÜNDE 27-28 kişi-gün
-# açık veriliyor. 14 kişilik bir takımı taşımak ~1125 kazandırıp ~500
-# kaybettirirdi (net +600) — model bunu masada bıraktı.
+# ③ TAVAN = max( BUFFER , açgözlü tanığı , en küçük takım − zirve )
+#   BUFFER    = TIP_FAZLA_BUFFER ya da ortalama takım × 0.75 (sabit 5, 17 kişilik
+#               takımlarla imkânsızdı: 2. takım zirveyi 17 aşıyordu).
+#   tanık     = H19C açgözlü dağılımın o tipteki fazlası, AYNI ölçüde
+#               (_greedy_fazla_ust) → açgözlü çözüm tavanı hep sağlar, kural
+#               çözümsüzlük YAPAMAZ. Tanık sadece ALT SINIR; sertlik BUFFER'dan.
+#   min takım = zirve küçükse (gece 4) en küçük takım bile sığsın — gece
+#               kovasında H10 SERT bandı var, boş bırakılamaz.
 #
-# ÖNCEKİ DENEME (YUMUŞAK CEZA) BAŞARISIZ OLDU, sebebi kayda geçsin:
-#   W_TIP_FAZLA=3, serbest 8 kişi ile kuruldu → eksik 329'dan 387'ye ÇIKTI.
-#   İki ayrı hata vardı:
-#   (a) Haftalık TOPLAM fazla aritmetikle ~sabit (herkes çalışmak zorunda,
-#       Σfazla − Σaçık = etkin üye − Σzirve). Sabit bir toplama DOĞRUSAL ceza
-#       koymak SABİT ekler → 33'ü tek yere yığmak ile 5'er dağıtmak AYNI fiyat.
-#       Ceza yığılmayı hiç caydırmıyordu.
-#   (b) Tek doğrusal-olmayan parça serbest bölgeydi (8 kişi) ve sinyali yuttu:
-#       terimin toplam katkısı ~210 puan, amacın %1.7'si.
-#   Kısıtlar değişmediği için eski çözüm hâlâ geçerliydi; yani 329→387 bir
-#   TAKAS değil, terimin aramayı bozmasıydı. Ders: y üzerinde YUMUŞAK terim
-#   bulunmuyor, SERT kısıt buduyor (H19D'nin alt sınırı da bu yüzden sert).
+# ④ MİN TAKIM (2026-09-14): 07:30'a hiç takım düşmemiş, kova sadece ayrılan
+#   üyelerle 3/13 dolmuştu (② serbest payı ~8 olduğu için boş bırakmak ucuzdu).
+#   Sadece o tipte ÇALIŞABİLEN ve ③ tavana SIĞAN takımlar sayılır (iki sert kural
+#   çakışmasın); öyle takım yoksa kural o tipte kurulmaz, raporlanır. Fazla kabul
+#   (kullanıcı kararı 2026-09-16). Her tipe AYRI takım gerektiği için fizibilite
+#   Kuhn eşleşmesiyle önceden ölçülür.
 #
-# YENİ KURGU — SERT TAVAN:
-#   kapasite(hafta,tip) ≤ zirve(hafta,tip) + TAVAN(hafta,tip)
-#   TAVAN = max( TIP_FAZLA_BUFFER , açgözlünün o tipte ürettiği fazla )
-#
-# TANIK NEDEN ŞART: kota SERT → 405 kişinin hepsi bir tipe yazılmak zorunda.
-# 09:00'dan çıkardığın 28 kişi buharlaşmıyor, başka tipe gidiyor. Tavanların
-# TOPLAMI herkesi almaya yetmezse model INFEASIBLE olur. Ayrıca takım
-# bölünemez: W34 gecesinde zirve 4, en küçük takım 10+ → sabit +5 tavanı
-# MATEMATİKSEL OLARAK imkânsız, ama gece kovasında sert band var (boş
-# bırakılamaz). Açgözlü (H19C) tahsisi geçerli bir dağılım olduğu için
-# tavan onun altına inmezse kısıt asla çözümsüz yapamaz; küçük tiplerde
-# tavan kendiliğinden takım boyuna çıkar.
-#   v3'teki BÜTÇE hatasının tersi: orada tanık TEK belirleyiciydi ve sertlik
-#   sezgiselin o günkü şansına bağlıydı. Burada tanık sadece ALT SINIR,
-#   sertlik BUFFER'dan geliyor.
-#
-# BİRİM UYARISI: buradaki `kapasite` ETKİN üye (izinli/kıdemsiz/sabahçı
-# düşülmüş, takim_etkin_tip). H25B [3] tablosu ise HAM takım boyu basıyor →
-# oradaki "+33" ile buradaki fazla AYNI SAYI DEĞİL, etkin taraf daha küçük.
-# Tavan bağlamazsa BUFFER'ı düşürmeden önce aşağıdaki tabloya bak: hangi
-# (hafta,tip) tavana dayanmış, kaçında tanık BUFFER'ı ezmiş.
-TIP_FAZLA_SERT   = True      # False → tavan kurulmaz (eski davranış)
-# ── TAVAN ÖLÇÜSÜ: EN KALABALIK gün (2026-09-21) ─────────────────────
-# Takımın sahaya çıkan kişisi günden güne değişir (izin/off_t2). İki kural FARKLI
-# kötü senaryoya karşı korur, o yüzden FARKLI gün ölçüsü ister:
-#   ALT SINIR (zirveyi karşıla) → EN DAR gün       : eksik riski en izinli günde
-#   ③ TAVAN (fazlayı kes)       → EN KALABALIK gün : fazla riski herkesin geldiği gün
-# BULGU (gerçek koşu, 2026-09-17, W38): 07:30 zirve 13, tavan 13+12=25. İki takım
-# en dar günlerine göre sayıldığı için "sığıyor" göründü, ikisi de 07:30'a kondu;
-# normal günde 23 kişi sahaya çıktı (talep 13) ve aynı gün 15:00'te 21 eksik kaldı.
-# Eskiden iki kural da EN DAR günü kullanıyordu — alt sınır için doğru, tavan için ters.
-# TANIK AYNI ÖLÇÜDE (H19C `_greedy_fazla_ust`): tavan hiçbir zaman açgözlü tahsisin
-# en-kalabalık-gün fazlasının altına inmez → açgözlü çözüm tavanı hep sağlar, kural
-# çözümsüzlük yapamaz. "En küçük takım sığsın" tabanı ve ④ min-takım sayımı da aynı
-# ölçüye geçti (üçü aynı dili konuşmalı).
-TIP_FAZLA_KALABALIK_GUN = True   # False → eski davranış (tavan da en dar gün)
-TIP_FAZLA_BUFFER = None      # tip, haftanın zirve talebini en fazla bu kadar aşabilir.
-                             # None → ORTALAMA TAKIM × 0.75'ten TÜRETİLİR.
-                             # Sabit 5'ti; 17 kişilik takımlarla imkânsızdı: bir tipe
-                             # 2. takımı koymak zirveyi 17 aşıyor, tavan 5'te kesiyor
-                             # → o tipte ZORUNLU açık üretiliyordu. Türetince tavan
-                             # takım granülerliğine oturur ve gelecek ay kendini ayarlar.
-                             # Tanık (açgözlü) bundan büyükse tanık geçerli.
-W_TIP_FAZLA = 0              # ESKİ YUMUŞAK CEZA — KAPALI (yukarıdaki gerekçe).
-                             # 0 → terim kurulmaz. Sert tavanla birlikte
-                             # açmanın anlamı yok: tavan zaten üstünü kesiyor.
-TIP_FAZLA_SERBEST = None     # yumuşak ceza açıksa serbest bölge.
-                             # None → ortalama takım boyu / 2.
-
-# ── ② AÇIK: SERT BÜTÇE → KONVEKS CEZA (v4.2) ─────────────────────────
-# ÖLÇÜLDÜ (2026-09, fizibilite testleri):
-#   TIP_KAPASITE_SERT=False  → FİZİBİLİTE MODU saniyelerde OPTIMAL
-#   TIP_FAZLA_SERT=False     → hâlâ UNKNOWN
-#   ⇒ engel ③ tavan DEĞİL, ② `Σ açık ≤ BÜTÇE` sert kısıtıydı.
-#
-# SERT BÜTÇENİN İKİ AYRI HASTALIĞI:
-#   (a) TOPLAMA bakıyor, DAĞILIMA değil → "8 tipte 4'er açık" ile "1 tipte 32
-#       açık" bütçe için AYNI. Yani yığılmayı hiç caydırmıyordu.
-#   (b) Bütçe darsa İYİ dağılımı da yasaklıyor → çözüm hiç bulunamıyor.
-#       Bu ay tam olarak (b) oldu: BÜTÇE 30, ama takım bölünmezliği yüzünden
-#       EN İYİ dağılımın açığı bile bunun üstünde.
-#
-# YENİ: açık artık YASAK DEĞİL, ama tip başına KONVEKS cezalı:
-#       ceza = W_TIP_ACIK2 × max(0, açık[hafta,tip] − TIP_ACIK_SERBEST)
-#   8 tipte 4'er (toplam 32) → 0 puan      ← model bunu seçer
-#   1 tipte 32   (toplam 32) → 600 puan
-# Aynı toplam, çok farklı fiyat → gradyan DAĞILIMDA.
-#
-# NEDEN BU SEFER YUMUŞAK ÇALIŞIR (W_TIP_FAZLA denemesi başarısızdı):
-#   O ceza DOĞRUSALDI. `Σfazla − Σaçık = etkin üye − Σzirve` SABİT olduğu için
-#   doğrusal ceza sabit ekliyordu → 33'ü tek tipe yığmak ile 5'er dağıtmak AYNI
-#   fiyat, gradyan yok. KONVEKS ceza dağılımı cezalandırır, dağılım sabit değil
-#   → gerçek gradyan. (H10 coverage'da aynı kalıp zaten çalışıyor: SERBEST/AGIR.)
-#   Doğrusal kısım bilinçli olarak KURULMUYOR — sadece gürültü ekler.
-TIP_ACIK_SERT    = False     # True → eski davranış (Σ açık ≤ BÜTÇE, SERT).
-                             # False → bütçe kurulmaz, yerine konveks ceza.
-                             # Bütçe tablosu yine basılır (referans olarak).
-W_TIP_ACIK2      = 25        # SERBEST'i aşan her açık kişi başına ceza.
-                             # W_EKSIK_HI ile aynı: "bir tipte serbest payı aşan
-                             # kişi, bir kişilik coverage eksiği kadar pahalı".
-                             # 0 → terim kurulmaz (ne bütçe ne ceza = H19D alt
-                             # sınırı işlevsiz kalır, sadece ③ tavan çalışır).
-TIP_ACIK_SERBEST = None      # tip başına BEDAVA açık payı.
-                             # None → ORTALAMA TAKIM / 2'den türetilir.
-                             # Gerekçe: takım bölünemez → her tipte kaçınılmaz
-                             # yuvarlama israfı ≈ yarım takım. O kadarı bedava,
-                             # üstü yığılma sayılır.
-
-# ── ④ MİN TAKIM: talebi olan tip takımsız kalamaz (SERT) — V5'te EKLENDİ ──
-# GÖZLEM (2026-09-14, H25D röntgeni): 07:30 tipinde talep 13, atanan 3 ve o hafta
-# o tipe atanan takım sayısı SIFIR. Gelen 3 kişi, takımının tipini fiziksel olarak
-# yapamadığı için ayrılan (H19 sapan) üyelerdi — yani kova "kazayla" doldu.
-# Konveks açık cezası (②) bunu engelleyememişti: açık 13, serbest pay ~8 →
-# cezalanan kısım yalnız 5 kişi. Tip tamamen boş bırakmak fiilen ucuzdu.
-#
-# KURAL: hafta içi talebi olan her (hafta, tip) için  Σ y[takım, hafta, tip] ≥ 1.
-# H10'daki MIN_KOVA ("talebi olan her kova ≥1 kişi") kuralının y SEVİYESİNDEKİ
-# karşılığı. Kişi seviyesindeki hâli yetmiyordu çünkü kovayı sapan üyeler
-# dolduruyor, asıl karar (takım→tip tahsisi) dokunulmadan kalıyordu.
-#
-# NEDEN SERT: bu modelde y üzerinde YUMUŞAK terim çalışmıyor (W_TIP_FAZLA denemesi
-# 329→387 yaptı, gerekçe yukarıda). Sertlik aramayı doğru bölgeye zorluyor.
-#
-# FAZLA KABUL EDİLİYOR (kullanıcı kararı, 2026-09-16): 13 talebe 16 kişilik takım
-# gelirse 3 fazla olur — "fazla olsun, şu anki eksikten iyi". Fazlayı ③ tavan
-# sınırlar; bu yüzden kural SADECE tavana SIĞAN takımları sayar (ikisi çakışmasın).
-#
-# FİZİBİLİTE: her tipe ayrı bir takım gerekiyor ve bir takım haftada TEK tip
-# seçiyor → (tip ↔ takım) EŞLEŞMESİ gerekir. Aşağıdaki ön kontrol bunu hafta hafta
-# ikili eşleşme (Kuhn) ile ÖLÇER ve eşleşmeyen tipi basar; kısıt kurulmadan önce
-# uyarı alırsın. Çalışabilen/sığan takımı olmayan tipte kısıt hiç kurulmaz.
-TIP_MIN_TAKIM      = True    # False → kural kurulmaz (v4 davranışı)
-TIP_MIN_TAKIM_ESIK = 1       # zirve talebi bu sayıdan AZ olan tipe takım zorlanmaz.
-                             # 1 → talebi olan her tip (kullanıcı isteği).
-                             # Yükseltmek (ör. 5) çok küçük tipleri muaf tutar:
-                             # 4 kişilik bir tip için 16 kişilik takım harcamak
-                             # 12 kişiyi başka tipten çeker.
+# SABİT ANAHTARLAR — AYAR DEĞİL, sadece geri dönüş için duruyor (değiştirme):
+TIP_KAPASITE_SERT       = True   # False → H19D hiç kurulmaz (v3 öncesi)
+TIP_FAZLA_SERT          = True   # False → ③ tavan kurulmaz
+TIP_FAZLA_KALABALIK_GUN = True   # False → ③ tavan eski ölçü (en dar gün)
 
 # ── türetilen paylar (takım boyuna oranlı → gelecek ay kendini ayarlar) ──
 _ort_takim = len(AGENTS) / max(1, df_tam["takim"].nunique())      # ortalama takım boyu
-# yumuşak fazla cezası için serbest bölge (W_TIP_FAZLA=0 iken kullanılmaz)
-_tf_serbest = (TIP_FAZLA_SERBEST if TIP_FAZLA_SERBEST is not None
-               else max(1, round(_ort_takim / 2)))
 _tf_buffer  = (TIP_FAZLA_BUFFER if TIP_FAZLA_BUFFER is not None
                else max(1, round(_ort_takim * 0.75)))             # ③ tavan payı
 _ta_serbest = (TIP_ACIK_SERBEST if TIP_ACIK_SERBEST is not None
                else max(1, round(_ort_takim / 2)))                # ② konveks serbest
 print(f"H19D türetilen paylar: ortalama takım {_ort_takim:.1f} kişi  →  "
       f"③ tavan payı {_tf_buffer}  |  ② açık serbest {_ta_serbest}  "
-      f"(② {'SERT bütçe' if TIP_ACIK_SERT else f'KONVEKS ceza, ağ. {W_TIP_ACIK2}'})")
+      f"(② konveks ceza, ağ. {W_TIP_ACIK2})")
 
 tip_acik = {}                                      # (hafta, tip) → açık IntVar
-tip_fazla = {}                                     # (hafta, tip) → fazla IntVar (yumuşak)
-_n_fazla19d = 0                                    # kurulan fazla-ceza terimi sayısı
 _n_acik_ceza = 0                                   # kurulan KONVEKS açık cezası terimi
 _tavan19d = []                                     # (hafta, tip, zirve, tavan, kaynak)
 _mt19 = []                                         # ④ (hafta, tip, zirve, sığan takım, en küçük)
 _mt19_atla = []                                    # ④ kural kurulamayan (hafta, tip, zirve, n, sebep)
 _mt19_uygun = {}                                   # ④ hafta → {tip: {sığan takım}} (ön kontrol)
-_19d_ozet = []                                   # (hafta, Σzirve, üye, yapısal, açgözlü, bütçe)
+_19d_ozet = []                                     # (hafta, Σzirve, etkin üye, yapısal, açgözlü)
 if TIP_KAPASITE_SERT and takim_tip:
     # ETKİN boyut (H19C'de kuruldu): o haftanın en dar hafta içi gününde müsait üye.
     # Ham `len(uyeler)` izinlileri de sayıyordu → tipe yeterli takım atansa bile
@@ -3041,14 +2912,10 @@ if TIP_KAPASITE_SERT and takim_tip:
         if not _zirve19d:
             continue
         _yapisal = max(0, sum(_zirve19d.values()) - _uye_top)
-        # PAY: takım bölünmezliğinden doğan KAÇINILMAZ yuvarlama israfı.
-        # Tip sayısına bağlı — sezgiselin performansına DEĞİL.
-        _pay19d = TIP_PAY_TIP_BASI * len(_zirve19d)
-        _butce = max(_greedy.get(_wk, 0), _yapisal + _pay19d) + TIP_ACIK_TOLERANS
         # tanık: açgözlünün tip fazlaları — tavanla AYNI ölçüde (aşağıdaki _kap_ust)
         _gf19d = (_greedy_fazla_ust if TIP_FAZLA_KALABALIK_GUN
                   else _greedy_fazla).get(_wk, {})
-        _acik_var, _kt19 = [], []
+        _kt19 = []
         _acik_tip = []                              # (tip, açık değişkeni) — konveks ceza için
         for _t, _z in _zirve19d.items():
             # TİPE DUYARLI kapasite: takımın o tipte FİİLEN çalışabilen üyesi
@@ -3062,7 +2929,6 @@ if TIP_KAPASITE_SERT and takim_tip:
             _av = model.NewIntVar(0, _z, f"tipacik_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
             _kt19.append(model.Add(_kap + _av >= _z))   # zirve talebi karşıla (ya da açık yaz)
             tip_acik[(_wk, _t)] = _av
-            _acik_var.append(_av)
             _acik_tip.append((_t, _av))
             # ── SERT TAVAN: zirveyi TAVAN'dan fazla aşamaz ──────────────
             # Tanık (açgözlü) tavanı belirlerse kısıt o tipte gevşer ama ASLA
@@ -3112,21 +2978,11 @@ if TIP_KAPASITE_SERT and takim_tip:
                                        (f"hepsi tavanı aşıyor (tavan {_z + _tv}, "
                                         f"en küçük takım {_min_kat})" if _kat19
                                         else "o tipte çalışabilen takım YOK")))
-            # ── FAZLA (eski, yumuşak): W_TIP_FAZLA=0 iken kurulmaz ──────
-            if W_TIP_FAZLA:
-                _fv = model.NewIntVar(0, len(AGENTS),
-                                      f"tipfazla_{_wk[0]}{_wk[1]}_{_t}".replace(":", ""))
-                model.Add(_fv >= _kap - _z - _tf_serbest)   # ReLU
-                tip_fazla[(_wk, _t)] = _fv
-                amac.append(W_TIP_FAZLA * _fv)
-                _n_fazla19d += 1
-        # ── ② AÇIK: SERT BÜTÇE ya da KONVEKS CEZA (TIP_ACIK_SERT) ────
-        if TIP_ACIK_SERT:
-            _kt19.append(model.Add(sum(_acik_var) <= _butce))   # eski: SADECE kaçınılmaz kadar
-        elif W_TIP_ACIK2:
-            # Yasak YOK → çözüm garantili. Ama tip başına SERBEST payı aşan açık
-            # cezalı → yığılma pahalı, yayılma bedava. Ceza TİP BAŞINA (toplama
-            # değil) çünkü ayırt edici olan dağılım; toplam ~sabit.
+        # ── ② AÇIK: KONVEKS CEZA ─────────────────────────────────────
+        # Yasak YOK → çözüm garantili. Ama tip başına SERBEST payı aşan açık
+        # cezalı → yığılma pahalı, yayılma bedava. Ceza TİP BAŞINA (toplama
+        # değil) çünkü ayırt edici olan dağılım; toplam ~sabit.
+        if W_TIP_ACIK2:
             for _t2, _av2 in _acik_tip:
                 _fz = model.NewIntVar(0, len(AGENTS),
                                       f"tipacikfz_{_wk[0]}{_wk[1]}_{_t2}".replace(":", ""))
@@ -3135,35 +2991,26 @@ if TIP_KAPASITE_SERT and takim_tip:
                 _n_acik_ceza += 1
         _tes_ekle(f"H19D_tip_kapasite_{_wk[0]}W{_wk[1]}", *_kt19)
         _19d_ozet.append((_wk, sum(_zirve19d.values()), _uye_top,
-                          _yapisal, _greedy.get(_wk, 0), _butce, _pay19d))
+                          _yapisal, _greedy.get(_wk, 0)))
 
 if _19d_ozet:
-    print(f"tip kapasite kısıtı [SERT]: {len(tip_acik)} (hafta,tip) açık değişkeni, "
-          f"{len(_19d_ozet)} hafta  (ağırlık YOK)")
-    print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal':>8} "
-          f"{'pay':>5} {'taban':>6} {'açgözlü':>8} {'BÜTÇE':>6}  seçilen")
+    print(f"tip kapasite kuralları: {len(tip_acik)} (hafta,tip), {len(_19d_ozet)} hafta")
+    print(f"    {'hafta':>10} {'Σzirve':>7} {'etkin üye':>10} {'yapısal açık':>13} "
+          f"{'açgözlü açık':>13}")
     print(f"    (etkin üye = izin/off_t2 düşülmüş; KAPASİTE ayrıca TİPE DUYARLI: "
           f"kıdemsiz geceye, sabahçı geç tipe 0 sayılır)")
-    for _wk, _z, _u, _y, _g, _b, _p in _19d_ozet:
-        _sec = "TABAN" if (_y + _p) >= _g else "açgözlü"
-        _im = "  ← tip açığı YASAK" if _b == 0 else ""
-        print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>8} "
-              f"{_p:>5} {_y + _p:>6} {_g:>8} {_b:>6}  {_sec}{_im}")
-    print(f"  BÜTÇE = max( açgözlü , yapısal + PAY ) + TOLERANS({TIP_ACIK_TOLERANS})")
-    print(f"  PAY = {TIP_PAY_TIP_BASI} × tip sayısı → sezgiselden BAĞIMSIZ taban.")
-    if TIP_ACIK_SERT:
-        print(f"\n  ② AÇIK KISITI: SERT BÜTÇE (TIP_ACIK_SERT=True) — Σ açık ≤ BÜTÇE")
-        print(f"     ⚠ Bu kısıt TOPLAMA bakar, DAĞILIMA değil: '8 tipte 4'er' ile")
-        print(f"       '1 tipte 32' onun için AYNI. Ayrıca bütçe darsa İYİ dağılımı")
-        print(f"       da yasaklar → UNKNOWN. 2026-09'da tam olarak bu oldu.")
-    else:
-        print(f"\n  ② AÇIK KISITI: KONVEKS CEZA (sert bütçe KAPALI)")
-        print(f"     ceza = {W_TIP_ACIK2} × max(0, açık[hafta,tip] − {_ta_serbest})")
-        print(f"     {_n_acik_ceza} (hafta,tip) ceza terimi  |  serbest pay "
-              f"{_ta_serbest} = ortalama takım({_ort_takim:.1f}) / 2")
-        print(f"     → açık YASAK DEĞİL (çözüm garantili), ama tip başına serbest")
-        print(f"       payı aşınca pahalı. Aynı TOPLAM, farklı DAĞILIM = farklı fiyat.")
-        print(f"     Yukarıdaki BÜTÇE sütunu artık BAĞLAYICI DEĞİL — sadece referans.")
+    for _wk, _z, _u, _y, _g in _19d_ozet:
+        print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>7} {_u:>10} {_y:>13} {_g:>13}")
+    print(f"    yapısal açık = max(0, Σzirve − etkin üye) → hiçbir dağılımla kapanmaz")
+    print(f"    açgözlü açık = H19C ipucunun bıraktığı; çözücünün sonucu (H25B [3]) "
+          f"bundan iyi olmalı")
+    print(f"\n  ② AÇIK CEZASI (konveks): ceza = {W_TIP_ACIK2} × max(0, açık[hafta,tip] "
+          f"− {_ta_serbest})")
+    print(f"     {_n_acik_ceza} (hafta,tip) ceza terimi  |  serbest pay {_ta_serbest} "
+          + ("(elle verildi)" if TIP_ACIK_SERBEST is not None
+             else f"= ortalama takım({_ort_takim:.1f}) / 2"))
+    print(f"     → açık YASAK DEĞİL (çözüm garantili); tip başına serbest payı aşınca")
+    print(f"       pahalı. Aynı TOPLAM, farklı DAĞILIM = farklı fiyat → yayar.")
     # ── TİP FAZLA TAVANI ─────────────────────────────────────────────
     from collections import Counter as _Counter19d       # hücre tek başına koşsun
     if _tavan19d:
@@ -3266,14 +3113,10 @@ if _19d_ozet:
     else:
         print(f"\n  ④ min takım: KAPALI (TIP_MIN_TAKIM=False) → v4 davranışı: "
               f"bir tip hiç takım almadan boş kalabilir")
-    if W_TIP_FAZLA:
-        print(f"  y-seviyesi YUMUŞAK fazla cezası: {_n_fazla19d} terim, "
-              f"ağırlık {W_TIP_FAZLA}, serbest {_tf_serbest}  "
-              f"(sert tavan varken gereksiz)")
     if not _greedy:
-        print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, bütçe sadece yapısal açık.")
-        print(f"    Takım bölünmezliği yüzünden INFEASIBLE gelebilir → TAKIM_HINT=True")
-        print(f"    yap ya da TIP_ACIK_TOLERANS'ı artır.")
+        print(f"  ⚠ H19C ipucu KAPALI → açgözlü tanık yok, ③ tavan yalnız BUFFER'a")
+        print(f"    dayanıyor; takım bölünmezliği yüzünden INFEASIBLE gelebilir →")
+        print(f"    TAKIM_HINT=True yap (sabit anahtar, kapatılmamalı).")
 else:
     print(f"tip kapasite kısıtı: KAPALI "
           f"({'TIP_KAPASITE_SERT=False' if not TIP_KAPASITE_SERT else 'takim_tip boş'})")
@@ -3676,8 +3519,7 @@ print(f"haftada aynı vardiya kısıtı: {n} (agent × hafta)  [göstergeler H19
 #   hamile/süt agent daha baştan ihlalde olurdu (H14: hafta sonu çalışamaz).
 #   Yumuşak ceza (Temmuz'u SAYAN) aynen duruyor → sınır haftasında tercih olarak
 #   çalışmaya devam ediyor, ama çözümsüzlük yaratmıyor.
-HAFTA_OFF_SERT = True              # False → sadece eski yumuşak ceza
-MAX_HAFTA_OFF  = 2                 # bir ISO haftada en fazla kaç OFF (off_t hariç)
+# AYARLAR H0'da: HAFTA_OFF_SERT, MAX_HAFTA_OFF
 
 n1, n1_tas, n1_sert = 0, 0, 0
 _off_kapasite = {}                 # agent → Σ haftalık off tavanı (fizibilite kontrolü)
@@ -4107,7 +3949,7 @@ else:
 
 
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
-COZUM_SURE_SN = 2700               # süre sınırı (sn) — fiilen kullanılan değer.
+# COZUM_SURE_SN H0'da.
                                    # NOT: süre SORUN DEĞİL. 2700 sn'de de çözücü
                                    # takım-tip tahsisini iyileştiremiyor (gap %72,
                                    # 10 (hafta,tip) kombinasyonu açık kalıyor).
@@ -4142,7 +3984,7 @@ solver.parameters.num_search_workers = 16          # paralel çekirdek (CPU'ya g
 #     4 = en agresif (orbital sabitleme + arama sırasında kullanım)
 #   Riski yok: simetri kırma çözüm KÜMESİNİ daraltmaz, sadece birbirinin
 #   aynı olan çözümlerden birini seçer. Optimal değer değişmez.
-SIMETRI_SEVIYE = 4                                 # 2 = OR-Tools varsayılanı
+SIMETRI_SEVIYE = 4         # SABİT — ayar DEĞİL (2 = OR-Tools varsayılanı)
 solver.parameters.symmetry_level = SIMETRI_SEVIYE
 
 # İKİNCİ KALDIRAÇ (şimdilik KAPALI, varsayılan davranış): simetriyi LP
@@ -4173,7 +4015,7 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print(f"   1) FIZIBILITE_MODU=True ile koş (amaç fonksiyonu kapanır) →")
         print(f"      çözüm bulunursa model fizibil, sorun ARAMA; bulunmazsa kurallar sıkı.")
         print(f"   2) Süreyi artır (COZUM_SURE_SN) — ilk çözümü bulmak zaman alıyor olabilir.")
-        print(f"   3) Yeni sert kuralları gevşet: TIP_ACIK_TOLERANS=2, MESAI_TOL=2.")
+        print(f"   3) Yeni sert kuralları gevşet: TIP_FAZLA_BUFFER büyüt, MESAI_TOL=2.")
         print(f"   NOT: TESHIS_MODU açıkken varsayım literalleri aramayı YAVAŞLATIR →")
         print(f"        UNKNOWN alıyorsan teşhis modunu KAPAT.")
         print(f"   Aşağıdaki tarama yine de basılıyor ama UNKNOWN'da BAĞLAYICI DEĞİL.")
@@ -4189,7 +4031,7 @@ if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                 for _s in _suclu:
                     print(f"     • {_s}")
                 print(f"   → Bu grupların HEPSİ birden sağlanamıyor. Birini gevşet:")
-                print(f"     H19D → TIP_ACIK_TOLERANS artır / TIP_KAPASITE_SERT=False")
+                print(f"     H19D → TIP_FAZLA_BUFFER büyüt / TIP_MIN_TAKIM=False")
                 print(f"     H20E → MESAI_TOL artır (2 = kısıt ölü)")
                 print(f"     H20B → MAX_HAFTA_OFF artır / HAFTA_OFF_SERT=False")
                 print(f"     H18  → CIFT_HS_OFF=False   |   H16D → MAX_AKSAM_HAFTA artır")
