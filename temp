@@ -6154,6 +6154,12 @@ LEJANT = [
      "H7B'nin verdiği KİŞİSEL W_OFF_T (bant 12-24). YÜKSEK = o günü çalıştırmak "
      "pahalı = izni ÖNCE onaylanır. Hücresi KIRMIZI olan (off_t verilememiş) kişinin "
      "buradaki değeri düşükse kural doğru çalışmış: geçmişte çok istemiş"),
+    ("gecmis_mesai_saat", None, None,
+     "Bu aydan ÖNCE yıl içinde kullanılan fazla mesai SAATİ (df_mesai_saat). "
+     "BOŞ = tabloda kaydı yok (0 saat sayıldı). Kolon df_mesai_saat yoksa hiç basılmaz"),
+    ("yillik_mesai_blok", None, None,
+     "1 = gecmis_mesai_saat, YILLIK_MESAI['saat_tavan'] eşiğine ulaştığı için bu ay "
+     "MESAİ YAZILMADI (H20F). Hafta sonu çalıştıysa o gün NORM'dur. Kural kapalıysa hep 0"),
     ("--- gun_ozet SAYFASI ---", None, None, ""),
     ("fazla_fark",        None, None,
      "O GÜN ihtiyaçtan FAZLA atanan kişi-gün = Σ max(0, kova farkı). Kişi sahada "
@@ -6280,6 +6286,12 @@ _ozet_kol = [c for c in roster_2.columns if c not in _gun and c != "takim"]
 # yeniden kuruluyor; df_kidem yoksa kolonlar hiç eklenmiyor.
 _kidem_xl = (dict(zip(df_kidem["agent_user_code"], df_kidem["kidem_ay"]))
              if df_kidem is not None else {})
+# YILLIK MESAİ (H20F): kıdemdeki gibi df_mesai_saat'ten yeniden kuruluyor (H20F
+# atlanmış olabilir). Bloklananlar H20F'nin kendi listesinden okunur → kural
+# kapalıysa (enabled=False) ya da H20F koşmadıysa hepsi 0.
+_mesai_saat_xl = (dict(zip(df_mesai_saat["agent_user_code"], df_mesai_saat["mesai_saat"]))
+                  if df_mesai_saat is not None else None)
+_ym_blok_xl = set(globals().get("_ym_blok", []) or [])
 
 # ÖNCEKİ AY KOLONLARI: TASIMA_GUNLER değil ONCEKI_GUNLER (= PENCERE ∪ TASIMA).
 # TASIMA sadece sınır ISO haftasının önceki aya düşen günleri → ay SALI
@@ -6324,6 +6336,13 @@ for _a in _agents_sirali:
     _r["gecmis_off_oran"] = (round(float(_go29), 2)
                              if _go29 is not None and pd.notna(_go29) else None)
     _r["gecmis_off_agirlik"] = w_offt.get(_a)           # boş = H7B kapalı (sabit W_OFF_T)
+    # YILLIK MESAİ (H20F): bu aydan ÖNCE yıl içinde kullanılan mesai saati +
+    # bu yüzden bu ay mesaisi kapatıldı mı. df_mesai_saat yoksa kolon eklenmez.
+    if _mesai_saat_xl is not None:
+        _ms29 = _mesai_saat_xl.get(_a)
+        _r["gecmis_mesai_saat"] = (round(float(_ms29), 1)
+                                   if _ms29 is not None and pd.notna(_ms29) else None)
+        _r["yillik_mesai_blok"] = int(_a in _ym_blok_xl)
     for _k in ("sut_izni", "hamile", "mesai_kalamaz"):
         _r[_k] = roster_2.at[_a, _k]
     for _d in _ONC_KOL:                                 # ÖNCEKİ AY (salt okunur)
