@@ -9,8 +9,6 @@ AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
 `python3 agent_detayli_model_v6.py` ile baştan sona çalışır.
-Salt okunur teşhis hücreleri (eski H19F/H24B/H25B/H25C/H25D/H30/H32) ayrı
-dosyada: agent_detayli_teshis_v6.py — bu dosya koştuktan sonra AYNI oturumda.
 
 KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
@@ -3406,6 +3404,126 @@ else:
         print(f"    ✓ gece sert bandı kilit sonrası da dolabiliyor")
 
 
+# %% [HÜCRE 19F] — GECE KAPASİTE RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ─
+# NE ZAMAN: model INFEASIBLE ya da UNKNOWN döndüğünde, 45 dakika beklemeden
+# "gece kovaları gerçekten dolabiliyor mu?" sorusunu cevaplar. Hücreleri
+# 0'dan buraya kadar koşmak yeterli — H21 (çöz) çalıştırılmaz.
+#
+# NEDEN GECE ÖZEL: hafta içi gece kovalarında SERT band var (talep ± GECE_BUFFER).
+# Alt sınırı dolduracak kadar UYGUN agent yoksa model çözümsüz olur ve bunu
+# hiçbir ağırlık kurtaramaz. Gündüz kovalarında band yok (yumuşak ceza) →
+# orada eksik kalır ama çözüm yine bulunur.
+#
+# ÜÇ KADEME — üstteki sorunu açıklıyorsa alttakine bakmaya gerek yok:
+#   [1] KİM YAZILAMAZ  — havuz ne kadar daraldı, hangi kural daraltmış
+#   [2] KOVA BAZLI     — her gece kovası tek tek: uygun agent ≥ alt sınır mı
+#   [3] HAFTA BAZLI    — takım bütünlüğü (H19) hesaba katılınca yeterli mi
+_gece_t = set(GECE_BASLANGIC)                       # {"00:00", "24:00"}
+_bilinmeyen_l = globals().get("_bilinmeyen", [])    # H14B'den (yoksa boş)
+if not isinstance(_bilinmeyen_l, (list, tuple, set)):   # H22 aynı adı INT olarak
+    _bilinmeyen_l = []                                  # kullanıyor → eski koşudan
+                                                        # kalmışsa yanlış okumayalım
+
+print("=" * 78)
+print("H19F — GECE KAPASİTE RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
+print("=" * 78)
+
+# ── [1] HAVUZ: kim geceye yazılamaz, neden ───────────────────────────
+_gece_yazilabilir = [a for a in AGENTS
+                     if a not in junior_agents and a not in sabah_agents]
+print(f"\n[1] GECEYE YAZILABİLİR HAVUZ")
+print(f"    toplam agent                       : {len(AGENTS):>5}")
+print(f"    − kıdemsiz/bilinmeyen (H14B)       : {len(junior_agents):>5}"
+      + (f"   [bunun {len(_bilinmeyen_l)}'i KIDEMİ BİLİNMEYEN, "
+         f"BILINMEYEN_KIDEMSIZ={BILINMEYEN_KIDEMSIZ}]"
+         if _bilinmeyen_l else ""))
+print(f"    − sabahçı (H13, bitiş ≤20:00)      : "
+      f"{len(sabah_agents - junior_agents):>5}")
+print(f"    = geceye yazılabilir               : {len(_gece_yazilabilir):>5}")
+if _bilinmeyen_l and BILINMEYEN_KIDEMSIZ:
+    print(f"    → BILINMEYEN_KIDEMSIZ=False yapılsa havuz "
+          f"{len(_gece_yazilabilir) + len(_bilinmeyen_l)} olurdu "
+          f"(+{len(_bilinmeyen_l)}). Aşağıdaki tablolarda bu fark kritikse")
+    print(f"      ya bayrağı kapat ya da o agentların kıdemini df_kidem'e gir.")
+
+# ── [2] KOVA BAZLI: her gece kovası sert bandın altını dolduruyor mu ──
+# "uygun" = o kovada FİİLEN çalışabilen agent (_kova_calisabilir: izin/off_t2 →
+# değişken yok, H13 sabahçı, H14B kıdem, H14 hamile hafta sonu). Bu bir ÜST
+# sınır: takım bütünlüğü (H19) ve 11 saat/7 gün taşıması daha da daraltabilir.
+_kova_satir, _kova_sorun = [], []
+for (_ds, _v), _kisi in talep.items():
+    if saat[(_ds, _v)][0] not in _gece_t:
+        continue
+    _d = dt.date.fromisoformat(_ds)
+    _hs = _d.weekday() >= 5
+    _alt = _kisi - (HS_TOL if _hs else GECE_BUFFER)
+    _uy = sum(1 for a in AGENTS if _kova_calisabilir(a, _ds, _v))
+    _kova_satir.append((_ds, _d.weekday(), _kisi, _alt, _uy, _uy - _alt))
+    if _uy < _alt:
+        _kova_sorun.append((_ds, _kisi, _alt, _uy))
+_kova_satir.sort(key=lambda r: r[5])                # en dar önce
+print(f"\n[2] KOVA BAZLI  ({len(_kova_satir)} gece kovası; "
+      f"alt sınır = talep − {GECE_BUFFER} hafta içi / − {HS_TOL} hafta sonu)")
+print(f"    {'tarih':>12} {'gün':>4} {'talep':>6} {'alt sınır':>10} "
+      f"{'uygun agent':>12} {'pay':>6}")
+for _ds, _wd, _k, _alt, _uy, _pay in _kova_satir[:12]:
+    print(f"    {_ds:>12} {DAY_TR[_wd]:>4} {_k:>6} {_alt:>10} {_uy:>12} "
+          f"{_pay:>+6}{'   ⚠ DOLMAZ' if _pay < 0 else ''}")
+if len(_kova_satir) > 12:
+    print(f"    ... ({len(_kova_satir) - 12} kova daha; en dar 12 gösterildi)")
+if _kova_sorun:
+    print(f"    ⚠ {len(_kova_sorun)} kovada uygun agent ALT SINIRIN ALTINDA →")
+    print(f"      model MATEMATİKSEL OLARAK çözümsüz. Tek başına bu yeter.")
+else:
+    print(f"    ✓ her gece kovasında uygun agent alt sınırı karşılıyor")
+    print(f"      (bu GEREK şart; yeter şart değil — [3]'e bak)")
+
+# ── [3] HAFTA BAZLI: takım bütünlüğü hesaba katılınca ─────────────────
+# H19: gece kovası ancak takımı O HAFTA geceye atanmış üyelerle dolar. Takım
+# bölünemez (ayrılma yalnız fiziksel imkânsızlıkta) → kapasite takım
+# boyutlarına YUVARLANIR. Bir takımın geceye katkısı = o tipte çalışabilen
+# üye sayısı (takim_etkin_tip, H19C).
+print(f"\n[3] HAFTA BAZLI  (H19 takım bütünlüğü dahil)")
+print(f"    {'hafta':>10} {'zirve gece talep':>17} {'Σ gece-uygun üye':>17} "
+      f"{'gereken takım':>14}")
+_h_sorun = 0
+for _wk in sorted(haftalar):
+    _hi = [g for g in haftalar[_wk] if dt.date.fromisoformat(g).weekday() < 5]
+    if not _hi:
+        continue
+    _gt = [t for t in hafta_tipler.get(_wk, []) if t in _gece_t]
+    if not _gt:
+        continue
+    _zirve = max(sum(talep[(g, v)] for v in gun_vardiyalari[g]
+                     for _t in _gt
+                     if (g, v) in talep and saat[(g, v)][0] == _t) for g in _hi)
+    # takımların gece katkısı, büyükten küçüğe → zirveyi kaç takım kapatır
+    _kat = sorted((takim_etkin_tip.get((T, _wk, _t), 0)
+                   for T in takimlar for _t in _gt), reverse=True)
+    _top, _n = 0, 0
+    for _c in _kat:
+        if _top >= _zirve:
+            break
+        _top += _c
+        _n += 1
+    _yeter = _top >= _zirve
+    if not _yeter:
+        _h_sorun += 1
+    print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_zirve:>17} {sum(_kat):>17} "
+          f"{(str(_n) + ' takım') if _yeter else 'YETMİYOR':>14}"
+          f"{'   ⚠' if not _yeter else ''}")
+if _h_sorun:
+    print(f"    ⚠ {_h_sorun} haftada TÜM takımlar geceye verilse bile zirve talep")
+    print(f"      karşılanmıyor → gece bandı kırılmak zorunda (çözümsüzlük).")
+else:
+    print(f"    ✓ her haftada yeterli takım kapasitesi var")
+print(f"    NOT: 'gereken takım' o haftanın gece zirvesini kapatmak için EN AZ")
+print(f"         kaç takımın geceye gitmesi gerektiği. Sayı büyükse gündüz")
+print(f"         tiplerine takım kalmaz → gündüz eksiği artar (ama çözümsüzlük")
+print(f"         yapmaz, orada band yok).")
+print("=" * 78)
+
+
 # %% [HÜCRE 20] — HAFTADA AYNI VARDİYA (agent hafta boyu tek tip) ──────
 # Bir agent bir ISO-hafta içinde çalıştığı günlerde HEP aynı vardiyada olmalı
 # (Pzt 09:00 ise Salı 15:00 olamaz). Vardiya tipi = başlangıç saati.
@@ -4537,6 +4655,80 @@ print("en çok bölünen 10 (takım,gün, hafta içi):")
 print(bolunme[bolunme > 1].sort_values(ascending=False).head(10))
 
 
+# %% [HÜCRE 24B] — TAKIM BÖLÜNME + GEÇ TİP ADALETİ (SALT OKUNUR) ───────
+# SORU (çıktıdan gözlendi): "hamile/süt üyeli takımlar hep sabaha yazılmış,
+# akşam/gece hep aynı takımlara kalıyor — talep mi böyle gerektiriyor yoksa
+# model bölünmekten mi kaçınıyor?"
+# MEKANİZMA: hamile/süt agentlar sabahçı → geç tip onlara YASAK (tip_yasak).
+# Takım geç tipe giderse o üyeler ayrılır ve her biri W_TAKIM ödetir. 3 üyeli
+# takım haftada 3×W_TAKIM, temiz takım 0 → model temiz takımı seçer.
+# Bu hücre iki şeyi ölçer:
+#   [1] BÖLÜNME YAPISI — (takım,hafta) kaç farklı tipe dağılmış?
+#       1 tip = bölünme yok, 2 tip = "tek takım 2 parça" (istenen yapı),
+#       3+ tip = dağılmış → ayrılanları tek tipe toplayan kısıt gerekebilir.
+#   [2] GEÇ TİP ADALETİ — takım bazında geç hafta sayısı vs hamile/süt üye.
+#       hamile/süt yüksek olanların geç haftası sistematik 0 ise mekanizma doğrulanır.
+
+print("=" * 78)
+print("H24B — TAKIM BÖLÜNME YAPISI + GEÇ TİP ADALETİ")
+print("=" * 78)
+
+_gec_dk24 = dakika(GEC_BASLANGIC)                  # "15:00" ve sonrası = GEÇ (gece dahil)
+_tw_tip = {}                                       # (takım, hafta) → {tip: {agent}}
+for _, _r24 in df_sonuc.iterrows():
+    if _r24["vardiya"] == ARIFE_YARIM:
+        continue
+    _d24 = dt.date.fromisoformat(_r24["tarih"])
+    if _d24.weekday() >= 5:
+        continue                                   # takım kuralı sadece hafta içi
+    _tw_tip.setdefault((_r24["takim"], _d24.isocalendar()[:2]), {}) \
+           .setdefault(_r24["saat"].split("-")[0], set()).add(_r24["agent"])
+
+# ── [1] BÖLÜNME YAPISI ────────────────────────────────────────────────
+_bol_dag = Counter(len(_tipler24) for _tipler24 in _tw_tip.values())
+_ayrilan_toplam = sum(int(solver.Value(_sv24)) for _sv24 in takim_sapan.values())
+print(f"\n[1] BÖLÜNME YAPISI  ({len(_tw_tip)} takım-hafta, hafta içi)")
+for _k24 in sorted(_bol_dag):
+    _not24 = ("bölünme yok" if _k24 == 1 else
+              "tek takım 2 parça (istenen yapı)" if _k24 == 2 else
+              "⚠ DAĞILMIŞ — ayrılanları tek tipe toplamak gerekebilir")
+    print(f"    {_k24} tip: {_bol_dag[_k24]:4d} takım-hafta   {_not24}")
+print(f"    H19 sapan (ayrılan üye-hafta): {_ayrilan_toplam}  (ağırlık W_TAKIM={W_TAKIM})")
+
+# ── [2] GEÇ TİP ADALETİ ───────────────────────────────────────────────
+_sut_hamile24 = {T: sum(1 for a in u if a in hafta_sonu_yasak)
+                 for T, u in takimlar.items()}
+_junior24 = {T: sum(1 for a in u if a in junior_agents) for T, u in takimlar.items()}
+_gec_hafta24, _ayr24 = {}, {}
+for T in takimlar:
+    _gec_hafta24[T] = sum(1 for (T2, _wk24), _tipler24 in _tw_tip.items()
+                          if T2 == T and any(dakika(_t24) >= _gec_dk24
+                                             for _t24 in _tipler24))
+    _ayr24[T] = sum(int(solver.Value(_sv24)) for (a24, _w24), _sv24 in takim_sapan.items()
+                    if a24 in takimlar[T])
+print(f"\n[2] GEÇ TİP ADALETİ  (geç = başlangıç ≥ {GEC_BASLANGIC}, gece dahil)")
+print(f"    {'takım':<34} {'üye':>4} {'hamile/süt':>11} {'kıdemsiz':>9} "
+      f"{'geç hafta':>10} {'ayrılan':>8}")
+for T in sorted(takimlar, key=lambda t: (_gec_hafta24[t], -_sut_hamile24[t])):
+    print(f"    {takim_gor(T, 34):<34} {len(takimlar[T]):>4} {_sut_hamile24[T]:>11} "
+          f"{_junior24[T]:>9} {_gec_hafta24[T]:>10} {_ayr24[T]:>8}")
+# korelasyon özeti: hamile/süt olan vs olmayan takımların ortalama geç haftası
+_ile = [_gec_hafta24[T] for T in takimlar if _sut_hamile24[T] > 0]
+_siz = [_gec_hafta24[T] for T in takimlar if _sut_hamile24[T] == 0]
+if _ile and _siz:
+    print(f"\n    hamile/süt ÜYESİ OLAN  {len(_ile):>3} takım → ortalama geç hafta "
+          f"{sum(_ile) / len(_ile):.2f}")
+    print(f"    hamile/süt üyesi OLMAYAN {len(_siz):>3} takım → ortalama geç hafta "
+          f"{sum(_siz) / len(_siz):.2f}")
+    if sum(_siz) / len(_siz) > 1.5 * max(0.01, sum(_ile) / len(_ile)):
+        print(f"    ⚠ BELİRGİN FARK: geç yük hamile/süt üyesi OLMAYAN takımlara yığılmış.")
+        print(f"      W_TAKIM'i düşür (şu an {W_TAKIM}) ya da takım başına geç hafta")
+        print(f"      sayısına oransal tavan koy (mesaide MESAI_TOL gibi).")
+    else:
+        print(f"    ✓ iki grup arasında belirgin fark yok — yük dengeli dağılmış.")
+print("=" * 78)
+
+
 # %% [HÜCRE 25] — COVERAGE RAPORU (talep / atanan / fazla / eksik) ─────
 # Sert band kaldırıldığı için her kova talebi aşabilir/eksik kalabilir.
 # Burada her (gün,vardiya) için talep vs atanan ve sapma görülür.
@@ -4556,6 +4748,649 @@ print(f"coverage raporu: {len(df_cov)} kova  |  tam tutan: {tam}  |  "
 print("en çok sapan 12 kova:")
 print(df_cov.reindex(df_cov["fark"].abs().sort_values(ascending=False).index)
       .head(12).to_string(index=False))
+
+
+# %% [HÜCRE 25B] — EKSİK COVERAGE TEŞHİSİ (neden dolmadı?) ─────────────
+# "Coverage yine eksik" sorusunun cevabını 5 adımda arar. Sıra ÖNEMLİ: üstteki
+# adım sorunu açıklıyorsa alttakiler semptomdur, ağırlıkla çözülmez.
+#   1) YAPISAL KAPASİTE — Σtalep, tüm agentların TOPLAM tavanını aşıyor mu?
+#      Aşıyorsa hiçbir ağırlık/parametre kapatamaz; tek çare kadro/outsource
+#      ya da Stage-1 talebini düşürmek.
+#   2) EKSİK NEREDE — hafta içi / hafta sonu, gün, vardiya tipi kırılımı.
+#   3) TAKIM-TİP TAHSİSİ — hafta içi kova ancak takımı O HAFTA o tipe atanmış
+#      agentlarla dolar (H19 SERT). Tipe atanan toplam kişi < o tipin talebi ise
+#      eksik buradan gelir; ağırlık değil TAKIM/TİP granülerliği sorunudur.
+#   4) KİM NEREDE — eksik kovalarda, o gün müsait olan agentlar nereye gitmiş
+#      (başka tip / off / off_t / izin / yapısal yasak).
+#   5) AĞIRLIK KONTROLÜ — eksik cezası gerçekten bağlayıcı mı, yoksa başka bir
+#      ceza mı daha pahalı (amaç fonksiyonundaki payları).
+print("=" * 78)
+print("H25B — EKSİK COVERAGE TEŞHİSİ")
+print("=" * 78)
+
+# ── 1) YAPISAL KAPASİTE BİLANÇOSU ─────────────────────────────────────
+_arife_atama = sum(solver.Value(x[(a, ds, v)]) for (a, ds, v) in x
+                   if v == ARIFE_YARIM)                     # coverage dışı → düş
+_gercek_atama = sum(solver.Value(x[k]) for k in x) - _arife_atama
+_top_talep = sum(talep.values())
+_top_kota  = sum(kota_map.values())
+_top_ust   = sum(ust_map.values())
+print(f"\n[1] YAPISAL KAPASİTE (kişi-gün)")
+print(f"    Σ talep (tüm kovalar)            : {_top_talep}")
+print(f"    Σ kota  (SERT taban, H17)        : {_top_kota}")
+print(f"    Σ ust   (SERT tavan = kota+mesai+tatil+alacak) : {_top_ust}")
+print(f"    gerçekleşen atama (arife hariç)  : {_gercek_atama}")
+_acik = _top_talep - _top_ust
+if _acik > 0:
+    print(f"    ⚠ TOPLAM YAPISAL AÇIK: talep, mutlak tavanı {_acik} kişi-gün AŞIYOR.")
+else:
+    print(f"    toplam tavan yeterli (fazla {-_acik} kişi-gün); "
+          f"kullanılmayan tavan {_top_ust - _gercek_atama} kişi-gün.")
+
+# ── 1B) KİŞİ-GÜN HAVUZU — hafta içi ve hafta sonu AYNI havuzu paylaşıyor ──
+# ESKİ HÂLİ YANILTICIYDI, kayda geçsin:
+#   hafta içi TAVAN  = Σ kota
+#   hafta sonu TAVAN = Σ (ust − kota)
+# İki satır bağımsız tavan gibi sunuluyordu. Gizli varsayım: "hafta sonu ancak
+# MESAİ olarak yapılır". Oysa hafta sonu NORM olarak da yapılır (agent bir hafta
+# içi gününü off alıp yerine hafta sonu çalışır; toplam gün aynı, kota dolu,
+# mesai YOK). NORM günü KOTADAN gelir → o gün hafta içi kapasiteden DÜŞER.
+# Ölçülen sonuç (2026-09): tablo "hafta sonu açık 399" diyordu ama gerçek hafta
+# sonu eksiği 4'tü — model açığı NORM ile kapattı ve faturayı hafta içine yazdı.
+# "Hafta içi yapısal açık 86" da bu yüzden gerçeğin çok altındaydı.
+#
+# DOĞRU KURGU — üç sert sınır, tek havuz:
+#   (a) hafta içi çalışma       ≤ Σ kota              (hafta içinde o kadar gün var)
+#   (b) hafta içi + hafta sonu  ≤ Σ ust               (kota + mesai + tatil payı)
+#   (c) hafta sonu              ≥ Σ(talep − HS_TOL)   (H10 SERT band, ZORUNLU)
+# (c) önce dolar → hafta içine kalan tavan:
+#   W_max = min( Σkota , Σust − zorunlu_hafta_sonu )
+# Hafta içi KAÇINILMAZ açık = talep_hi − W_max. Bu sayı ağırlıkla, MAX_MESAI ile,
+# takım-tip ayarıyla KAPANMAZ — kadro/outsource ya da Stage-1 talebi kararıdır.
+_talep_hi = sum(k for (ds, _v), k in talep.items()
+                if dt.date.fromisoformat(ds).weekday() < 5
+                and dt.date.fromisoformat(ds) not in TATIL)
+_talep_tat = sum(k for (ds, _v), k in talep.items()
+                 if dt.date.fromisoformat(ds) in TATIL)
+_talep_hs = _top_talep - _talep_hi - _talep_tat
+# (c) hafta sonu sert bandın ZORUNLU kıldığı alt sınır
+_zorunlu_hs = sum(max(0, k - HS_TOL) for (ds, _v), k in talep.items()
+                  if dt.date.fromisoformat(ds).weekday() >= 5
+                  and dt.date.fromisoformat(ds) not in TATIL)
+# FİİLEN atanan — df_cov'dan (tahmin YOK, çözümün kendi sayısı)
+_cov_d = df_cov["tarih"].map(dt.date.fromisoformat)
+_at_hs  = int(df_cov.loc[(_cov_d.map(lambda d: d.weekday() >= 5))
+                         & (~_cov_d.isin(TATIL)), "atanan"].sum())
+_at_tat = int(df_cov.loc[_cov_d.isin(TATIL), "atanan"].sum())
+_at_hi  = int(df_cov.loc[(_cov_d.map(lambda d: d.weekday() < 5))
+                         & (~_cov_d.isin(TATIL)), "atanan"].sum())
+# hafta sonunun MESAİ / NORM kırılımı — roster_2 (H22) ile BİREBİR aynı ölçü.
+# E (hafta sonu çalışma) = mesai_gun + norm_gun kimliği H22'de kanıtlı:
+#   mesai = max(0, E − borç),  norm = min(E, borç)   → toplamı her zaman E
+_hs_mesai = int(roster_2["mesai_gun"].sum())
+_hs_norm  = int(roster_2["norm_gun"].sum())
+# HAFTA İÇİ TAVAN — iki sınırın darı
+_W_kota = _top_kota
+_W_ust  = _top_ust - _zorunlu_hs - _talep_tat
+_W_max  = min(_W_kota, _W_ust)
+_kacinilmaz_hi = max(0, _talep_hi - _W_max)
+# kova bazlı hafta içi eksik (tatil hariç) — [2] ile aynı ölçü
+_eksik_hi_kova = int(-df_cov.loc[(df_cov["fark"] < 0)
+                                 & (_cov_d.map(lambda d: d.weekday() < 5))
+                                 & (~_cov_d.isin(TATIL)), "fark"].sum())
+
+print(f"\n[1B] KİŞİ-GÜN HAVUZU — hafta içi ve hafta sonu AYNI havuzu paylaşıyor")
+print(f"    ÜÇ SERT SINIR:")
+print(f"      (a) hafta içi çalışma       ≤ Σkota            = {_top_kota:>6}")
+print(f"      (b) hafta içi + hafta sonu  ≤ Σust             = {_top_ust:>6}")
+print(f"      (c) hafta sonu              ≥ Σ(talep−{HS_TOL}) [SERT] = {_zorunlu_hs:>6}")
+print(f"    ⚠ (a) ile (c) AYNI havuzdan yiyor: hafta sonu günü MESAİ ise kotanın")
+print(f"      ÜSTÜNDEN gelir; NORM ise KOTADAN gelir → hafta içinden düşer.")
+print(f"      Mesai payı (Σust−Σkota = {_top_ust - _top_kota}) aşıldıktan sonrası ZORUNLU NORM.")
+print(f"\n    FİİLEN NE OLDU (çözümün kendi sayıları)")
+print(f"      hafta sonu : talep {_talep_hs:>6}   atanan {_at_hs:>6}"
+      f"   (sert band ±{HS_TOL})")
+print(f"         ├ MESAİ olarak        {_hs_mesai:>6}   ← kotanın üstü, hafta içine dokunmaz")
+print(f"         └ NORM/TELAFİ olarak  {_hs_norm:>6}   ← KOTADAN yendi, hafta içinden çıktı")
+if _talep_tat:
+    print(f"      resmi tatil: talep {_talep_tat:>6}   atanan {_at_tat:>6}")
+print(f"      hafta içi  : talep {_talep_hi:>6}   atanan {_at_hi:>6}")
+print(f"\n    HAFTA İÇİ KAÇINILMAZ AÇIK")
+print(f"      tavan = min( Σkota {_W_kota} , Σust−zorunlu_hs{'−tatil' if _talep_tat else ''} "
+      f"{_W_ust} ) = {_W_max}"
+      f"   [{'Σkota' if _W_kota <= _W_ust else 'hafta sonu baskısı'} bağlıyor]")
+print(f"      hafta içi talep                                  {_talep_hi}")
+if _kacinilmaz_hi:
+    print(f"      → EN AZ {_kacinilmaz_hi} kişi-gün KAÇINILMAZ — model kapatamaz")
+    print(f"        (çare: kadro/outsource ya da Stage-1 hafta içi talebi)")
+    print(f"      → kova bazlı hafta içi eksik: {_eksik_hi_kova}")
+    print(f"      → aradaki {_eksik_hi_kova - _kacinilmaz_hi} kişi-gün DÜZELTİLEBİLİR "
+          f"(yanlış yere atama + kullanılmayan tavan) → [2] ve [3]'e bak")
+else:
+    print(f"      → kaçınılmaz açık YOK; hafta içi eksiğin ({_eksik_hi_kova}) TAMAMI")
+    print(f"        dağıtım sorunu (takım-tip tahsisi) → [3]'e bak")
+
+# ── 2) EKSİK NEREDE ───────────────────────────────────────────────────
+_eks = df_cov[df_cov["fark"] < 0].copy()
+_eks["eksik"] = -_eks["fark"]
+_eks["hs"] = _eks["tarih"].map(lambda ds: dt.date.fromisoformat(ds).weekday() >= 5)
+_eks["gun"] = _eks["tarih"].map(lambda ds: DAY_TR[dt.date.fromisoformat(ds).weekday()])
+_eks["tip"] = _eks["saat"].str.split("-").str[0]
+print(f"\n[2] EKSİK KIRILIMI  (toplam {int(_eks['eksik'].sum())} kişi-gün, "
+      f"{len(_eks)} kova)")
+_hi_e = int(_eks.loc[~_eks["hs"], "eksik"].sum())
+_hs_e = int(_eks.loc[_eks["hs"], "eksik"].sum())
+print(f"    HAFTA İÇİ : {_hi_e:5d}  ({len(_eks[~_eks['hs']])} kova)  ← W_EKSIK_HI={W_EKSIK_HI}")
+print(f"    HAFTA SONU: {_hs_e:5d}  ({len(_eks[_eks['hs']])} kova)  ← W_EKSIK_HS={W_EKSIK_HS}, sert band ±{HS_TOL}")
+print("    vardiya tipine göre:")
+for _t, _g in _eks.groupby("tip"):
+    print(f"      {_t}: {int(_g['eksik'].sum()):4d} kişi-gün, {len(_g)} kova")
+print("    güne göre (en kötü 10):")
+_gun_e = _eks.groupby(["tarih", "gun"])["eksik"].sum().sort_values(ascending=False)
+for (_ds, _g), _v in _gun_e.head(10).items():
+    print(f"      {_ds} {_g}: {int(_v)} kişi-gün")
+
+# ── 3) TAKIM-TİP TAHSİSİ (hafta içi kovaların ASIL kısıtı) ────────────
+# H19 SERT: agent o hafta ancak takımının seçtiği tipte çalışabilir. Yani bir
+# tipin o haftaki KAPASİTESİ = o tipe atanan takımların üye sayısı. Talep bunu
+# aşıyorsa kova matematiksel olarak dolamaz — ağırlıkla ilgisi yok.
+_secim = {}                                        # (takım, hafta) → seçilen tip
+for (_T, _wk, _bas), _b in takim_tip.items():
+    if solver.Value(_b):
+        _secim[(_T, _wk)] = _bas
+_tip_kapasite = defaultdict(int)                   # (hafta, tip) → atanan üye sayısı
+for (_T, _wk), _bas in _secim.items():
+    _tip_kapasite[(_wk, _bas)] += len(takimlar.get(_T, []))
+print(f"\n[3] TAKIM-TİP TAHSİSİ vs TALEP  (hafta içi, H19 sert kuralı)")
+print(f"    {'hafta':>10} {'tip':>7} {'zirve talep':>12} {'tipe atanan kişi':>18}  durum")
+_tip_sorun = 0
+for _wk in sorted(haftalar):
+    if _wk in tatil_haftalari:
+        continue
+    if _wk == KILIT_HAFTA:                         # sınır haftasında takım seçimi yok
+        print(f"    {_wk[0]}-W{_wk[1]:>3} — SINIR HAFTASI: tipler H19E ile önceki aydan "
+              f"geldi, takım tahsisi yok (kapasite tablosu H19E'de)")
+        continue
+    _hi = [ds for ds in haftalar[_wk] if dt.date.fromisoformat(ds).weekday() < 5]
+    _tipler = sorted({saat[(ds, v)][0] for ds in _hi
+                      for v in gun_vardiyalari[ds] if (ds, v) in talep})
+    for _t in _tipler:
+        _zirve = max((sum(talep[(ds, v)] for v in gun_vardiyalari[ds]
+                          if (ds, v) in talep and saat[(ds, v)][0] == _t)
+                      for ds in _hi), default=0)
+        _kap = _tip_kapasite.get((_wk, _t), 0)
+        _dur = "✓" if _kap >= _zirve else f"⚠ AÇIK {_zirve - _kap}"
+        if _kap < _zirve:
+            _tip_sorun += 1
+        print(f"    {_wk[0]}-W{_wk[1]:>3} {_t:>7} {_zirve:>12} {_kap:>18}  {_dur}")
+if _tip_sorun:
+    print(f"    ⚠ {_tip_sorun} (hafta,tip) kombinasyonunda takım kapasitesi talebin ALTINDA →")
+    print(f"      hafta içi eksiğin ANA sebebi bu. Çözüm ağırlık DEĞİL: takım-tip")
+    print(f"      granülerliği (W_TAKIM düşür / takım bölünmesine izin ver) ya da")
+    print(f"      Stage-1'de tip dağılımını takım boyutlarına yaklaştır.")
+else:
+    print(f"    ✓ her (hafta,tip) için atanan takım kapasitesi zirve talebi karşılıyor →")
+    print(f"      hafta içi eksik takım-tip tahsisinden DEĞİL, gün içi dağılımdan.")
+
+# ── 4) KİM NEREDE — en kötü 10 eksik kovada agentların gittiği yer ────
+print(f"\n[4] EN KÖTÜ 10 EKSİK KOVA — o gün agentlar nerede?")
+_kot = _eks.sort_values("eksik", ascending=False).head(10)
+for _, _r in _kot.iterrows():
+    _ds, _v, _t = _r["tarih"], _r["vardiya"], _r["saat"].split("-")[0]
+    _d = dt.date.fromisoformat(_ds)
+    _c = Counter()
+    for a in AGENTS:
+        if (a, _ds, _v) in x and solver.Value(x[(a, _ds, _v)]) == 1:
+            _c["BU KOVADA"] += 1
+            continue
+        if _d in izin_map.get(a, set()):
+            _c["izin"] += 1
+        elif _d in off_block_map.get(a, set()):
+            _c["off_t2"] += 1
+        elif (a, _ds, _v) not in x:
+            _c["değişken yok"] += 1
+        elif a in sabah_agents and not (dakika(saat[(_ds, _v)][0]) < dakika(saat[(_ds, _v)][1])
+                                        and dakika(saat[(_ds, _v)][1]) <= LIMIT):
+            _c["sabahçı (H13)"] += 1
+        elif a in hafta_sonu_yasak and _d.weekday() >= 5:
+            _c["hamile/süt (H14)"] += 1
+        elif (_d.weekday() < 5
+              and _secim.get((agent_takim.get(a), _d.isocalendar()[:2])) not in (None, _t)):
+            # H19 SERT: takımı o hafta BAŞKA tipe atanmış → bu kovaya giremez.
+            # Bu kişiler "off" görünse bile sebep off tercihi değil, takım kilidi.
+            _c["takım TİPİ farklı (H19)"] += 1
+        else:
+            _hucre = roster.at[a, _ds] if _ds in roster.columns else None
+            if _hucre in ("off", "off_t"):
+                _c["OFF verilmiş" if _hucre == "off" else "off_t verilmiş"] += 1
+            elif _hucre in _OFF_LIKE:
+                _c[str(_hucre)] += 1
+            elif isinstance(_hucre, str) and _hucre.replace("mesai ", "").split("-")[0] != _t:
+                _c["BAŞKA TİPTE çalışıyor"] += 1
+            else:
+                _c["aynı tip, başka kova"] += 1
+    print(f"    {_ds} {_r['gun']} {_r['saat']}: talep {int(_r['talep'])}, "
+          f"atanan {int(_r['atanan'])}, EKSİK {int(_r['eksik'])}")
+    print(f"        {dict(_c.most_common())}")
+
+# ── 5) AMAÇ FONKSİYONU PAYLARI — hangi ceza gerçekten bağlayıcı ───────
+# Eksik cezası toplam amacın küçük bir kısmıysa, model onu "ucuz" buluyordur.
+_eksik_ceza = (_hi_e * W_EKSIK_HI) + (_hs_e * W_EKSIK_HS)
+_offt_ceza  = len(offt_karsilanmadi) * W_OFF_T
+_amac_deg = 0.0 if FIZIBILITE_MODU else solver.ObjectiveValue()   # fizibilite modunda amaç yok
+print(f"\n[5] AMAÇ FONKSİYONU PAYLARI  (toplam = {_amac_deg:.0f}"
+      + ("  — FİZİBİLİTE MODU: amaç kurulmadı, paylar anlamsız)" if FIZIBILITE_MODU else ")"))
+print(f"    eksik coverage cezası : {_eksik_ceza:>10}  "
+      f"(%{100 * _eksik_ceza / max(1, _amac_deg):.1f})")
+print(f"    off_t karşılanmayan   : {_offt_ceza:>10}  "
+      f"({len(offt_karsilanmadi)} kişi-gün × {W_OFF_T})")
+print(f"    → eksik payı düşükse model eksiği ucuz buluyor; ama önce [1] ve [3]'e bak,")
+print(f"      orada yapısal/tahsis sorunu varsa ağırlık artırmak İŞE YARAMAZ.")
+print("=" * 78)
+
+
+# %% [HÜCRE 25C] — ORANSAL ADALET TAVANI SİMÜLASYONU (SALT OKUNUR) ─────
+# SORU: mesai/norm dengesini AĞIRLIK yerine KISIT ile yönetsek ne olurdu?
+#   önerilen kısıt:  N × deger_a  ≤  M + N × TOL     (M = Σ deger_a, N = uygun agent)
+#   sadeleşmiş hâli: deger_a ≤ (fiili ortalama) + TOL  → "kimse ortalamanın TOL üstüne çıkamaz"
+# Bu hücre kısıtı KURMAZ. Mevcut çözümü okuyup "kursaydık ne olurdu"yu ölçer:
+#   kaç agent tavanın üstünde, o kişilerden kaç gün alınırdı, o günleri BAŞKASI
+#   alabilir mi (emilim kapasitesi), ve hafta sonunda sert bandı kırar mıydı.
+# Model değişmiyor → yeniden çözmeye gerek yok, H22'den sonra istediğin an koşar.
+#
+# İKİ TARAF SİMETRİK DEĞİL:
+#   MESAİ tavanı  → HACMİ kısar. Bağlarsa agent daha az gün çalışır; hafta sonu
+#                   sert bandı norm ile doldurulabildiği için kayıp HAFTA İÇİ
+#                   kovalara gider = yumuşak ceza. INFEASIBLE olmaz.
+#   HAFTA SONU tavanı → YERİ kısar. Bağlarsa o Cmt/Pzr kovasına kimse konamaz,
+#                   ama kovanın SERT alt sınırı var (talep − HS_TOL) → INFEASIBLE.
+# Bu yüzden [2]'nin altında ayrı bir fizibilite kontrolü ([3]) var; mesaide gerekmiyor.
+print("=" * 78)
+print("H25C — ORANSAL ADALET TAVANI SİMÜLASYONU (model DEĞİŞMEZ, sadece ölçüm)")
+print("=" * 78)
+
+_TOL_LISTE = (0, 1, 2)
+
+
+def _oransal(baslik, deger, uygun, tavan_map=None, birim="kişi-gün"):
+    """Her TOL için tavanı ve etkisini yazdır.
+    deger    : agent → mevcut sayı (mesai günü / hafta sonu günü)
+    uygun    : kısıtın kapsayacağı agent kümesi (N buradan gelir)
+    tavan_map: agent → o agentın FİİLEN çıkabileceği en yüksek değer
+               (mesai: MAX_MESAI; hafta sonu: müsait hafta sonu günü sayısı)
+               → emilim kapasitesi bununla sınırlanır, hayali kapasite sayılmaz
+    """
+    M = sum(deger.get(a, 0) for a in uygun)
+    N = len(uygun)
+    if not N:
+        print(f"\n{baslik}: uygun agent yok → atlandı")
+        return
+    print(f"\n{baslik}")
+    print(f"    fiili toplam M = {M} {birim}  |  uygun agent N = {N}  |  "
+          f"ortalama = {M / N:.2f}")
+    _dag = Counter(deger.get(a, 0) for a in uygun)
+    print(f"    mevcut dağılım (değer → agent): {dict(sorted(_dag.items()))}")
+    print(f"    {'TOL':>4} {'tavan':>6} {'üstünde':>9} {'taşınacak':>10} "
+          f"{'emilim kap.':>12}  sonuç")
+    for _tol in _TOL_LISTE:
+        _cap = M // N + _tol                       # N×d ≤ M + N×TOL  ⇔  d ≤ M/N + TOL
+        _ust = [a for a in uygun if deger.get(a, 0) > _cap]
+        _tasin = sum(deger[a] - _cap for a in _ust)          # tavanın üstünden alınacak gün
+        _emilim = 0                                          # geri kalanın tavana kadar boşluğu
+        for a in uygun:
+            _lim = _cap if tavan_map is None else min(_cap, tavan_map.get(a, _cap))
+            _emilim += max(0, _lim - deger.get(a, 0))
+        _sonuc = ("✓ toplam korunur (yük başkasına geçer)" if _emilim >= _tasin
+                  else f"⚠ en az {_tasin - _emilim} {birim} KAYBOLUR")
+        print(f"    {_tol:>4} {_cap:>6} {len(_ust):>9} {_tasin:>10} "
+              f"{_emilim:>12}  {_sonuc}")
+    print(f"    NOT: tavan FİİLİ toplamdan (M) türüyor. Kısıt kurulunca model M'yi")
+    print(f"         değiştirirse tavan da değişir → bu tablo ilk-adım tahminidir.")
+    print(f"         'emilim kapasitesi' üst sınırdır: o agent o GÜN müsait mi ayrı mesele.")
+
+
+# ── 0) KİŞİSEL HAFTA SONU MÜSAİTLİĞİ (emilim hesabının tabanı) ────────
+# "Duvarın üstündekilerden alınan günü kim alacak?" sorusunun cevabı, o kişilerin
+# FİİLEN müsait olmasına bağlı. İzni çok olan agent 3'e çıkamaz → onun boş görünen
+# kapasitesi HAYALİDİR. Bu yüzden emilim, MAX_MESAI ile değil KİŞİSEL tavanla sınırlanır.
+#   müsait hafta sonu günü = o gün değişkeni olan hafta sonu günü sayısı
+#     (izin / off_t2 → değişken yok; hamile/süt zaten uygun kümesinin dışında)
+#   H18 açıksa 1 tam Cmt+Pzr off ZORUNLU → −2
+# Mesai günü zorunlu olarak hafta sonu günüdür (kota = tüm müsait hafta içi gün)
+# → kişisel mesai tavanı = min(MAX_MESAI, müsait hafta sonu günü).
+# NOT: bu hâlâ ÜST sınır — o günlerin bir kısmı norm olarak kullanılıyor olabilir.
+_hs_kol = [c for c in _gun if dt.date.fromisoformat(c).weekday() >= 5
+           and dt.date.fromisoformat(c) not in TATIL]
+_hs_uygun = [a for a in roster.index if a not in hafta_sonu_yasak]
+_hs_musait = {}
+for a in _hs_uygun:
+    _m = sum(1 for c in _hs_kol
+             if any((a, c, v) in x for v in gun_vardiyalari.get(c, [])))
+    _hs_musait[a] = max(0, _m - (2 if CIFT_HS_OFF else 0))
+_mus_dag = Counter(_hs_musait.values())
+print(f"\n[0] KİŞİSEL HAFTA SONU MÜSAİTLİĞİ  ({len(_hs_kol)} hafta sonu günü"
+      + (f", H18 zorunlu çift off düşülmüş" if CIFT_HS_OFF else "") + ")")
+print(f"    müsait gün → agent: {dict(sorted(_mus_dag.items()))}")
+print(f"    → emilim kapasitesi bu tavanla sınırlanıyor; 'boş ama ulaşılamaz' "
+      f"kapasite sayılmıyor.")
+
+# ── 1) MESAİ (ay bazlı, H22'nin mesai_gun'ü ile AYNI ölçü) ────────────
+_m_uygun = [a for a in roster_2.index if a in kota_map and a not in ozel_agents]
+_m_deger = {a: int(roster_2.at[a, "mesai_gun"]) for a in _m_uygun}
+_m_tavan = {a: min(MAX_MESAI, _hs_musait.get(a, MAX_MESAI)) for a in _m_uygun}
+_oransal(f"[1] MESAİ  (uygun = kota_map'te olan ve özel flag'siz; MAX_MESAI={MAX_MESAI})",
+         _m_deger, _m_uygun, _m_tavan, "mesai-günü")
+# kaç agentın KİŞİSEL tavanı duvarın altında kalıyor → duvar onlara zaten dokunmuyor,
+# ama emilim kapasitesine de katkı veremiyorlar
+_M_m, _N_m = sum(_m_deger.values()), len(_m_uygun)
+for _tol in _TOL_LISTE:
+    _cap = _M_m // _N_m + _tol
+    _kisitli = [a for a in _m_uygun if _m_tavan[a] < _cap]
+    _hayali = sum(_cap - _m_tavan[a] for a in _kisitli)
+    print(f"    TOL={_tol} (tavan {_cap}): kişisel tavanı duvarın ALTINDA olan "
+          f"{len(_kisitli)} agent → {_hayali} günlük kapasite ULAŞILAMAZ "
+          f"(MAX_MESAI varsayılsaydı emilime sayılırdı)")
+print(f"    → bu taraf bağlarsa kayıp HAFTA İÇİ kovalara gider (yumuşak ceza), "
+      f"INFEASIBLE riski YOK.")
+
+# ── 2) HAFTA SONU GÜNÜ (norm + mesai BİRLİKTE — H20C'nin ölçüsü) ──────
+_hs_deger = {a: sum(1 for c in _hs_kol if roster.at[a, c] not in _OFF_LIKE)
+             for a in _hs_uygun}
+_oransal("[2] HAFTA SONU GÜNÜ  (norm + mesai birlikte; uygun = hamile/süt HARİÇ)",
+         _hs_deger, _hs_uygun, _hs_musait, "hafta sonu günü")
+
+# ── 3) HAFTA SONU FİZİBİLİTE — tavan sert bandı kırar mı? ─────────────
+# Hafta sonu kovalarının SERT alt sınırı: talep − HS_TOL. Toplamı karşılamak için
+# gereken kişi-gün ile, tavan altında kalan TOPLAM kapasiteyi karşılaştır:
+#   kapasite(TOL) = Σ_a min(tavan, o agentın müsait hafta sonu günü)
+# kapasite < gereken → o TOL ile model ÇÖZÜMSÜZ olur (H25B'deki gibi eksik yazmaz).
+_gereken_hs = sum(max(0, kisi - HS_TOL) for (ds, v), kisi in talep.items()
+                  if dt.date.fromisoformat(ds).weekday() >= 5)
+_M_hs = sum(_hs_deger.values())
+_N_hs = len(_hs_uygun)
+print(f"\n[3] HAFTA SONU FİZİBİLİTE  (sert band alt sınırı: talep − HS_TOL={HS_TOL})")
+print(f"    sert band için GEREKEN toplam : {_gereken_hs} kişi-gün")
+print(f"    şu an atanan                  : {_M_hs} kişi-gün "
+      f"(fazla {_M_hs - _gereken_hs})")
+print(f"    {'TOL':>4} {'tavan':>6} {'tavan altı kapasite':>20}  durum")
+for _tol in _TOL_LISTE:
+    _cap = (_M_hs // _N_hs + _tol) if _N_hs else 0
+    _kap = sum(min(_cap, _hs_musait[a]) for a in _hs_uygun)
+    _dur = ("✓ güvenli" if _kap >= _gereken_hs
+            else f"⚠ INFEASIBLE RİSKİ — {_gereken_hs - _kap} kişi-gün AÇIK")
+    print(f"    {_tol:>4} {_cap:>6} {_kap:>20}  {_dur}")
+print(f"    NOT: bu TOPLAM kontrolü. Toplam yetse bile tek bir gün dolmayabilir →")
+print(f"         aşağıdaki gün bazlı tabloya bak.")
+
+# gün bazlı: o gün gerçekten müsait agent, o günün sert alt sınırını karşılıyor mu
+print(f"\n    gün bazlı (en dar 10 hafta sonu günü — tavandan BAĞIMSIZ, ham müsaitlik):")
+_gun_satir = []
+for _ds in sorted({c for c in _hs_kol}):
+    _min_gerek = sum(max(0, talep[(_ds, v)] - HS_TOL) for v in gun_vardiyalari[_ds]
+                     if (_ds, v) in talep)
+    _mus = sum(1 for a in _hs_uygun
+               if any((a, _ds, v) in x for v in gun_vardiyalari[_ds]))
+    _gun_satir.append((_ds, _min_gerek, _mus, _mus - _min_gerek))
+for _ds, _g, _m, _f in sorted(_gun_satir, key=lambda t: t[3])[:10]:
+    _d = dt.date.fromisoformat(_ds)
+    print(f"      {_ds} {DAY_TR[_d.weekday()]}: sert alt sınır {_g:4d}  "
+          f"müsait agent {_m:4d}  pay {_f:+5d}"
+          f"{'   ⚠ DAR' if _f < 0.15 * max(1, _g) else ''}")
+
+# ── 4) KARAR ÖZETİ ────────────────────────────────────────────────────
+print(f"\n[4] OKUMA KILAVUZU")
+print(f"    [1] 'taşınacak' düşük + 'emilim' yüksek → mesai kısıtı ucuz, uygulanabilir.")
+print(f"    [1] 'KAYBOLUR' çıkıyorsa → o TOL ile toplam mesai düşer, coverage eksiği artar.")
+print(f"    [3] herhangi bir TOL'de 'INFEASIBLE RİSKİ' → hafta sonu tavanı O TOL ile")
+print(f"        kurulamaz; bir üst TOL'e geç ya da hafta sonunu ağırlıkla yönetmeye devam et.")
+print("=" * 78)
+
+
+# %% [HÜCRE 25D] — TEK KOVA RÖNTGENİ (SALT OKUNUR) ────────────────────
+# SORU: "3 Ağustos 09:00'da 59 lazımdı, 26 atandı — neden 2 takım daha
+#        buraya konmadı?"
+# Bu hücre TEK bir (gün, vardiya tipi) için dört adımda cevap arar. Sıra ÖNEMLİ:
+#   [1] GÜN mü dar? O gün toplam talep vs o gün müsait agent. Gün genelinde
+#       kapasite yoksa tip değiştirmek HİÇBİR ŞEY çözmez — kova başka kovadan
+#       çalar, toplam eksik aynı kalır.
+#   [2] TİP kapasitesi ne? H19 SERT: kova ancak o hafta o tipe atanmış takımlarla
+#       dolar. Atanan üye sayısı talebin altındaysa matematiksel olarak dolamaz.
+#   [3] Kapasite VARDI da gelmedi mi? O tipe atanmış üyeler o gün nerede —
+#       off / izin / off_t / aynı tipte başka kova. "Kapasite yok" ile
+#       "kapasite var ama off verilmiş" bambaşka iki sorun, çözümleri de farklı.
+#   [4] Hangi takım TAŞINABİLİRDİ, bedeli ne? Kritik nokta: takım tipi HAFTALIK.
+#       Pazartesi için bir takımı 09:00'a çekersen o takım TÜM HAFTA orada kalır
+#       → verici tip başka bir gün açığa düşebilir. Bu yüzden vericinin o
+#       haftadaki EN DAR günü hesaplanıyor; taşımanın gerçek bedeli o.
+# Model değişmiyor, salt okunur.
+INCELE_KOVA = []        # [("2026-08-03", "09:00"), ...] — BOŞ ise en kötü N eksik
+INCELE_SAYI = 3         # otomatik seçimde kaç kova incelensin
+
+print("=" * 78)
+print("H25D — TEK KOVA RÖNTGENİ (neden bu kova eksik kaldı?)")
+print("=" * 78)
+
+# hedef listesi: elle verilmediyse en çok eksiği olan kovalar (tip bazında birleşik)
+if INCELE_KOVA:
+    _hedefler = [(ds, tip) for ds, tip in INCELE_KOVA]
+else:
+    _eks_tip = {}                                  # (gün, tip) → toplam eksik
+    for (ds, v), kisi in talep.items():
+        _at = atanan_kova[(ds, v)]                 # H21 — tek kaynak
+        if _at < kisi:
+            _k = (ds, saat[(ds, v)][0])
+            _eks_tip[_k] = _eks_tip.get(_k, 0) + (kisi - _at)
+    _hedefler = [k for k, _ in sorted(_eks_tip.items(), key=lambda kv: -kv[1])][:INCELE_SAYI]
+
+_secim_d = {}                                      # (takım, hafta) → seçilen tip
+for (_T, _wk, _bas), _b in takim_tip.items():
+    if solver.Value(_b):
+        _secim_d[(_T, _wk)] = _bas
+
+
+def _gun_tip_sayi(ds, tip):
+    """o gün, o tipteki kovaların (talep, atanan) toplamı."""
+    _t = _a = 0
+    for v in gun_vardiyalari.get(ds, []):
+        if (ds, v) in talep and saat[(ds, v)][0] == tip:
+            _t += talep[(ds, v)]
+            _a += atanan_kova[(ds, v)]              # H21 — tek kaynak
+    return _t, _a
+
+
+def _yapabilir(a, ds, tip):
+    """agent o gün o TİPTE fiziksel olarak çalışabilir mi? → H14B _kova_calisabilir
+    (izin/off_t2, H13 sabahçı, H14B kıdem-gece, H14 hamile/süt — tek kaynak)."""
+    return any(_kova_calisabilir(a, ds, v) for v in gun_vardiyalari.get(ds, [])
+               if saat[(ds, v)][0] == tip)
+
+
+def _tip_musait(ds, tip, wk):
+    """o gün, o tipe atanmış takımların o TİPTE FİİLEN çalışabilen üye sayısı.
+    (izin/off_t2 → değişken yok; sabahçı/kıdem/hamile → yapamaz)
+    NEDEN 'atanan' DEĞİL: H17 kotayı SERT tutuyor → herkes bir yerde çalışmak
+    ZORUNDA. Bir tipe ihtiyaçtan fazla takım atandıysa model o fazla insanları
+    o tipin kovalarına PARK ediyor ve 'atanan' talebin üstüne çıkıyor
+    (ör. 15:00: 96 üye, talep 56, atanan 66). 'atanan − talep' bunu 10 kişilik
+    pay gibi gösteriyordu; oysa gerçek pay 96 − 56 = 40. Doğru ölçü MÜSAİT ÜYE."""
+    return sum(1 for _T, _u in takimlar.items() if _secim_d.get((_T, wk)) == tip
+               for a in _u if _yapabilir(a, ds, tip))
+
+
+for _ds, _tip in _hedefler:
+    _d = dt.date.fromisoformat(_ds)
+    _wk = _d.isocalendar()[:2]
+    _hafta_gun = haftalar.get(_wk, [])
+    _t_tip, _a_tip = _gun_tip_sayi(_ds, _tip)
+    print(f"\n{'─' * 74}")
+    print(f"KOVA: {_ds} {DAY_TR[_d.weekday()]}  tip {_tip}  →  talep {_t_tip}, "
+          f"atanan {_a_tip}, EKSİK {_t_tip - _a_tip}   (ISO hafta {_wk[0]}-W{_wk[1]})")
+    print(f"{'─' * 74}")
+
+    # ── [1] GÜN BİLANÇOSU ────────────────────────────────────────────
+    _g_talep = sum(talep[(_ds, v)] for v in gun_vardiyalari[_ds] if (_ds, v) in talep)
+    _g_atanan = sum(1 for a in AGENTS for v in gun_vardiyalari[_ds]
+                    if (a, _ds, v) in x and solver.Value(x[(a, _ds, v)])
+                    and (_ds, v) in talep)
+    _g_musait = sum(1 for a in AGENTS
+                    if any((a, _ds, v) in x for v in gun_vardiyalari[_ds]))
+    _g_izin = sum(1 for a in AGENTS if _d in izin_map.get(a, set()))
+    _g_offt2 = sum(1 for a in AGENTS if _d in off_block_map.get(a, set()))
+    print(f"\n[1] GÜN BİLANÇOSU ({_ds})")
+    print(f"    o günün TOPLAM talebi (tüm tipler) : {_g_talep}")
+    print(f"    o gün atanan (tüm tipler)          : {_g_atanan}  "
+          f"→ günlük açık {_g_talep - _g_atanan}")
+    print(f"    o gün DEĞİŞKENİ olan agent         : {_g_musait} "
+          f"(izin {_g_izin}, off_t2 {_g_offt2} hariç)")
+    if _g_musait < _g_talep:
+        print(f"    ⚠ GÜN DAR: müsait agent ({_g_musait}) < günlük talep ({_g_talep}) →")
+        print(f"      bu kovayı doldurmak BAŞKA kovayı boşaltır. Takım taşımak toplam")
+        print(f"      eksiği DEĞİŞTİRMEZ, sadece yerini değiştirir.")
+    else:
+        print(f"    → gün genelinde {_g_musait - _g_talep} kişilik pay var; sorun")
+        print(f"      DAĞITIMDA (tip tahsisi / off yerleşimi) → [2] ve [3]'e bak.")
+
+    # ── [2] O HAFTA TİP TAHSİSİ ──────────────────────────────────────
+    _tip_uye, _tip_takim = {}, {}
+    for _T, _uyeler in takimlar.items():
+        _s = _secim_d.get((_T, _wk))
+        if _s is None:
+            continue
+        _tip_uye[_s] = _tip_uye.get(_s, 0) + len(_uyeler)
+        _tip_takim.setdefault(_s, []).append((_T, len(_uyeler)))
+    print(f"\n[2] O HAFTANIN TİP TAHSİSİ  (H19: takım hafta boyu tek tipte)")
+    print(f"    {'tip':>7} {'takım':>6} {'üye':>5} {'o gün talep':>12} "
+          f"{'o gün atanan':>13} {'hafta zirve':>12} {'PAY':>6}")
+    _pay_arti = _pay_eksi = 0
+    for _t in sorted(set(_tip_uye) | {_tip}):
+        _tt, _ta = _gun_tip_sayi(_ds, _t)
+        _zirve = max((_gun_tip_sayi(g, _t)[0] for g in _hafta_gun
+                      if dt.date.fromisoformat(g).weekday() < 5), default=0)
+        _pay = _tip_uye.get(_t, 0) - _zirve        # KAPASİTE payı (üye − zirve talep)
+        _pay_arti += max(0, _pay)
+        _pay_eksi += max(0, -_pay)
+        _im = "  ← İNCELENEN" if _t == _tip else ""
+        print(f"    {_t:>7} {len(_tip_takim.get(_t, [])):>6} {_tip_uye.get(_t, 0):>5} "
+              f"{_tt:>12} {_ta:>13} {_zirve:>12} {_pay:>+6}{_im}")
+    print(f"    PAY = üye − hafta zirve talebi (KAPASİTE payı).  "
+          f"Σ fazla +{_pay_arti} / Σ açık −{_pay_eksi}")
+    if _pay_arti >= _pay_eksi:
+        print(f"    → Tipler arası TOPLAM kapasite yeterli ({_pay_arti} ≥ {_pay_eksi}):")
+        print(f"      daha iyi bir takım→tip tahsisi MATEMATİKSEL OLARAK VAR.")
+    print(f"    NOT: 'o gün atanan' talebi AŞABİLİR — kota SERT olduğu için fazla")
+    print(f"         üyeler o tipin kovalarına PARK edilir. Bolluğun ölçüsü PAY'dır,")
+    print(f"         'atanan − talep' DEĞİL.")
+    _kap = _tip_uye.get(_tip, 0)
+    if _kap < _t_tip:
+        print(f"    ⚠ Bu tipe atanan TOPLAM üye {_kap} < talep {_t_tip} → kova")
+        print(f"      matematiksel olarak dolamaz. Eksiğin ≥{_t_tip - _kap}'i tahsis kaynaklı.")
+    else:
+        print(f"    → Tipe atanan üye ({_kap}) talebi ({_t_tip}) karşılıyor; demek ki")
+        print(f"      üyeler o gün ÇALIŞMIYOR → [3]'e bak.")
+
+    # ── [3] BU TİPE ATANANLAR O GÜN NEREDE ───────────────────────────
+    _uyeler = [a for _T, _u in takimlar.items()
+               if _secim_d.get((_T, _wk)) == _tip for a in _u]
+    _c = Counter()
+    for a in _uyeler:
+        _calisti = None
+        for v in gun_vardiyalari[_ds]:
+            if (a, _ds, v) in x and solver.Value(x[(a, _ds, v)]):
+                _calisti = v
+                break
+        if _calisti is not None:
+            _c["BU TİPTE ÇALIŞIYOR" if saat[(_ds, _calisti)][0] == _tip
+               else f"BAŞKA TİPTE ({saat[(_ds, _calisti)][0]})"] += 1
+        elif _d in izin_map.get(a, set()):
+            _c["izin"] += 1
+        elif _d in off_block_map.get(a, set()):
+            _c["off_t2 (sert blok)"] += 1
+        elif _d in off_soft_map.get(a, set()):
+            _c["off_t (talep edilmiş off)"] += 1
+        elif not _yapabilir(a, _ds, _tip):
+            _c["bu TİPİ yapamaz (sabahçı/kıdem/hamile)"] += 1
+        else:
+            _c["OFF verilmiş (model tercihi)"] += 1
+    print(f"\n[3] BU TİPE ATANMIŞ {len(_uyeler)} ÜYE, {_ds} GÜNÜ NEREDE?")
+    for _k, _n in _c.most_common():
+        print(f"    {_k:<42} {_n:>5}")
+    _bosta = _c.get("OFF verilmiş (model tercihi)", 0) + _c.get("off_t (talep edilmiş off)", 0)
+    if _bosta:
+        print(f"    → {_bosta} kişi bu tipte ve müsait ama ÇALIŞTIRILMAMIŞ. Sebep tahsis")
+        print(f"      değil, off yerleşimi: H20B hafta içi off cezası (W_HI_OFF+surplus)")
+        print(f"      ya da haftalık off tavanı bu günü off yapmayı seçmiş.")
+
+    # ── [4] TAŞIMA ADAYLARI — hangi takım gelebilirdi, bedeli ne? ────
+    # Takım tipi HAFTALIK → taşınırsa verici tip TÜM HAFTA o üyeleri kaybeder.
+    # Bedel İKİ ÖLÇÜYLE veriliyor, çünkü tek ölçü yanıltıyor:
+    #   ATANAN payı  = atanan − talep      → "kimse yerinden kıpırdamazsa" (ALT sınır)
+    #       Ör. 3 Ağu 15:00: atanan 66, talep 56 → +10. Büşra'nın 11 kişisi giderse
+    #       55 kalır → −1. Bu KÖTÜMSER: o tipte O GÜN OFF olan üyeler yok sayılıyor.
+    #   MÜSAİT payı  = o tipte çalışabilen üye − talep  → "off'takiler çekilebilir"
+    #       (ÜST sınır). Aynı örnekte +27, taşıma sonrası +16. Bu İYİMSER: o kişinin
+    #       kotası / haftalık off tavanı el verir mi diye BAKMIYOR.
+    # GERÇEK ikisinin arasında: ATANAN payı ≥ 0 kalıyorsa taşıma bedelsiz;
+    # negatife düşüp MÜSAİT payı pozitifse, aradaki fark kadar kişinin off'tan
+    # çekilmesi gerekir (mümkün olabilir de olmayabilir de) → "sınırda".
+    print(f"\n[4] TAŞIMA ADAYLARI  (başka tipteki takımlar — {_tip}'e çekilebilir mi?)")
+    _hi_gun = [g for g in _hafta_gun if dt.date.fromisoformat(g).weekday() < 5]
+    _pay_at, _pay_mu = {}, {}                      # tip → o haftadaki EN DAR gün payı
+    for _t in set(_tip_uye):
+        _pay_at[_t] = min((_gun_tip_sayi(g, _t)[1] - _gun_tip_sayi(g, _t)[0]
+                           for g in _hi_gun), default=0)
+        _pay_mu[_t] = min((_tip_musait(g, _t, _wk) - _gun_tip_sayi(g, _t)[0]
+                           for g in _hi_gun), default=0)
+    _aday = []
+    for _T, _uyeler2 in takimlar.items():
+        _s = _secim_d.get((_T, _wk))
+        if _s is None or _s == _tip:
+            continue                               # zaten bu tipte / o hafta tipi yok
+        _uygun = sum(1 for a in _uyeler2 if _yapabilir(a, _ds, _tip))
+        if not _uygun:
+            continue                               # hiçbir üyesi bu tipi yapamıyor
+        _aday.append((_T, len(_uyeler2), _uygun, _s,
+                      _pay_at.get(_s, 0), _pay_mu.get(_s, 0)))
+    _aday.sort(key=lambda r: (-r[4], -r[5], -r[2]))   # önce bedelsiz, sonra ulaşılabilir
+    # Her satır TEK BAŞINA "bu takımı taşısaydık" senaryosu (kümülatif DEĞİL).
+    print(f"    {'takım':<28} {'üye':>4} {'uygun':>6} {'verici':>7} "
+          f"{'ATANAN pay→sonra':>17} {'MÜSAİT pay→sonra':>17} {'eksik→':>7}  sonuç")
+    _kalan_eksik0 = _t_tip - _a_tip
+    for _T, _b, _u, _s, _pa, _pm in _aday[:10]:
+        _ka, _km = _pa - _u, _pm - _u              # taşıma sonrası verici payları
+        _ke = max(0, _kalan_eksik0 - _u)           # taşıma sonrası hedefin eksiği
+        _not = ("bedelsiz" if _ka >= 0 else
+                (f"sınırda: {-_ka} kişi off'tan çekilmeli" if _km >= 0 else
+                 f"⚠ verici {-_km} açık (off'ta da yok)"))
+        print(f"    {takim_gor(_T, 28):<28} {_b:>4} {_u:>6} {_s:>7} "
+              f"{f'{_pa:+d}→{_ka:+d}':>17} {f'{_pm:+d}→{_km:+d}':>17} {_ke:>7}  {_not}")
+    # TOPLAM: aynı vericiden birden çok takım alınırsa pay TÜKENİR → verici
+    # bazında bütçe tutuluyor (yoksa aynı payı iki takıma birden sayardık).
+    # İki bütçe ayrı ayrı: BEDELSİZ (atanan) ve ULAŞILABİLİR (müsait).
+    _s_at = _s_mu = 0
+    _b_at, _b_mu = dict(_pay_at), dict(_pay_mu)
+    for _T, _b, _u, _s, _pa, _pm in _aday:
+        if _b_at.get(_s, 0) >= _u:
+            _b_at[_s] -= _u
+            _s_at += _u
+        if _b_mu.get(_s, 0) >= _u:
+            _b_mu[_s] -= _u
+            _s_mu += _u
+    print(f"    → taşınabilecek toplam kişi:  BEDELSİZ {_s_at}  |  "
+          f"ULAŞILABİLİR {_s_mu}   (eksik {_kalan_eksik0})")
+    print(f"      [verici payları TÜKETİLEREK; BEDELSİZ = kimse yerinden kıpırdamadan,")
+    print(f"       ULAŞILABİLİR = vericide o gün off olanlar da çalıştırılırsa]")
+    if _s_at >= _kalan_eksik0:
+        print(f"      BEDELSİZ bile eksiği kapatmaya YETERDİ → çözücü daha iyi bir")
+        print(f"      tahsis bulamamış (takım×hafta×tip knapsack'i) → H19C ipucu.")
+    elif _s_mu >= _kalan_eksik0:
+        print(f"      Bedelsiz YETMEZ ama vericideki off'lar çekilirse yeter →")
+        print(f"      tahsis + off yerleşimi BİRLİKTE düzeltilmeli, tek başına takım")
+        print(f"      taşımak vericiyi açığa düşürür.")
+    else:
+        print(f"      İkisi de YETMEZ: en iyi hâlde {_s_mu} < eksik {_kalan_eksik0}")
+        print(f"      → gerçek kapasite sorunu, tahsisle kapanmaz.")
+
+print("=" * 78)
 
 
 # %% [HÜCRE 26] — VARDİYA TABLOLARI (talep vs atanan) ──────────────────
@@ -5645,6 +6480,127 @@ print(f"  Sheet7 'LEJANT': {len(LEJANT)} satır  |  off_t karşılanmayan (kırm
       f"{len(offt_karsilanmadi)}")
 
 
+# %% [HÜCRE 30] — DARBOĞAZ RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ──────
+# GEÇİCİ TEŞHİS HÜCRESİ.
+# H19F gibi çözüm gerektirmez; hücreleri 0..19C arası koşup burayı çalıştır.
+#
+# NE ZAMAN: model FİZİBİL (FIZIBILITE_MODU çözüm buluyor) ama amaç açıkken
+# 2700 sn'de tek bir çözüm bile bulunamıyor. O tabloda tek bir kural çözümsüzlük
+# yapmıyor — birlikte daraltan kurallar fizibil bölgeyi iğne deliğine çeviriyor.
+# Bu hücre, hiçbir mevcut kontrolün bakmadığı ÜÇ daralmayı aritmetikle ölçer.
+_dar_gec = dakika(AKSAM_BASLANGIC)                 # 17:00 → akşam/gece eşiği
+
+print("=" * 78)
+print("H30 — DARBOĞAZ RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
+print("=" * 78)
+
+# ── [0] TİP SAYISI — y uzayının büyüklüğü ────────────────────────────
+# H19 takımı HAFTADA TEK TİPE bağlıyor. Tip sayısı arttıkça:
+#   • y[takım,hafta,tip] değişkeni ve H19D kısıtı doğru orantılı büyür
+#   • talep daha çok tipe BÖLÜNÜR, her tip yine TAM takım ister → takım
+#     boyutuna yuvarlama kaybı katlanır (16 kişilik takım, 5 kişilik tip talebi)
+# Yeni bir pickle tip kırılımını değiştirdiyse (ör. 09:00 → 08:30/09:30) model
+# aniden çok daha zor hale gelir. Kural değişmez, arama uzayı büyür.
+_tip_talep = {}                                    # tip → hafta içi toplam talep
+for (_ds, _v), _k in talep.items():
+    if dt.date.fromisoformat(_ds).weekday() < 5:
+        _t = saat[(_ds, _v)][0]
+        _tip_talep[_t] = _tip_talep.get(_t, 0) + _k
+print(f"\n[0] VARDİYA TİPİ SAYISI  (H19: takım haftada TEK tip)")
+print(f"    farklı tip           : {len(TIP_SET)}   {sorted(TIP_SET)}")
+print(f"    y[takım,hafta,tip]   : {len(takim_tip)} ikili değişken")
+print(f"    takım sayısı         : {len(takimlar)}  |  ortalama üye "
+      f"{len(AGENTS) / max(1, len(takimlar)):.1f}")
+print(f"    {'tip':>7} {'hafta içi toplam talep':>24} {'≈ takım-hafta':>14}")
+_ort_uye = len(AGENTS) / max(1, len(takimlar))
+for _t in sorted(_tip_talep, key=lambda k: -_tip_talep[k]):
+    print(f"    {_t:>7} {_tip_talep[_t]:>24} "
+          f"{_tip_talep[_t] / max(1, _ort_uye * 5):>14.1f}")
+print(f"    → tip sayısı ARTTIYSA (ör. 5 → 10) arama uzayı katlanır ve her tip")
+print(f"      yine TAM takım ister; küçük talepli tipler yuvarlama kaybı yaratır.")
+
+# ── [1] AKŞAM/GECE ROTASYON BÜTÇESİ — H16D × H19 ─────────────────────
+# Hiçbir mevcut kontrol buna bakmıyor. Mekanizma:
+#   H19  → takım o hafta tek tipte; geç tipe giderse TÜM üyeleri o hafta akşam
+#   H16D → her agent ayda EN FAZLA MAX_AKSAM_HAFTA hafta akşam/gece
+#   ⇒ fiilen: her TAKIM ayda en fazla MAX_AKSAM_HAFTA hafta geç tipte olabilir
+# Bütçe dolarsa model çözümsüz olmaz (üyeler ayrılabilir/izinli olabilir) ama
+# fizibil bölge çok daralır → "çözüm var, bulunamıyor".
+print(f"\n[1] AKŞAM/GECE ROTASYON BÜTÇESİ  (H16D × H19; eşik ≥{AKSAM_BASLANGIC})")
+_kapasite_th = len(takimlar) * MAX_AKSAM_HAFTA
+_gereken_th, _hafta_satir = 0, []
+for _wk in sorted(haftalar):
+    _hi = [g for g in haftalar[_wk] if dt.date.fromisoformat(g).weekday() < 5]
+    if not _hi:
+        continue
+    _gec_tipler = [t for t in hafta_tipler.get(_wk, []) if dakika(t) >= _dar_gec]
+    if not _gec_tipler:
+        continue
+    # o haftanın ZİRVE günlük geç talebi (H19: takım hafta boyu o tipte)
+    _zirve = max(sum(talep[(g, v)] for v in gun_vardiyalari[g]
+                     if (g, v) in talep and saat[(g, v)][0] in _gec_tipler)
+                 for g in _hi)
+    # zirveyi kapatmak için EN AZ kaç takım gerekir (büyükten küçüğe doldur)
+    _kat = sorted((max((takim_etkin_tip.get((T, _wk, t), 0) for t in _gec_tipler),
+                       default=0) for T in takimlar), reverse=True)
+    _top, _n = 0, 0
+    for _c in _kat:
+        if _top >= _zirve:
+            break
+        _top += _c
+        _n += 1
+    _gereken_th += _n
+    _hafta_satir.append((_wk, _zirve, _n))
+print(f"    {'hafta':>10} {'zirve geç talep':>16} {'gereken takım':>14}")
+for _wk, _z, _n in _hafta_satir:
+    print(f"    {f'{_wk[0]}-W{_wk[1]}':>10} {_z:>16} {_n:>14}")
+print(f"    {'':>10} {'TOPLAM gereken':>16} {_gereken_th:>14} takım-hafta")
+print(f"    MEVCUT kapasite: {len(takimlar)} takım × {MAX_AKSAM_HAFTA} hafta "
+      f"= {_kapasite_th} takım-hafta")
+_oran = 100 * _gereken_th / max(1, _kapasite_th)
+if _gereken_th > _kapasite_th:
+    print(f"    ⚠ BÜTÇE AŞILDI (%{_oran:.0f}) → H16D ile H19 birlikte tutmuyor.")
+    print(f"      Çare: MAX_AKSAM_HAFTA'yı {MAX_AKSAM_HAFTA + 1} yap, ya da Stage-1'de")
+    print(f"      geç vardiya talebini düşür. Bu hâliyle model ya çözümsüz ya da")
+    print(f"      fizibil bölge o kadar dar ki çözücü bulamıyor.")
+elif _oran > 70:
+    print(f"    ⚠ DAR: kapasitenin %{_oran:.0f}'i kullanılıyor. Çözümsüz değil ama")
+    print(f"      arama çok zorlaşır — UNKNOWN'ın muhtemel sebebi bu.")
+else:
+    print(f"    ✓ rahat: kapasitenin %{_oran:.0f}'i kullanılıyor")
+
+# ── [2] HAFTA SONU BÜTÇESİ — H18 × sert band ─────────────────────────
+# H10 hafta sonu kovaları talep ± HS_TOL SERT band → alt sınırı doldurmak ZORUNLU.
+# H18 ise her agentın 1 tam Cmt+Pzr'ı off geçirmesini ZORUNLU kılıyor.
+# İkisi aynı hafta sonu havuzundan yiyor.
+print(f"\n[2] HAFTA SONU BÜTÇESİ  (H18 × sert band ±{HS_TOL})")
+_hs_kolon30 = [ds for ds in PLAN_GUNLER
+               if dt.date.fromisoformat(ds).weekday() >= 5
+               and dt.date.fromisoformat(ds) not in TATIL]
+_gereken_hs30 = sum(max(0, _k - HS_TOL) for (_ds, _v), _k in talep.items()
+                    if dt.date.fromisoformat(_ds).weekday() >= 5)
+_uygun30 = [a for a in AGENTS if a not in hafta_sonu_yasak]
+_kap_hs30 = 0
+for a in _uygun30:
+    _m = sum(1 for ds in _hs_kolon30
+             if any((a, ds, v) in x for v in gun_vardiyalari.get(ds, [])))
+    _kap_hs30 += max(0, _m - (2 if CIFT_HS_OFF else 0))   # H18 zorunlu çift off
+print(f"    sert band alt sınırı için GEREKEN : {_gereken_hs30:>6} kişi-gün")
+print(f"    H18 sonrası KALAN kapasite        : {_kap_hs30:>6} kişi-gün "
+      f"({len(_uygun30)} uygun agent, hamile/süt hariç)")
+_pay30 = _kap_hs30 - _gereken_hs30
+if _pay30 < 0:
+    print(f"    ⚠ AÇIK {-_pay30} kişi-gün → H18 ile sert band birlikte tutmuyor.")
+    print(f"      Çare: CIFT_HS_OFF=False ya da HS_TOL'ü artır.")
+elif _pay30 < 0.15 * max(1, _gereken_hs30):
+    print(f"    ⚠ DAR: pay sadece +{_pay30} kişi-gün (%{100*_pay30/max(1,_gereken_hs30):.0f})")
+    print(f"      → hafta sonu yerleşimi neredeyse tek bir çözüme sıkışıyor.")
+else:
+    print(f"    ✓ rahat: pay +{_pay30} kişi-gün "
+          f"(%{100*_pay30/max(1,_gereken_hs30):.0f})")
+print("=" * 78)
+
+
 # %% [HÜCRE 31] — INTERVAL BAZLI COVERAGE PICKLE (plan_vs_model girdisi) ─
 # NE İŞE YARAR: plan_vs_model_karsilastirma.py bugün İKİ kaynağı kıyaslıyor —
 #   build_plan_coverage(df_plan)        → elle yapılan vardiya planı (agent × gün)
@@ -5838,3 +6794,202 @@ print(f"    df = df_cmp.merge(p['interval'], on=['data_date','interval'], how='l
 print("=" * 78)
 
 
+# %% [HÜCRE 32] — MESAİ AÇIĞI RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ────
+# GEÇİCİ TEŞHİS — H22'den sonra istediğin an koş, modeli DEĞİŞTİRMEZ.
+#
+# SORU: "MAX_MESAI=2 diyoruz ama bazı agent 1 mesaide kalıyor. Ör. Pzt off,
+#        Cmt NORM. Pzt de çalışsaydı Cmt MESAİ olurdu → 2 mesai, üstelik
+#        Pzt'nin kovası da dolardı. Neden olmuyor?"
+#
+# ÖNCE KİMLİK: mesai bir "ek gün" değil, bir ARTIK:
+#     mesai_gün = hafta sonu çalışma − hafta içi off
+# Yani mesaiyi 1'den 2'ye çıkarmanın İKİ yolu var:
+#   (a) bir hafta sonu günü DAHA çalış   → hafta sonu coverage'ı artar
+#   (b) bir hafta içi off'u KALDIR       → HAFTA İÇİ coverage'ı artar  ← istenen
+# Eksik %100 hafta içi olduğu için işe yarayan (b). Bu yüzden MAX_MESAI'yi
+# artırmak bu soruna DOKUNMAZ (fazladan mesai günü = fazladan hafta sonu günü).
+#
+# Bu hücre (b)'nin ne kadarının GERÇEKTEN mümkün olduğunu ölçer. Her hafta içi
+# off için "bu off kaldırılabilir miydi" diye SERT kuralları tek tek dener:
+#   H17  kota tavanı  — o agent bir gün daha çalışabilir mi (calisma < ust)
+#   H12  7 gün kuralı — o günü çalışırsa herhangi bir kayan pencere 6'yı aşar mı
+#                       (önceki ay taşıması DAHİL)
+#   H15  11 saat      — bir önceki/sonraki günün vardiyasıyla çakışır mı
+#   H19  takım tipi   — o hafta takımının tipinde o gün kova var mı
+#
+# ÜST SINIR OKUMASI: her off TEK BAŞINA test ediliyor, diğer her şey sabit.
+# Aynı anda iki off'u birden kaldırmak yeni ihlaller doğurabilir; ayrıca
+# amaç fonksiyonu (adalet cezaları) hiç hesaba katılmıyor. Yani çıkan sayı
+# "en iyi hâlde bu kadar" demek — garanti kazanç değil.
+MESAI_HEDEF = MAX_MESAI          # kaç mesai hedefleniyor (varsayılan sert tavan)
+
+print("=" * 78)
+print("H32 — MESAİ AÇIĞI RÖNTGENİ (salt okunur; çözüm çalıştırılmadı)")
+print("=" * 78)
+
+_m32_uygun = [a for a in roster_2.index
+              if a in kota_map and a not in ozel_agents]   # mesai YAPABİLENLER
+_m32 = {a: int(roster_2.at[a, "mesai_gun"]) for a in _m32_uygun}
+_m32_dag = Counter(_m32.values())
+_m32_bos = sum(max(0, MESAI_HEDEF - v) for v in _m32.values())
+
+print(f"\n[1] MESAİ DURUMU  (uygun agent {len(_m32_uygun)}, hedef {MESAI_HEDEF})")
+print(f"    dağılım (mesai günü → agent): {dict(sorted(_m32_dag.items()))}")
+print(f"    kullanılmayan mesai kapasitesi: {_m32_bos} mesai-günü")
+print(f"    NOT: mesai_gün = hafta sonu çalışma − hafta içi off. Bu kapasitenin")
+print(f"         hafta İÇİ coverage'a dönmesi için hafta içi off'un kalkması gerek;")
+print(f"         hafta sonu günü eklemek hafta içi eksiğe DOKUNMAZ.")
+
+# ── yardımcılar ──────────────────────────────────────────────────────
+_hs_kol32 = [c for c in _gun if dt.date.fromisoformat(c).weekday() >= 5
+             and dt.date.fromisoformat(c) not in TATIL]
+_hi_kol32 = [c for c in _gun if dt.date.fromisoformat(c).weekday() < 5
+             and dt.date.fromisoformat(c) not in TATIL]
+_eksik32 = {(r.tarih, r.vardiya): -r.fark          # (gün,vardiya) → eksik (0 ise yok)
+            for r in df_cov.itertuples() if r.fark < 0}
+
+
+def _calisilan32(a):
+    """agent'ın ÇALIŞTIĞI günler (date kümesi) — önceki ay taşıması dahil."""
+    return ({dt.date.fromisoformat(c) for c in _gun
+             if roster.at[a, c] not in _OFF_LIKE}
+            | set(onceki_calisti.get(a, set())))
+
+
+def _tip32(a, wk):
+    """agent'ın o HAFTA çalıştığı vardiya tipi (tek tip; yoksa None)."""
+    _t = {roster.at[a, c].replace("mesai ", "").split("-")[0]
+          for c in _gun
+          if dt.date.fromisoformat(c).isocalendar()[:2] == wk
+          and roster.at[a, c] not in _OFF_LIKE}
+    return next(iter(_t)) if len(_t) == 1 else None
+
+
+def _h12_serbest32(a, d, _cal):
+    """o günü ÇALIŞSA kayan 7 günlük pencere (H12) 6'yı aşar mı? (aşmıyorsa True)"""
+    for _j in range(7):
+        _s = d - dt.timedelta(days=_j)
+        _pen = {_s + dt.timedelta(days=_k) for _k in range(7)}
+        if len(_cal & _pen) + 1 > 6:               # +1 = incelenen gün
+            return False
+    return True
+
+
+def _h15_serbest32(a, ds, bas, bit):
+    """önceki/sonraki günün vardiyasıyla 11 saat kuralı tutuyor mu?"""
+    d = dt.date.fromisoformat(ds)
+    for _yon in (-1, 1):
+        _k = (d + dt.timedelta(days=_yon)).isoformat()
+        _v = roster.at[a, _k] if _k in roster.columns else None
+        _p = _vardiya_parse(str(_v).replace("mesai ", "")) if _v else None
+        if not _p:
+            continue                               # o gün off/izin → kısıt yok
+        if _yon == -1:                             # önceki gün → bu gün
+            if bas_dakika(bas) + 1440 - bitis_abs(*_p) < DINLENME:
+                return False
+        else:                                      # bu gün → sonraki gün
+            if bas_dakika(_p[0]) + 1440 - bitis_abs(bas, bit) < DINLENME:
+                return False
+    return True
+
+
+# ── [2] mesai hedefin ALTINDA kalan agentlar: sebep sınıflandırması ──
+_sebep32 = Counter()
+_kaldirilabilir = []                               # (agent, gün, tip, o günkü eksik)
+for a in _m32_uygun:
+    if _m32[a] >= MESAI_HEDEF:
+        continue
+    # kişisel hafta sonu tavanı (H18 zorunlu çift off düşülmüş)
+    _hs_mus = max(0, sum(1 for c in _hs_kol32
+                         if any((a, c, v) in x for v in gun_vardiyalari.get(c, [])))
+                  - (2 if CIFT_HS_OFF else 0))
+    if _hs_mus < MESAI_HEDEF:
+        _sebep32["hafta sonu müsaitliği yetmiyor (izin/H18)"] += 1
+        continue
+    _hi_off = [c for c in _hi_kol32 if roster.at[a, c] == "off"]
+    if not _hi_off:
+        _sebep32["hafta içi off YOK → hafta sonu günü az çalışmış"] += 1
+        continue
+    _cal = _calisilan32(a)
+    _bulundu = False
+    for c in _hi_off:
+        d = dt.date.fromisoformat(c)
+        _t = _tip32(a, d.isocalendar()[:2])
+        if _t is None:
+            continue                               # o hafta hiç çalışmamış / çok tipli
+        # takımının tipinde o gün ÇALIŞILABİLİR bir kova var mı (H19 + sert yasaklar)
+        _kova = next((v for v in gun_vardiyalari.get(c, [])
+                      if (c, v) in talep and saat[(c, v)][0] == _t
+                      and _kova_calisabilir(a, c, v)), None)
+        if _kova is None:
+            continue
+        if int(_cal_top[a]) >= ust_map[a]:          # H17 toplam tavan
+            continue
+        if not _h12_serbest32(a, d, _cal):          # H12 kayan pencere
+            continue
+        if not _h15_serbest32(a, c, *saat[(c, _kova)]):   # H15 11 saat
+            continue
+        _kaldirilabilir.append((a, c, _t, _eksik32.get((c, _kova), 0)))
+        _bulundu = True
+    _sebep32["off KALDIRILABİLİR görünüyor" if _bulundu
+             else "off var ama SERT kural kilitliyor (H12/H15/H19/H17)"] += 1
+
+print(f"\n[2] MESAİ < {MESAI_HEDEF} OLAN AGENTLAR — sebep")
+for _k, _n in _sebep32.most_common():
+    print(f"    {_k:<52} {_n:>5}")
+
+# ── [3] kaldırılabilir off günleri: kazanç var mı ────────────────────
+print(f"\n[3] KALDIRILABİLİR HAFTA İÇİ OFF  ({len(_kaldirilabilir)} (agent,gün))")
+if _kaldirilabilir:
+    _kazancli = [r for r in _kaldirilabilir if r[3] > 0]
+    print(f"    bunlardan {len(_kazancli)} tanesi O GÜN O TİPTE EKSİK olan bir kovaya denk")
+    print(f"    → doğrudan coverage kazancı (üst sınır): {len(_kazancli)} kişi-gün")
+    print(f"    kalan {len(_kaldirilabilir) - len(_kazancli)} tanesi dolu kovaya denk "
+          f"→ mesai sayısını düzeltir ama coverage'a katkı vermez")
+    _tip_dag32 = Counter(r[2] for r in _kazancli)
+    print(f"    tip dağılımı (kazançlı olanlar): {dict(sorted(_tip_dag32.items()))}")
+    _gun_dag32 = Counter(r[1] for r in _kazancli)
+    print(f"    en çok kazanç veren 8 gün:")
+    for _c, _n in _gun_dag32.most_common(8):
+        _d = dt.date.fromisoformat(_c)
+        print(f"       {_c} {DAY_TR[_d.weekday()]}: {_n} kişi")
+    print(f"    örnek 10 (agent, gün, tip, o kovadaki eksik):")
+    for a, _c, _t, _e in sorted(_kaldirilabilir, key=lambda r: -r[3])[:10]:
+        print(f"       {a}  {_c} {DAY_TR[dt.date.fromisoformat(_c).weekday()]}  "
+              f"tip {_t}  kova eksiği {_e}")
+else:
+    print(f"    hiç yok → hafta içi off'ların HEPSİ sert kuralla kilitli "
+          f"(H12 7 gün / H15 11 saat / H19 takım tipi / H17 tavan)")
+
+# ── [4] HAFTA SONU YERLEŞİMİ: aynı hafta sonuna mı yığılmış? ─────────
+# H12 ile bağlantı: bir agent Cmt+Pzr'ı AYNI hafta sonunda çalışırsa o hafta
+# Pzt-Cum + Cmt + Pzr = 7 ardışık gün olur → 7 günlük pencere ZORUNLU bir
+# hafta içi off ister. O off da bir hafta sonu gününü NORM'a çevirir → mesai
+# 2 yerine 1 kalır. Aynı iki günü FARKLI hafta sonlarına dağıtsaydı ikisi de
+# mesai olurdu ve hafta içi off gerekmezdi.
+_cift32, _ayri32 = 0, 0
+_cift_ornek = []
+for a in _m32_uygun:
+    _hs_cal = [c for c in _hs_kol32 if roster.at[a, c] not in _OFF_LIKE]
+    if len(_hs_cal) < 2:
+        continue
+    # aynı hafta sonu = ardışık Cmt+Pzr (ISO hafta aynı)
+    _wk = Counter(dt.date.fromisoformat(c).isocalendar()[:2] for c in _hs_cal)
+    if max(_wk.values()) >= 2:
+        _cift32 += 1
+        if _m32[a] < MESAI_HEDEF and len(_cift_ornek) < 8:
+            _cift_ornek.append((a, _m32[a], _hs_cal))
+    else:
+        _ayri32 += 1
+
+print(f"\n[4] HAFTA SONU YERLEŞİMİ  (≥2 hafta sonu günü çalışan agentlar)")
+print(f"    aynı hafta sonunda Cmt+Pzr : {_cift32:>5}  → o hafta H12 gereği "
+      f"hafta içi off ZORUNLU")
+print(f"    farklı hafta sonlarına dağılmış: {_ayri32:>5}  → hafta içi off gerekmez")
+if _cift32:
+    print(f"    Cmt+Pzr birlikte VE mesai < {MESAI_HEDEF} olan örnekler:")
+    for a, _m, _hs in _cift_ornek:
+        print(f"       {a}  mesai {_m}  hafta sonu günleri: {_hs}")
+    print(f"    → bu desendekiler için çare off cezası DEĞİL, hafta sonu günlerini")
+    print(f"      farklı hafta sonlarına dağıtmak (yeni bir kural gerektirir).")
+print("=" * 78)
