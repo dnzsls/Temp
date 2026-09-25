@@ -1,31 +1,9 @@
-_s1 = []
-for a in mesai_yok:
-    if a not in kota_map:
-        continue
-    _top = 0
-    for wk, gl in haftalar.items():
-        _wd = sum(1 for ds in gl
-                  if dt.date.fromisoformat(ds).weekday() < 5
-                  and dt.date.fromisoformat(ds) not in TATIL
-                  and any((a, ds, v) in x for v in gun_vardiyalari[ds]))
-        _tav = _wd
-        if wk == SINIR_HAFTA and a in onceki_gun:
-            _tav = max(0, _wd + onceki_musait_hi.get(a, 0) - onceki_gun[a])
-        _top += _tav
-    if _top < kota_map[a]:
-        _s1.append((a, "tavan toplamı", _top, "kota", kota_map[a]))
-print(len(_s1), _s1[:20])
-
-
-
-_s2 = []
-for a in hafta_sonu_yasak:
-    if a not in kota_map:
-        continue
-    _mus = sum(1 for ds in PLAN_GUNLER
-               if dt.date.fromisoformat(ds).weekday() < 5
-               and dt.date.fromisoformat(ds) not in TATIL
-               and any((a, ds, v) in x for v in gun_vardiyalari[ds]))
-    if _mus < kota_map[a]:
-        _s2.append((a, "müsait hafta içi", _mus, "kota", kota_map[a]))
-print(len(_s2), _s2[:20])
+a = "U097099"
+print("kota", kota_map.get(a), "| izin", sorted(izin_map.get(a, set())))
+print("off_t2", sorted(off_block_map.get(a, set())), "| off_t", sorted(off_soft_map.get(a, set())))
+for wk, gl in sorted(haftalar.items()):
+    _wd = [ds for ds in gl
+           if dt.date.fromisoformat(ds).weekday() < 5
+           and dt.date.fromisoformat(ds) not in TATIL
+           and any((a, ds, v) in x for v in gun_vardiyalari[ds])]
+    print(f"{wk[0]}-W{wk[1]}: müsait hafta içi {len(_wd)} → {_wd}")
