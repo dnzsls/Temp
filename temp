@@ -2474,6 +2474,133 @@ else:
     print(f"çift hafta sonu off: KAPALI (CIFT_HS_OFF=False) — {len(hs_ciftleri)} "
           f"hafta sonu çifti var ama kısıt kurulmadı")
 
+# ── ÖN KONTROL: ÇİFT HAFTA SONU OFF VERİLEBİLİR Mİ? (SALT OKUNUR) ─────
+# H18 SERT: her agent ayda ≥1 tam Cmt+Pzr off geçirmek ZORUNDA. Kota da SERT
+# (H17) → agent hafta içi off_t2 / izin ya da ÖNCEKİ AYDAN gelen devir (H8C/H12)
+# yüzünden hafta sonlarını telafi olarak çalışmak zorundaysa, off bırakacağı bir
+# çift kalmaz ve model INFEASIBLE olur. Sebep 45 dakikalık koşunun SONUNDA
+# çıkıyor; burada çözmeden ÖNCE hesaplanıyor. HİÇBİR KISIT KURULMAZ/DEĞİŞMEZ.
+#
+# TİPİK DESEN (kullanıcı, 2026-09-28): agent önceki ayın son 5 gününü çalışmış
+# → H12 kayan penceresi ayın ilk günlerinde en fazla 1 gün bırakıyor → hafta içi
+# off ZORUNLU → o hafta sonu çalışmak zorunda. Kota yüksekse aynı şey sıradaki
+# hafta sonlarında da olur ve serbest çift kalmaz.
+#
+# ÖLÇÜ = H17B ön kontrolünün kapasitesi, o çift KAPALI varsayılarak:
+#   kapasite(a, çift) = Σ_hafta min(haftalık tavan, çalışılabilir gün − çift)
+#   kapasite ≥ kota olan BİR çift varsa → o agent kuralı tutturabilir.
+# Hafta sonu ZATEN bloklu (izin/off_t2) ya da yasak (hamile/süt, H14) olan
+# agentta çifti kapatmak kapasiteden hiç düşmez → kural bedava sağlanır. Mevcut
+# kod da öyle davranıyor: o günlerde değişken yok / 0'a çivili → `co` serbest.
+#
+# ÜST SINIR OKUMASI: her çift TEK BAŞINA test edilir (diğer her şey sabit) ve
+# H12'nin kayan penceresi "ISO haftada ≤6" ile yaklaşılır — H17B ön kontrolüyle
+# AYNI yaklaşım. Yani "geçti" garanti DEĞİL; "geçemedi" kesin darboğazdır.
+_h18_hs_gun = [ds for ds in PLAN_GUNLER
+               if dt.date.fromisoformat(ds).weekday() >= 5]
+
+
+def _h18_gun_ok(a, ds):
+    """agent o gün HERHANGİ bir kovada çalışabilir mi (sert yasaklar dahil)?"""
+    if a in mesai_yok and dt.date.fromisoformat(ds) in TATIL:
+        return False                                   # H16
+    return any(_kova_calisabilir(a, ds, v) for v in gun_vardiyalari[ds])
+
+
+def _h18_kapasite(a, kapali=frozenset()):
+    """ay boyu çalışabileceği gün ÜST SINIRI; `kapali` günleri off varsayılır."""
+    _top = 0
+    for wk, gunler in haftalar.items():
+        _mus = sum(1 for ds in gunler
+                   if ds not in kapali and _h18_gun_ok(a, ds))
+        if a in mesai_yok or (a in ozel_agents
+                              and any(dt.date.fromisoformat(ds) in TATIL for ds in gunler)):
+            _tv = sum(1 for ds in gunler                # H16C / H17B ölçüsü
+                      if dt.date.fromisoformat(ds).weekday() < 5
+                      and dt.date.fromisoformat(ds) not in TATIL
+                      and dt.date.fromisoformat(ds) not in izin_map.get(a, set()))
+            if a in mesai_yok and wk == SINIR_HAFTA and a in onceki_gun:
+                _tv = max(0, _tv + onceki_musait_hi.get(a, 0) - onceki_gun[a])
+        else:
+            _tv = 6                                     # H12: 7 günde en fazla 6
+        _top += min(_tv, _mus)
+    return _top
+
+
+_h18_muaf, _h18_tek_ok = [], []                         # (agent, en iyi çift kap., tek gün kap., kota)
+if CIFT_HS_OFF and hs_ciftleri:
+    for a in AGENTS:
+        if a not in kota_map:
+            continue                                    # H17 kısıt koymadı → kota baskısı yok
+        _en_iyi = -1
+        for _cmt18, _pzr18 in hs_ciftleri:
+            _en_iyi = max(_en_iyi, _h18_kapasite(a, {_cmt18, _pzr18}))
+            if _en_iyi >= kota_map[a]:
+                break                                   # bir çift yetti → sorun yok
+        if _en_iyi >= kota_map[a]:
+            continue
+        _tek18 = max((_h18_kapasite(a, {ds}) for ds in _h18_hs_gun), default=-1)
+        (_h18_tek_ok if _tek18 >= kota_map[a] else _h18_muaf).append(
+            (a, _en_iyi, _tek18, kota_map[a]))
+
+if not CIFT_HS_OFF:
+    print("  çift off ön kontrolü: atlandı (CIFT_HS_OFF=False)")
+elif not hs_ciftleri:
+    print("  çift off ön kontrolü: atlandı (tam Cmt+Pzr çifti yok)")
+elif not (_h18_muaf or _h18_tek_ok):
+    print(f"  ✓ çift off ön kontrolü: {len(kota_map)} agentın hepsi en az bir tam "
+          f"Cmt+Pzr off bırakıp kotasını doldurabiliyor")
+else:
+    print(f"  ⚠ ÇİFT OFF TUTMAZ: {len(_h18_muaf) + len(_h18_tek_ok)} agent hiçbir "
+          f"(Cmt,Pzr) çiftini birlikte off geçiremiyor → H18 + H17 birlikte INFEASIBLE:")
+    for _et18, _lst18 in (("tek hafta sonu GÜNÜ off mümkün", _h18_tek_ok),
+                          ("tek gün off DA mümkün değil", _h18_muaf)):
+        if not _lst18:
+            continue
+        print(f"     [{_et18}] {len(_lst18)} agent:")
+        for a, _en18, _tk18, _q18 in sorted(_lst18, key=lambda r: r[1] - r[3])[:10]:
+            _o218 = sorted(d for d in off_block_map.get(a, set()) if d.weekday() < 5)
+            print(f"       {a}: kota {_q18}  |  en iyi çift kapalıyken kapasite "
+                  f"{_en18} (açık {_q18 - _en18})  |  tek gün kapalıyken {_tk18}")
+            print(f"          hafta içi off_t2 "
+                  f"{[d.isoformat() for d in _o218] if _o218 else '—'}  |  "
+                  f"önceki ay devri: çalışma {onceki_gun.get(a, '—')}, "
+                  f"off {onceki_off.get(a, '—')}"
+                  + ("  [mesaiye kalamaz]" if a in mesai_yok else "")
+                  + ("  [hamile/süt]" if a in hafta_sonu_yasak else ""))
+        if len(_lst18) > 10:
+            print(f"       ... ({len(_lst18) - 10} agent daha)")
+    print(f"     → ŞİMDİLİK SADECE UYARI: kural yine HERKESE kurulu (davranış "
+          f"değişmedi). INFEASIBLE gelirse CIFT_HS_OFF=False ile teyit et; kalıcı "
+          f"çare bu agentları kuraldan MUAF tutmak (kademeli muafiyet: çift → tek "
+          f"gün → yok; konuşuldu, KODLANMADI).")
+
+# ── ÖN KONTROL 2: TOPLAM HAFTA SONU BÜTÇESİ (H18 × sert band) ────────
+# Yukarıdaki test her agentı TEK BAŞINA ölçer; ikinci sıkışma TOPLAMDA olur:
+# hafta sonu kovalarının SERT alt sınırı (talep − HS_TOL) doldurulmak ZORUNDA,
+# H18 ise her agentın 2 hafta sonu gününü kapatıyor — ikisi AYNI havuzdan yiyor.
+# Bu durumda kişisel muafiyet çözmez (herkes tek tek yapabilir, hep birlikte
+# yapamazlar). Aynı aritmetik H30 [2]'de de var ama orası çözümden SONRA koşuyor.
+_h18_gereken = sum(max(0, kisi - HS_TOL) for (ds, v), kisi in talep.items()
+                   if dt.date.fromisoformat(ds).weekday() >= 5)
+_h18_kap = 0
+for a in AGENTS:
+    if a in hafta_sonu_yasak:
+        continue                                        # hafta sonu zaten çalışamaz (H14)
+    _m18 = sum(1 for ds in _h18_hs_gun if _h18_gun_ok(a, ds))
+    _h18_kap += max(0, _m18 - (2 if CIFT_HS_OFF else 0))
+_h18_pay = _h18_kap - _h18_gereken
+print(f"  hafta sonu bütçesi: sert band GEREKEN {_h18_gereken} kişi-gün  |  "
+      f"H18 sonrası kapasite {_h18_kap}  |  pay {_h18_pay:+d}")
+if _h18_pay < 0:
+    print(f"     ⚠ AÇIK {-_h18_pay} kişi-gün → H18 ile hafta sonu SERT bandı birlikte "
+          f"tutmuyor (kişisel muafiyet çözmez) → CIFT_HS_OFF=False ya da HS_TOL artır")
+elif _h18_pay < 0.15 * max(1, _h18_gereken):
+    print(f"     ⚠ DAR: pay yalnız %{100 * _h18_pay / max(1, _h18_gereken):.0f} → çözüm "
+          f"VAR ama hafta sonu yerleşimi neredeyse tek çözüme sıkışır (UNKNOWN riski)")
+else:
+    print(f"     ✓ rahat: pay %{100 * _h18_pay / max(1, _h18_gereken):.0f}")
+
 
 # %% [HÜCRE 19] — TAKIM BÜTÜNLÜĞÜ (takım hafta boyu TEK tip + cezalı istisna) ─
 # Takım o HAFTA tek vardiya-tipinde toplanır. Üç parça:
