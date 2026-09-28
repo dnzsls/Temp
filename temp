@@ -43,6 +43,11 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        Tatil payı KOŞULLU: ancak tatil fiilen çalışılırsa açılır → H22'nin
                        mesai_gun'ü ile birebir aynı ölçü (koşulsuz payda mesai_gun 3 çıkıyordu).
     H18 hafta sonu off: ayda ≥1 tam Cmt+Pzr çifti off — CIFT_HS_OFF ile aç/kapa (varsayılan True).
+                       MUAFİYET (CIFT_HS_OFF_ESNEK, varsayılan True): kaçış değişkeni +
+                       W_CIFT_OFF_MUAF(500) cezası → kural ancak FİİLEN imkânsızsa kırılır
+                       (kazanç en fazla 2×W_EKSIK_HS=50 → satın alınamaz). Kararı ÇÖZÜCÜ verir;
+                       aritmetik ön kontrol yanlış "✓" verdiği için KALDIRILDI. Muaf listesi
+                       H21'de, roster'da `cift_off_muaf` kolonunda, H28B'de ihlal sayılmaz.
     H19 takım tek tip: takım o HAFTA tek vardiya tipinde (hafta içi; resmi tatil haftası muaf).
                        Üye ayrılamaz — TEK istisna fiziksel imkânsızlık (sabahçı üye ↔ geç/gece
                        tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
@@ -211,9 +216,40 @@ BILINMEYEN_KIDEMSIZ = True     # H14B: kıdemi df_kidem'de OLMAYAN/okunamayan ag
                                # model INFEASIBLE olur. H14B'nin fizibilite ön kontrolü
                                # bunu koşmadan ÖNCE kova kova listeler; uyarı çıkarsa
                                # ya bu bayrağı False yap ya da o agentların kıdemini gir.
-CIFT_HS_OFF      = True        # H18 aç/kapa: True → her agent ayda EN AZ 1 tam Cmt+Pzr off (SERT)
+CIFT_HS_OFF      = True        # H18 aç/kapa: True → her agent ayda EN AZ 1 tam Cmt+Pzr off
                                # False → kural hiç kurulmaz. Hafta sonu kapasitesi sıkışırsa
                                # (sert band + takım tipi + adalet eşikleri) ilk gevşetilecek yer.
+# ── H18 MUAFİYETİ (2026-09-28) ────────────────────────────────────────
+# SORUN (ölçüldü, Ekim 2026): H18 SERT iken TEK BİR agent bütün ayı
+# INFEASIBLE yapıyordu. Agent önceki ayın son 5 gününü çalışmış → H12 kayan
+# penceresi ayın ilk günlerini kapatıyor → hafta içi off ZORUNLU → o hafta
+# sonunu çalışmak zorunda; kota (SERT) yüzünden sıradaki hafta sonları da
+# gidiyor ve off bırakacak bir (Cmt,Pzr) çifti kalmıyor.
+#
+# NEDEN ARİTMETİK MUAFİYET DEĞİL: "kimin yapamadığını önceden hesaplayıp
+# kuraldan çıkaralım" denendi — H18'e eklenen ön kontrol "428/428 ✓" dedi,
+# model yine çözümsüz çıktı. Sebep yapısal: bir agentın çift off bırakıp
+# bırakamayacağını sadece kendi günleri belirlemiyor; takım tipi (H19),
+# coverage bandları (H10) ve diğer 456 agentın yerleşimi birlikte belirliyor.
+# Hiçbir kişi-bazlı formül bunu yakalayamaz. Ön kontrol bu yüzden SİLİNDİ.
+#
+# ÇÖZÜM: kararı ÇÖZÜCÜ versin. Her agente bir muafiyet göstergesi açılıyor:
+#     Σ (o hafta sonu tam off) + muaf[a] ≥ 1
+# ve muaf[a] amaç fonksiyonunda W_CIFT_OFF_MUAF ile cezalanıyor. Ceza bir
+# "fatura" DEĞİL, ÖNCELİK: model kuralı ancak başka çaresi kalmadığında kırar.
+#
+# AĞIRLIK EŞİĞİ — "coverage yetmiyor diye kırmasın" (kullanıcı kuralı):
+# Bir agenti muaf tutmanın modele KAZANCI en fazla 2 hafta sonu günü, yani
+# 2 × W_EKSIK_HS(25) = 50 puan. (Fazladan hafta sonu günü ayrıca H20C adalet
+# cezası yiyor → gerçek kazanç daha da az.) 500 = bunun 10 KATI → coverage ne
+# kadar sıkışırsa sıkışsın satın alınamaz. W_EKSIK_HS'i değiştirirsen bunu da
+# güncelle: W_CIFT_OFF_MUAF > 2 × W_EKSIK_HS olmalı, rahat pay için ×10.
+#
+# YANLIŞ POZİTİF YOK: agentın bir çifti varsa Σ zaten ≥ 1 olur ve muaf 0'da
+# kalır (1 yapmak 500'e mal olur) → muaf=1 çıkan HERKES gerçekten bırakamamış.
+# FİZİBİLİTE MODUNDA anlamsız: amaç kurulmadığı için muafiyet bedava (H21 uyarır).
+CIFT_HS_OFF_ESNEK = True       # False → eski SERT davranış (muafiyet yok, INFEASIBLE riski)
+W_CIFT_OFF_MUAF   = 500        # muafiyet cezası; > 2 × W_EKSIK_HS olmalı (bkz. yukarı)
 
 # ── HAFTALIK OFF (H20B) ─────────────────────────────────────────────────
 HAFTA_OFF_SERT = True          # SERT: haftada en fazla MAX_HAFTA_OFF model off'u
@@ -2454,6 +2490,7 @@ for ds in PLAN_GUNLER:
 
 n = 0
 _kt_cift = []                                    # TESHIS_MODU: çift hafta sonu off kısıtları
+cift_off_muaf = {}                               # agent → muafiyet göstergesi (CIFT_HS_OFF_ESNEK)
 if CIFT_HS_OFF:
     for a in AGENTS:
         cift_off = []
@@ -2464,142 +2501,29 @@ if CIFT_HS_OFF:
             for xv in gun_var:
                 model.Add(co + xv <= 1)          # o hafta sonu çalışıyorsa co=0
             cift_off.append(co)
-        if cift_off:
-            _kt_cift.append(model.Add(sum(cift_off) >= 1))   # ≥1 tam hafta sonu off
-            n += 1
+        if not cift_off:
+            continue
+        if CIFT_HS_OFF_ESNEK:
+            # Kaçış değişkeni: kural kırılabilir ama W_CIFT_OFF_MUAF'a mal olur.
+            # Gerekçe ve ağırlık eşiği H0'da (CIFT_HS_OFF_ESNEK bloğu).
+            _mu18 = model.NewBoolVar(f"ciftoffmuaf_{a}")
+            cift_off_muaf[a] = _mu18
+            _kt_cift.append(model.Add(sum(cift_off) + _mu18 >= 1))
+            amac.append(W_CIFT_OFF_MUAF * _mu18)
+        else:
+            _kt_cift.append(model.Add(sum(cift_off) >= 1))   # SERT: ≥1 tam hafta sonu off
+        n += 1
     _tes_ekle("H18_cift_hafta_sonu_off", *_kt_cift)
     print(f"çift hafta sonu off: {n} agent (≥1 tam Cmt+Pzr off), "
-          f"{len(hs_ciftleri)} hafta sonu")
+          f"{len(hs_ciftleri)} hafta sonu"
+          + (f"  |  ESNEK: {len(cift_off_muaf)} muafiyet değişkeni, ağ. "
+             f"{W_CIFT_OFF_MUAF} (> 2×W_EKSIK_HS={2 * W_EKSIK_HS} → coverage için "
+             f"kırılamaz; kararı çözücü verir, muaf listesi H21'de)"
+             if CIFT_HS_OFF_ESNEK else
+             "  |  SERT: muafiyet YOK (CIFT_HS_OFF_ESNEK=False) → çözümsüzlük riski"))
 else:
     print(f"çift hafta sonu off: KAPALI (CIFT_HS_OFF=False) — {len(hs_ciftleri)} "
           f"hafta sonu çifti var ama kısıt kurulmadı")
-
-# ── ÖN KONTROL: ÇİFT HAFTA SONU OFF VERİLEBİLİR Mİ? (SALT OKUNUR) ─────
-# H18 SERT: her agent ayda ≥1 tam Cmt+Pzr off geçirmek ZORUNDA. Kota da SERT
-# (H17) → agent hafta içi off_t2 / izin ya da ÖNCEKİ AYDAN gelen devir (H8C/H12)
-# yüzünden hafta sonlarını telafi olarak çalışmak zorundaysa, off bırakacağı bir
-# çift kalmaz ve model INFEASIBLE olur. Sebep 45 dakikalık koşunun SONUNDA
-# çıkıyor; burada çözmeden ÖNCE hesaplanıyor. HİÇBİR KISIT KURULMAZ/DEĞİŞMEZ.
-#
-# TİPİK DESEN (kullanıcı, 2026-09-28): agent önceki ayın son 5 gününü çalışmış
-# → H12 kayan penceresi ayın ilk günlerinde en fazla 1 gün bırakıyor → hafta içi
-# off ZORUNLU → o hafta sonu çalışmak zorunda. Kota yüksekse aynı şey sıradaki
-# hafta sonlarında da olur ve serbest çift kalmaz.
-#
-# ÖLÇÜ = H17B ön kontrolünün kapasitesi, o çift KAPALI varsayılarak:
-#   kapasite(a, çift) = Σ_hafta min(haftalık tavan, çalışılabilir gün − çift)
-#   kapasite ≥ kota olan BİR çift varsa → o agent kuralı tutturabilir.
-# Hafta sonu ZATEN bloklu (izin/off_t2) ya da yasak (hamile/süt, H14) olan
-# agentta çifti kapatmak kapasiteden hiç düşmez → kural bedava sağlanır. Mevcut
-# kod da öyle davranıyor: o günlerde değişken yok / 0'a çivili → `co` serbest.
-#
-# ÜST SINIR OKUMASI: her çift TEK BAŞINA test edilir (diğer her şey sabit) ve
-# H12'nin kayan penceresi "ISO haftada ≤6" ile yaklaşılır — H17B ön kontrolüyle
-# AYNI yaklaşım. Yani "geçti" garanti DEĞİL; "geçemedi" kesin darboğazdır.
-_h18_hs_gun = [ds for ds in PLAN_GUNLER
-               if dt.date.fromisoformat(ds).weekday() >= 5]
-
-
-def _h18_gun_ok(a, ds):
-    """agent o gün HERHANGİ bir kovada çalışabilir mi (sert yasaklar dahil)?"""
-    if a in mesai_yok and dt.date.fromisoformat(ds) in TATIL:
-        return False                                   # H16
-    return any(_kova_calisabilir(a, ds, v) for v in gun_vardiyalari[ds])
-
-
-def _h18_kapasite(a, kapali=frozenset()):
-    """ay boyu çalışabileceği gün ÜST SINIRI; `kapali` günleri off varsayılır."""
-    _top = 0
-    for wk, gunler in haftalar.items():
-        _mus = sum(1 for ds in gunler
-                   if ds not in kapali and _h18_gun_ok(a, ds))
-        if a in mesai_yok or (a in ozel_agents
-                              and any(dt.date.fromisoformat(ds) in TATIL for ds in gunler)):
-            _tv = sum(1 for ds in gunler                # H16C / H17B ölçüsü
-                      if dt.date.fromisoformat(ds).weekday() < 5
-                      and dt.date.fromisoformat(ds) not in TATIL
-                      and dt.date.fromisoformat(ds) not in izin_map.get(a, set()))
-            if a in mesai_yok and wk == SINIR_HAFTA and a in onceki_gun:
-                _tv = max(0, _tv + onceki_musait_hi.get(a, 0) - onceki_gun[a])
-        else:
-            _tv = 6                                     # H12: 7 günde en fazla 6
-        _top += min(_tv, _mus)
-    return _top
-
-
-_h18_muaf, _h18_tek_ok = [], []                         # (agent, en iyi çift kap., tek gün kap., kota)
-if CIFT_HS_OFF and hs_ciftleri:
-    for a in AGENTS:
-        if a not in kota_map:
-            continue                                    # H17 kısıt koymadı → kota baskısı yok
-        _en_iyi = -1
-        for _cmt18, _pzr18 in hs_ciftleri:
-            _en_iyi = max(_en_iyi, _h18_kapasite(a, {_cmt18, _pzr18}))
-            if _en_iyi >= kota_map[a]:
-                break                                   # bir çift yetti → sorun yok
-        if _en_iyi >= kota_map[a]:
-            continue
-        _tek18 = max((_h18_kapasite(a, {ds}) for ds in _h18_hs_gun), default=-1)
-        (_h18_tek_ok if _tek18 >= kota_map[a] else _h18_muaf).append(
-            (a, _en_iyi, _tek18, kota_map[a]))
-
-if not CIFT_HS_OFF:
-    print("  çift off ön kontrolü: atlandı (CIFT_HS_OFF=False)")
-elif not hs_ciftleri:
-    print("  çift off ön kontrolü: atlandı (tam Cmt+Pzr çifti yok)")
-elif not (_h18_muaf or _h18_tek_ok):
-    print(f"  ✓ çift off ön kontrolü: {len(kota_map)} agentın hepsi en az bir tam "
-          f"Cmt+Pzr off bırakıp kotasını doldurabiliyor")
-else:
-    print(f"  ⚠ ÇİFT OFF TUTMAZ: {len(_h18_muaf) + len(_h18_tek_ok)} agent hiçbir "
-          f"(Cmt,Pzr) çiftini birlikte off geçiremiyor → H18 + H17 birlikte INFEASIBLE:")
-    for _et18, _lst18 in (("tek hafta sonu GÜNÜ off mümkün", _h18_tek_ok),
-                          ("tek gün off DA mümkün değil", _h18_muaf)):
-        if not _lst18:
-            continue
-        print(f"     [{_et18}] {len(_lst18)} agent:")
-        for a, _en18, _tk18, _q18 in sorted(_lst18, key=lambda r: r[1] - r[3])[:10]:
-            _o218 = sorted(d for d in off_block_map.get(a, set()) if d.weekday() < 5)
-            print(f"       {a}: kota {_q18}  |  en iyi çift kapalıyken kapasite "
-                  f"{_en18} (açık {_q18 - _en18})  |  tek gün kapalıyken {_tk18}")
-            print(f"          hafta içi off_t2 "
-                  f"{[d.isoformat() for d in _o218] if _o218 else '—'}  |  "
-                  f"önceki ay devri: çalışma {onceki_gun.get(a, '—')}, "
-                  f"off {onceki_off.get(a, '—')}"
-                  + ("  [mesaiye kalamaz]" if a in mesai_yok else "")
-                  + ("  [hamile/süt]" if a in hafta_sonu_yasak else ""))
-        if len(_lst18) > 10:
-            print(f"       ... ({len(_lst18) - 10} agent daha)")
-    print(f"     → ŞİMDİLİK SADECE UYARI: kural yine HERKESE kurulu (davranış "
-          f"değişmedi). INFEASIBLE gelirse CIFT_HS_OFF=False ile teyit et; kalıcı "
-          f"çare bu agentları kuraldan MUAF tutmak (kademeli muafiyet: çift → tek "
-          f"gün → yok; konuşuldu, KODLANMADI).")
-
-# ── ÖN KONTROL 2: TOPLAM HAFTA SONU BÜTÇESİ (H18 × sert band) ────────
-# Yukarıdaki test her agentı TEK BAŞINA ölçer; ikinci sıkışma TOPLAMDA olur:
-# hafta sonu kovalarının SERT alt sınırı (talep − HS_TOL) doldurulmak ZORUNDA,
-# H18 ise her agentın 2 hafta sonu gününü kapatıyor — ikisi AYNI havuzdan yiyor.
-# Bu durumda kişisel muafiyet çözmez (herkes tek tek yapabilir, hep birlikte
-# yapamazlar). Aynı aritmetik H30 [2]'de de var ama orası çözümden SONRA koşuyor.
-_h18_gereken = sum(max(0, kisi - HS_TOL) for (ds, v), kisi in talep.items()
-                   if dt.date.fromisoformat(ds).weekday() >= 5)
-_h18_kap = 0
-for a in AGENTS:
-    if a in hafta_sonu_yasak:
-        continue                                        # hafta sonu zaten çalışamaz (H14)
-    _m18 = sum(1 for ds in _h18_hs_gun if _h18_gun_ok(a, ds))
-    _h18_kap += max(0, _m18 - (2 if CIFT_HS_OFF else 0))
-_h18_pay = _h18_kap - _h18_gereken
-print(f"  hafta sonu bütçesi: sert band GEREKEN {_h18_gereken} kişi-gün  |  "
-      f"H18 sonrası kapasite {_h18_kap}  |  pay {_h18_pay:+d}")
-if _h18_pay < 0:
-    print(f"     ⚠ AÇIK {-_h18_pay} kişi-gün → H18 ile hafta sonu SERT bandı birlikte "
-          f"tutmuyor (kişisel muafiyet çözmez) → CIFT_HS_OFF=False ya da HS_TOL artır")
-elif _h18_pay < 0.15 * max(1, _h18_gereken):
-    print(f"     ⚠ DAR: pay yalnız %{100 * _h18_pay / max(1, _h18_gereken):.0f} → çözüm "
-          f"VAR ama hafta sonu yerleşimi neredeyse tek çözüme sıkışır (UNKNOWN riski)")
-else:
-    print(f"     ✓ rahat: pay %{100 * _h18_pay / max(1, _h18_gereken):.0f}")
 
 
 # %% [HÜCRE 19] — TAKIM BÜTÜNLÜĞÜ (takım hafta boyu TEK tip + cezalı istisna) ─
@@ -4444,6 +4368,40 @@ if FIZIBILITE_MODU:
 else:
     print(f"amaç (toplam ceza): {solver.ObjectiveValue():.0f}")
 
+# ── H18 ÇİFT OFF MUAFİYETİ — KİM, NEDEN (CIFT_HS_OFF_ESNEK) ──────────
+# muaf = 1  →  o agent ay boyunca TEK BİR tam Cmt+Pzr off bile bırakamadı.
+# Yanlış pozitif OLAMAZ: çifti varsa Σco ≥ 1 zaten sağlanır ve muaf 0'da kalır
+# (1 yapmak W_CIFT_OFF_MUAF'a mal olur) → listedekiler GERÇEKTEN bırakamayanlar.
+if cift_off_muaf:
+    _muaf18 = sorted(a for a, _mv in cift_off_muaf.items() if solver.Value(_mv))
+    print(f"\nH18 çift hafta sonu off muafiyeti: {len(_muaf18)}/{len(cift_off_muaf)} "
+          f"agent muaf  (ceza {W_CIFT_OFF_MUAF}/agent, toplam "
+          f"{len(_muaf18) * W_CIFT_OFF_MUAF})")
+    if FIZIBILITE_MODU:
+        print(f"  ⚠ FİZİBİLİTE MODU: amaç kurulmadı → muafiyet BEDAVA, bu sayı "
+              f"ANLAMSIZ. Gerçek sayı için FIZIBILITE_MODU=False ile koş.")
+    if not _muaf18:
+        print(f"  ✓ hiçbir agent muaf değil — herkes en az bir tam Cmt+Pzr off aldı")
+    else:
+        for a in _muaf18[:15]:
+            _cal18 = [ds for _c18, _p18 in hs_ciftleri for ds in (_c18, _p18)
+                      if any((a, ds, v) in x and solver.Value(x[(a, ds, v)])
+                             for v in gun_vardiyalari[ds])]
+            _o218 = sorted(d for d in off_block_map.get(a, set()) if d.weekday() < 5)
+            print(f"     {a}: çalıştığı hafta sonu günleri {_cal18}")
+            print(f"        kota {kota_map.get(a, '—')}  |  hafta içi off_t2 "
+                  f"{[d.isoformat() for d in _o218] if _o218 else '—'}  |  "
+                  f"önceki ay devri: çalışma {onceki_gun.get(a, '—')}, "
+                  f"off {onceki_off.get(a, '—')}"
+                  + ("  [mesaiye kalamaz]" if a in mesai_yok else "")
+                  + ("  [hamile/süt]" if a in hafta_sonu_yasak else ""))
+        if len(_muaf18) > 15:
+            print(f"     ... ({len(_muaf18) - 15} agent daha)")
+        print(f"  → bu agentlara bir çift off bırakmak MATEMATİKSEL olarak mümkün "
+              f"değildi (kota + 7 gün kuralı + önceki ay devri + takım tipi).")
+        print(f"     Veri tarafında düzeltilebilir bir şey var mı bak: uzun blok "
+              f"izin off_t2 yerine 'izin' girilmişse kota düşer ve sıkışıklık kalkar.")
+
 # coverage: band içinde plana ne kadar yakın? (toplam sapma)
 sapan, toplam_sapma = 0, 0
 for (ds, v), kisi in talep.items():
@@ -4717,6 +4675,18 @@ roster_2["off_t_gun"]         = [int((roster.loc[a, _gun] == "off_t").sum())
 from collections import Counter as _Counter22             # hücre tek başına da koşsun
 _offt_yok = _Counter22(a for a, _ds in offt_karsilanmadi)  # agent → karşılanmayan off_t
 roster_2["off_t_verilemeyen"] = [_offt_yok.get(a, 0) for a in roster_2.index]
+
+# H18 ÇİFT OFF VERİLDİ Mİ: 1 → o agent ay içinde en az bir tam Cmt+Pzr çiftini
+# birlikte off geçirdi. 0 → geçiremedi (H18'den muaf kalmış).
+# ÖLÇÜ ROSTER'DAN: modelin muaf değişkenine DEĞİL, fiili çizelgeye bakılıyor →
+# fizibilite modunda (amaç yok, muafiyet bedava) bile doğru sonuç verir ve
+# H28B denetimiyle aynı ölçüyü kullanır.
+# "off" = o gün çalışılmamış; sebebi fark etmez (izin / off_t2 / off_t / model off).
+# Hamile-süt hafta sonu zaten çalışamaz → hep 1.
+roster_2["cift_off_verildi"] = [
+    int(any(all(roster.at[a, _c18] in _OFF_LIKE for _c18 in (_cmt18, _pzr18))
+            for _cmt18, _pzr18 in hs_ciftleri))
+    for a in roster_2.index]
 
 # ÖNCEKİ AY (H8C) — sınır ISO haftasının ÖNCEKİ AYA düşen günleri (ör. 07-27..07-31):
 # o günlerde kaç gün çalışmış / off / izin / off_t. Haftalık kuralların (H20B off
@@ -5920,12 +5890,20 @@ _kd_ekle(f"H20E oransal mesai tavanı (ortalama+{MESAI_TOL})", "agent", _i,
          f"{_kd_M / max(1, len(_kd_mu)):.2f} → tavan {_kd_tav}"
          + ("" if MESAI_TOL < MAX_MESAI else "  |  kısıt KURULMADI (TOL ≥ MAX_MESAI)"))
 
+# MUAF agentlar ihlal SAYILMAZ: H18 esnek modda kaçış değişkeni verildi ve
+# model bir çift off bırakamadığını kanıtladı (aksi hâlde muaf 0 kalırdı).
+_kd_muaf18 = {a for a, _mv in cift_off_muaf.items() if solver.Value(_mv)}
 _i = ([(a, "tam Cmt+Pzr off yok") for a in _kd_agent
-       if not any(all(roster.at[a, _c] in _OFF_LIKE for _c in (_cmt, _pzr))
-                  for _cmt, _pzr in hs_ciftleri)]
+       if a not in _kd_muaf18
+       and not any(all(roster.at[a, _c] in _OFF_LIKE for _c in (_cmt, _pzr))
+                   for _cmt, _pzr in hs_ciftleri)]
       if CIFT_HS_OFF else [])
 _kd_ekle("H18 ayda ≥1 TAM hafta sonu off", "agent", _i,
-         "" if CIFT_HS_OFF else "KURAL KAPALI (CIFT_HS_OFF=False)")
+         (f"{len(_kd_muaf18)} agent MUAF (CIFT_HS_OFF_ESNEK, ceza "
+          f"{W_CIFT_OFF_MUAF}) → ihlal sayılmadı; listesi H21'de ve roster'ın "
+          f"cift_off_muaf kolonunda" if _kd_muaf18 else
+          "muaf agent yok — herkes çift off aldı")
+         if CIFT_HS_OFF else "KURAL KAPALI (CIFT_HS_OFF=False)")
 
 # ── COVERAGE SERT BANDLARI (kova bazlı) ──────────────────────────────
 _hs_i, _gc_i, _mk_i = [], [], []
@@ -6328,6 +6306,16 @@ LEJANT = [
      "YUMUŞAK off talebi, KARŞILANMAYAN — agent o gün ÇALIŞTI (hücre KIRMIZI). "
      "off_t_gun + off_t_verilemeyen = agentın toplam off_t talebi. Bu gün çalışma "
      "olarak sayıldığı için off kolonlarına GİRMEZ"),
+    ("cift_off_verildi",  None, None,
+     "1 = o agent ay içinde EN AZ BİR tam Cmt+Pzr çiftini birlikte off geçirdi (H18). "
+     "0 = geçiremedi, kuraldan MUAF kaldı. Muafiyet keyfi DEĞİL: modele kuralı "
+     "kırmak W_CIFT_OFF_MUAF(500) puana mal oluyor, kırmanın kazancı en fazla 50 → "
+     "sadece MATEMATİKSEL olarak imkânsızsa 0 çıkar. Sebep genelde önceki aydan "
+     "devreden çalışma (7 gün kuralı) + kota. 0 çıkanların uzun blok izni off_t2 "
+     "yerine 'izin' girilirse çoğu vaka düzelir (izin kotayı da düşürür). "
+     "Ayın sonundaki YARIM hafta sonu (ör. 31 Ekim Cmt, eşi 1 Kasım ay dışında) "
+     "çift SAYILMAZ. Hamile/süt hafta sonu zaten çalışmaz → hep 1. "
+     "Kimlerin 0 olduğu ve sebep verileri H21 çıktısında listelenir"),
     ("kidem_ay",          None, None,
      "Agentın kıdemi (ay, ondalıklı). Kaynak df_kidem; boş = veri yok (KIDEMLİ sayıldı)"),
     ("gece_yasak",        None, None,
