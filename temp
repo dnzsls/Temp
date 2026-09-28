@@ -47,7 +47,8 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                        W_CIFT_OFF_MUAF(500) cezası → kural ancak FİİLEN imkânsızsa kırılır
                        (kazanç en fazla 2×W_EKSIK_HS=50 → satın alınamaz). Kararı ÇÖZÜCÜ verir;
                        aritmetik ön kontrol yanlış "✓" verdiği için KALDIRILDI. Muaf listesi
-                       H21'de, roster'da `cift_off_muaf` kolonunda, H28B'de ihlal sayılmaz.
+                       H21'de, roster'da `cift_off_verildi` kolonunda (0 = muaf), H28B'de
+                       ihlal sayılmaz.
     H19 takım tek tip: takım o HAFTA tek vardiya tipinde (hafta içi; resmi tatil haftası muaf).
                        Üye ayrılamaz — TEK istisna fiziksel imkânsızlık (sabahçı üye ↔ geç/gece
                        tipi). Bu yüzden hafta içi coverage serbest bölgesi genişletildi (10/25).
@@ -5900,8 +5901,8 @@ _i = ([(a, "tam Cmt+Pzr off yok") for a in _kd_agent
       if CIFT_HS_OFF else [])
 _kd_ekle("H18 ayda ≥1 TAM hafta sonu off", "agent", _i,
          (f"{len(_kd_muaf18)} agent MUAF (CIFT_HS_OFF_ESNEK, ceza "
-          f"{W_CIFT_OFF_MUAF}) → ihlal sayılmadı; listesi H21'de ve roster'ın "
-          f"cift_off_muaf kolonunda" if _kd_muaf18 else
+          f"{W_CIFT_OFF_MUAF}) → ihlal sayılmadı; listesi H21'de, roster'ın "
+          f"cift_off_verildi kolonunda 0 olarak görünür" if _kd_muaf18 else
           "muaf agent yok — herkes çift off aldı")
          if CIFT_HS_OFF else "KURAL KAPALI (CIFT_HS_OFF=False)")
 
