@@ -6713,6 +6713,12 @@ _BORDER = Border(left=_INCE, right=_INCE, top=_INCE, bottom=_INCE)
 # kategori → dolgu rengi (None = dolgusuz).  LEJANT sayfası bu sözlükten üretilir.
 LEJANT = [
     ("İZİN",              "izin",       "E4D7F5", "Yıllık izin / idari izin — HARD, model değiştiremez"),
+    ("DOĞUM İZNİ",        "dogum_izin", "B4A7D6",
+     "dogum_izni_flg=1 → agent TÜM AY müsait değil (H7: izin |= GUN_SET). "
+     "Modelin İÇİNDE normal 'izin' ile AYNI davranır (değişken açılmaz, kotayı "
+     "düşürür); burada SADECE gösterim ayrılıyor ki çizelgeyi okuyan 'bu kişi neden "
+     "hiç yok' diye aramasın. Kotası 0'a indiği için H17 o agente kısıt kurmaz, "
+     "calisma_gun 0 olur. İDARİ izin ayrılmadı — o hâlâ 'İZİN' görünür"),
     ("OFF_T",             "off_t",      "CCE5FF", "Agent off talebi (off_t) — SOFT, model karşıladı"),
     ("OFF_T2",            "off_t2",     "8FC7FF", "Agent off talebi (off_t2) — HARD, her zaman karşılanır"),
     ("OFF",               "off",        "F3F2E9", "Modelin kendi verdiği off (talep yok)"),
@@ -6857,13 +6863,24 @@ _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
 
 _ONC_HIZIN = {"h.izin", "h_izin", "haftalik_izin", "haftalık_izin"}   # tanınan haftalık-izin etiketleri
 
+# DOĞUM İZNİ — SADECE GÖSTERİM (kullanıcı isteği 2026-09-30). Roster'ın İÇ
+# değeri "izin" KALIYOR: H22'nin mesai/norm/kota hesapları, H23 özeti, H25C
+# simülasyonu ve H28B denetimi hep o dizeyi okuyor — değiştirmek hepsini
+# bozardı. Burada yalnız Excel metni ve rengi ayrılıyor.
+# df_tam'dan YEREL küme (H22'nin _flag_set'ine bağlı değil) → hücre tek başına
+# koşabilsin.
+_dogum_set = set(df_tam.loc[
+    pd.to_numeric(df_tam["dogum_izni_flg"], errors="coerce").fillna(0) == 1,
+    "agent_user_code"].astype(str).str.strip())
+
 
 def _gorunum(a, c):
     """BU AY hücresi → (Excel metni, kategori). c = 'YYYY-MM-DD' kolon adı."""
     v = roster.at[a, c]
     d = dt.date.fromisoformat(c)
     if v == "izin":
-        return "İZİN", "izin"
+        # doğum izni TÜM AYI kaplar (H7) → o agentın her hücresi böyle görünür
+        return ("DOĞUM İZNİ", "dogum_izin") if a in _dogum_set else ("İZİN", "izin")
     if v == "off_t2":
         return "OFF_T2", "off_t2"
     if v == "off_t":
@@ -7084,6 +7101,9 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     _wl.column_dimensions["B"].width = 80
 
 print(f"Excel yazıldı: {XLSX_PATH}")
+print(f"  doğum izni AYRI gösterim: {len(_dogum_set & set(_agents_sirali))} agent "
+      f"→ hücreler 'DOĞUM İZNİ' (model içinde normal izin gibi davranır, "
+      f"izin_gun kolonuna dahil)")
 print(f"  Sheet1 'roster': {roster_xl.shape[0]} agent × {roster_xl.shape[1]} kolon"
       + (f"  ({len(_ONC_KOL)} önceki ay kolonu: {_ONC_KOL[0]}..{_ONC_KOL[-1]})"
          if _ONC_KOL else "  (önceki ay kolonu yok)"))
