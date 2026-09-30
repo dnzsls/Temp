@@ -6,6 +6,14 @@ AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
 
 Çözüm birimi = TÜM AY, hafta içi + hafta sonu BİRLİKTE (spec 6.1).
 
+KURUMSAL v1 (kitle v7'nin kopyası, 2026-09-30) — KİTLEDEN FARKLAR:
+  • QUEUE = "kurumsal"
+  • TAKIM_BUTUNLUK = "yumusak" (H0): H19'da her üye takımından ayrılabilir,
+    bedeli W_TAKIM; H19D (takım→tip kapasite kuralları) KURULMAZ; H28B takım
+    sapmasını ihlal saymaz. Aşağıdaki H19 / H19D açıklamaları "sert" modu anlatır.
+  • W_GECMIS = 0 → H19B (takım bazlı geçmiş akşam/gece adaleti) kapalı.
+  • H20 (agent haftada tek tip) AYNEN geçerli.
+
 Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
 `python3 agent_detayli_model.py` ile baştan sona çalışır.
@@ -162,7 +170,7 @@ pd.set_option("display.expand_frame_repr", False)
 # ════════════════════════════════════════════════════════════════════════
 # ══ GENEL / VERİ
 # ════════════════════════════════════════════════════════════════════════
-QUEUE       = "kitle"          # kitle | kurumsal | gold
+QUEUE       = "kurumsal"       # kitle | kurumsal | gold
 PKL_PATH    = ""               # aylık model çıktısı pkl yolu
 RESMI_TATILLER   = []          # manuel resmi tatil tarihleri, ör. ["2026-07-15", "2026-08-30"]
 ARIFE_GUNLERI    = []          # arife (yarım gün) tarihleri, ör. ["2026-06-16"]; öğleden sonra resmi tatil
@@ -505,8 +513,13 @@ MAX_AKSAM_HAFTA  = 2           # SERT tavan: agent ay içinde en fazla bu kadar 
 # ── 5) GEÇMİŞ GEÇ VARDİYA (H19B, takım bazlı) ─────────────────────────
 # GEÇMİŞ GEÇ-VARDİYA ADALETİ (H19B) — df_gecmis'ten
 GEC_BASLANGIC = "15:00"        # bu saatten İTİBAREN başlayan vardiya "geç" sayılır (gece dahil)
-W_GECMIS      = 5              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
+W_GECMIS      = 0              # geçmişte adil payın üstünde geç vardiya yapmış takıma,
                                # bu ay geç tipe atanırsa ceza. 0 → devre dışı.
+                               # KURUMSAL v1: 0 (kullanıcı kararı 2026-09-30). Takım
+                               # bütünlüğü yumuşak olduğu için takımın seçtiği tip
+                               # üyelerin fiili vardiyasını belirlemiyor → takım
+                               # bazlı geçmiş cezası anlamını yitiriyor. Kişi bazlı
+                               # akşam/gece adaleti (H20D + H16D) yerinde. Kitle: 5.
 
 # ════════════════════════════════════════════════════════════════════════
 # ══ TAKIM (H19 / H19D / H19E)
@@ -533,6 +546,21 @@ W_TAKIM      = 2               # takımdan ayrılan her (üye, hafta) için ceza
                                # 2 = "eşit şartlarda bölme, ama gerekiyorsa çekinme".
                                # 0 yapmak da mümkün; tek fren H19D'nin tipe duyarlı
                                # kapasitesi olur (ayrılan üye takımın tipine 0 katkı).
+# TAKIM BÜTÜNLÜĞÜ MODU (KURUMSAL v1, kullanıcı kararı 2026-09-30):
+#   "sert"    → kitle davranışı: üye takımından SADECE fiziksel imkânsızlıkta
+#               ayrılır (sabahçı/kıdemsiz/hamile, gece nöbeti). H19D açık.
+#   "yumusak" → HER üye her hafta takımından ayrılabilir, bedeli W_TAKIM.
+#               Takım bir TERCİH: eşit şartlarda bir arada kalır, coverage
+#               gerektirince bölünür. H19D (takım→tip kapasite kuralları)
+#               KAPANIR — y artık üyelerin fiili vardiyasını belirlemediği
+#               için y üzerindeki kapasite/tavan/min-takım kuralları anlamsız;
+#               coverage doğrudan kişi atamasıyla (H10) dolar.
+# NEDEN KURUMSALDA YUMUŞAK: kişi sayısı az, ekip takımı kitle kadar katı
+# tutmuyor. Sert modda küçük kadro takım boyutlarına yuvarlanıp coverage kaybeder.
+# KALİBRASYON: W_TAKIM(2) < W_EKSIK_HI(25) → 1 kişilik açığı kapatacaksa model
+# takımı böler. Daha bütün tutmak istersen W_TAKIM'i yükselt (25+ → coverage'dan
+# bile önce gelir). H20 (agent haftada tek tip) bu moddan BAĞIMSIZ, geçerli.
+TAKIM_BUTUNLUK = "yumusak"     # "sert" | "yumusak"
 # SINIR HAFTASI TİP KİLİDİ (H19E) — önceki aydan vardiya devamlılığı.
 # SORUN: ay ortasında başlayan ISO hafta (ör. 1 Eylül Salı → aynı haftanın Pazartesi'si
 # 31 Ağustos) modelin GÖRMEDİĞİ bir çizelgeyle başlıyor. Kilit yokken agent
@@ -3008,7 +3036,10 @@ for T, uyeler in takimlar.items():
             # satın alınamaz.
             _gn19 = gece_hafta.get((a, wk))
             _hak19 = list(yapamaz) + ([_gn19] if _gn19 is not None else [])
-            if _hak19:
+            if TAKIM_BUTUNLUK == "yumusak":
+                _h19_hak += 1                  # YUMUŞAK: herkes ayrılabilir, bedeli
+                                               #   W_TAKIM (aşağıda amaçta) → kapı yok
+            elif _hak19:
                 model.Add(sv <= sum(_hak19))   # hakkı olmayan durumda ayrılamaz
                 _h19_hak += 1                  # bu üyenin o hafta ayrılma HAKKI var
             else:
@@ -3031,8 +3062,10 @@ if _h19_cezali:
     amac.append(W_TAKIM * sum(_h19_cezali))
 
 print(f"takım bütünlüğü (haftalık): {len(takimlar)} takım, {n_y} (takım,hafta) tek-tip "
-      f"seçimi [SERT]  |  {len(takim_sapan)} (üye,hafta) sapma değişkeni "
-      f"— ayrılma SADECE fiziksel imkânsızlıkta (ağ. {W_TAKIM})")
+      f"seçimi  |  {len(takim_sapan)} (üye,hafta) sapma değişkeni  |  MOD "
+      + ("YUMUŞAK — her üye ayrılabilir, bedeli" if TAKIM_BUTUNLUK == "yumusak"
+         else "SERT — ayrılma SADECE fiziksel imkânsızlıkta, ağ.")
+      + f" W_TAKIM={W_TAKIM}")
 print(f"  agent-hafta-tip göstergesi: {len(agent_tip)} (H20 ile ortak)")
 if GECE_TAKIM_DISI:
     print(f"  GECE TAKIM TİPİ DEĞİL (H14C): {sorted(_h19_gece_tip)} takımın seçenek "
@@ -3375,7 +3408,8 @@ if _fark19c:
 #   Kuhn eşleşmesiyle önceden ölçülür.
 #
 # SABİT ANAHTARLAR — AYAR DEĞİL, sadece geri dönüş için duruyor (değiştirme):
-TIP_KAPASITE_SERT       = True   # False → H19D hiç kurulmaz (v3 öncesi)
+TIP_KAPASITE_SERT       = (TAKIM_BUTUNLUK == "sert")   # yumuşak modda H19D KURULMAZ
+                                 # (gerekçe H0 TAKIM_BUTUNLUK bloğunda)
 TIP_FAZLA_SERT          = True   # False → ③ tavan kurulmaz
 TIP_FAZLA_KALABALIK_GUN = True   # False → ③ tavan eski ölçü (en dar gün)
 
@@ -6219,8 +6253,14 @@ for T, uyeler in takimlar.items():
                 continue
             _i.append((a, f"{takim_gor(T, 20)} {wk[0]}-W{wk[1]}: "
                           f"takım {_mod}, üye {_t}"))
-_kd_ekle("H19 takım hafta içi TEK tip (sapma yalnız fiziksel imkânsızlıkta)",
-         "üye×hafta", _i, "tatil + sınır haftası muaf; takım tipi = üyelerin MOD tipi")
+if TAKIM_BUTUNLUK == "yumusak":            # yumuşakta ayrılma SERT kural değil →
+    _kd_ekle("H19 takım hafta içi TEK tip [YUMUŞAK — bilgi]", "üye×hafta", [],
+             f"TAKIM_BUTUNLUK='yumusak': ayrılma serbest, bedeli W_TAKIM. "
+             f"Bu ay {len(_i)} (üye,hafta) takımının MOD tipinden farklı çalıştı "
+             f"(ihlal sayılmaz). Örnek: {' | '.join(f'{_k}: {_d}' for _k, _d in _i[:2])}")
+else:
+    _kd_ekle("H19 takım hafta içi TEK tip (sapma yalnız fiziksel imkânsızlıkta)",
+             "üye×hafta", _i, "tatil + sınır haftası muaf; takım tipi = üyelerin MOD tipi")
 
 _i = [(a, f"{wk[0]}-W{wk[1]}: {_o} off")
       for a in _kd_agent for wk, gunler in haftalar.items()
@@ -6315,7 +6355,7 @@ _kd_ekle(f"H10 MIN_KOVA ≥{MIN_KOVA}", "kova", _mk_i,
          "talebi olan kova boş kalamaz")
 
 _i = []
-if TIP_MIN_TAKIM:
+if TIP_MIN_TAKIM and TIP_KAPASITE_SERT:       # yumuşak modda H19D hiç kurulmuyor
     for wk, gunler in haftalar.items():
         if wk in tatil_haftalari or wk == KILIT_HAFTA:
             continue
@@ -6334,7 +6374,9 @@ if TIP_MIN_TAKIM:
 _kd_ekle("H19D ④ talebi olan her tipe ≥1 takım", "hafta×tip", _i,
          "H19D'de 'kural KURULMADI' diye raporlanan (hiç sığan takım yok) tipler "
          "burada ihlal görünür — o durum bilinçli, H19D çıktısıyla karşılaştır"
-         if TIP_MIN_TAKIM else "KURAL KAPALI (TIP_MIN_TAKIM=False)")
+         if TIP_MIN_TAKIM and TIP_KAPASITE_SERT else
+         ("KURAL KAPALI (TAKIM_BUTUNLUK='yumusak' → H19D kurulmadı)"
+          if not TIP_KAPASITE_SERT else "KURAL KAPALI (TIP_MIN_TAKIM=False)"))
 
 # ── H14C GECE LOKASYON NÖBETİ (üç kural, çözümden bağımsız sayım) ────
 if GECE_TAKIM_DISI:
