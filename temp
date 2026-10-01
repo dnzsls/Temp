@@ -17,9 +17,9 @@ KURUMSAL v1 (kitle v7'nin kopyası, 2026-09-30) — KİTLEDEN FARKLAR:
   • W_GECMIS = 0 → H19B (takım bazlı geçmiş akşam/gece adaleti) kapalı.
   • H20 (agent haftada tek tip) AYNEN geçerli.
   • PROVİZYON (H14D, 2026-09-30): provizyon_flg=1 agentlar hafta sonu SADECE
-    flexy 10-14 + 18-22 çalışır (coverage dışı sözde-vardiya). Her hafta
-    sonunda ≥1 provizyoncu ≥1 gün (sert, kaçışlı); boş gün yumuşak ceza.
-    Provizyoncular H18 ve H20C'den muaf. Ayarlar H0 PROVIZYON.
+    flexy 10-14 + 18-22 çalışır (coverage dışı sözde-vardiya). HER hafta
+    sonu GÜNÜNDE ≥1 provizyoncu (sert, kaçışlı — 2026-10-01). Provizyoncular
+    H18'e (ayda ≥1 çift off) TABİ, H20C'den muaf. Ayarlar H0 PROVIZYON.
 
 Bu dosya `# %% [HÜCRE n]` bloklarıyla bölünmüştür; her hücre kendi
 kontrol/print'ini basar. Spyder/VSCode'da hücre hücre, ya da düz
@@ -506,22 +506,25 @@ W_SINIR_MOD     = 10           # önceki ayda İZİNLİ/OFF olan üyenin YUMUŞA
 #     diğer agentlar bu vardiyayı ALAMAZ; hafta sonu talebi diğerleriyle dolar
 #   • 1 iş günü sayılır (kota, 7 gün, haftalık off, mesai/norm kuralları aynen)
 #   • hafta içi normal agent gibi (takım tercihi, H20)
-# KURAL:
-#   SERT  : her hafta sonunda (Cmt+Pzr) EN AZ 1 provizyoncu EN AZ 1 gün çalışır.
-#           Üçü birden izinliyse kural tutamaz → kaçış değişkeni + W_PROV_HS_MUAF
+# KURAL (güncelleme 2026-10-01, kullanıcı kararı):
+#   SERT  : HER hafta sonu GÜNÜNDE (Cmt ve Pzr ayrı ayrı; ör. Ekim 2026 →
+#           3-4-10-11-17-18-24-25-31) EN AZ 1 provizyoncu çalışır.
+#           Hepsi izinliyse kural tutamaz → kaçış değişkeni + W_PROV_GUN_MUAF
 #           (H18 deseni: sadece fiilen imkânsızsa kırılır, INFEASIBLE olmaz).
-#   YUMUŞAK: provizyoncusuz kalan her hafta sonu GÜNÜ W_PROV_GUN ceza → "olursa
-#           her gün". 30 > W_EKSIK_HI(25) → bir provizyon günü, hafta içi bir
-#           kişilik açıktan öncelikli.
-#   MUAF  : H18 (ayda 1 çift hafta sonu off) ve H20C (hafta sonu adaleti)
-#           provizyonculara UYGULANMAZ.
+#   H18   : provizyoncular da ayda ≥1 TAM Cmt+Pzr off alır (artık muaf DEĞİL).
+#           İkisi birlikte → model offları provizyoncular arasında DAĞITIR:
+#           biri çift off'tayken o hafta sonunu diğerleri karşılar.
+#           Tek provizyoncu varsa iki kural çelişir → H14D ön kontrolü uyarır.
+#   MUAF  : H20C (hafta sonu adaleti) provizyonculara UYGULANMAZ — hafta sonu
+#           yükleri yapısal olarak yüksek.
+# ESKİ (2026-09-30): her hafta sonu ÇİFTİNDE ≥1 gün sert + boş gün yumuşak
+# ceza (30); provizyoncular H18'den muaftı.
 # Flag kolonu df_agents'te yoksa ya da enabled=False ise HİÇBİR ŞEY kurulmaz.
 PROVIZYON = {
     'enabled': True,
     'flag_kol': 'provizyon_flg',
     'hs_parcalar': [("10:00", "14:00"), ("18:00", "22:00")],   # görüntü + interval
-    'W_PROV_GUN': 30,          # provizyoncusuz hafta sonu GÜNÜ başına ceza
-    'W_PROV_HS_MUAF': 500,     # hafta sonu çiftinde hiç provizyoncu yoksa (kaçış)
+    'W_PROV_GUN_MUAF': 500,    # provizyoncusuz hafta sonu GÜNÜ (kaçış; > 2×W_EKSIK_HS)
 }
 
 # ════════════════════════════════════════════════════════════════════════
@@ -2153,16 +2156,13 @@ print(f"  toplam tip_yasak: {len(tip_yasak)} (agent,tip)  [kıdem + genel]")
 # Ayarlar ve gerekçe H0 PROVIZYON bloğunda. Sözde-vardiya H8'de eklendi.
 #   (a) provizyoncu hafta sonu GERÇEK kovalara yazılamaz (sadece flexy)
 #   (b) provizyoncu olmayan flexy vardiyayı alamaz
-#   (c) SERT: her hafta sonunda (Cmt+Pzr) ≥1 provizyoncu ≥1 gün
-#       Σ_{prov, gün∈çift} x[prov, gün, FLEXY] + muaf ≥ 1   (muaf: W_PROV_HS_MUAF)
-#   (d) YUMUŞAK: provizyoncusuz her hafta sonu GÜNÜ W_PROV_GUN ceza
-# Ayın başında/sonunda TEK günlük hafta sonu (Pzr 1'i ya da Cmt 31'i) da bir
-# "çift" sayılır → o tek günde ≥1 provizyoncu aranır.
+#   (c) SERT: HER hafta sonu GÜNÜNDE ≥1 provizyoncu (2026-10-01)
+#       Σ_{prov} x[prov, gün, FLEXY] + muaf[gün] ≥ 1   (muaf: W_PROV_GUN_MUAF)
+#   H18 (ayda ≥1 çift off) provizyonculara da uygulanır → offlar dağılır.
 # Hamile/süt provizyoncu hafta sonu çalışamaz (H14 kazanır); mesaiye kalamaz
 # provizyoncu resmi tatil hafta sonunda çalışamaz (H16 kazanır) → değişkenleri
-# 0'a çivili, (c)'yi o hafta sonu diğer provizyoncular karşılar ya da muafiyete düşer.
-prov_hs_muaf = {}                                  # (cmt|pzr) başlangıç → muaf göstergesi
-prov_gun_bos = {}                                  # ds → "o gün provizyoncu yok" göstergesi
+# 0'a çivili, (c)'yi o gün diğer provizyoncular karşılar ya da muafiyete düşer.
+prov_gun_muaf = {}                                 # ds → "o gün provizyoncu yok" kaçışı
 _pv_n_kapat = _pv_n_yasak = 0
 if prov_agents:
     _pv_hs_gun = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
@@ -2182,51 +2182,34 @@ if prov_agents:
         return [x[(a, ds, PROV_VARDIYA)] for a in sorted(prov_agents)
                 if (a, ds, PROV_VARDIYA) in x]
 
-    # hafta sonu "çiftleri": ardışık Cmt+Pzr; ay sınırındaki tek gün de bir grup
-    _pv_gruplar, _pv_gor = [], set()
-    for ds in _pv_hs_gun:
-        if ds in _pv_gor:
-            continue
-        d = dt.date.fromisoformat(ds)
-        _grup = [ds]
-        if d.weekday() == 5:
-            _pz = (d + dt.timedelta(days=1)).isoformat()
-            if _pz in gun_vardiyalari:
-                _grup.append(_pz)
-        _pv_gor.update(_grup)
-        _pv_gruplar.append(_grup)
-
-    _pv_rapor = []                                 # (grup, müsait provizyoncu-gün)
-    for _grup in _pv_gruplar:
-        _gv = [xv for ds in _grup for xv in _pv_gun_var(ds)]
-        _mu = model.NewBoolVar(f"provhsmuaf_{_grup[0]}")
-        prov_hs_muaf[_grup[0]] = _mu
-        model.Add(sum(_gv) + _mu >= 1)             # (c) SERT (kaçışlı)
-        amac.append(PROVIZYON["W_PROV_HS_MUAF"] * _mu)
-        _pv_rapor.append((_grup, len(_gv)))
-    for ds in _pv_hs_gun:                          # (d) YUMUŞAK: gün başına
+    _pv_rapor = []                                 # (gün, müsait provizyoncu)
+    for ds in _pv_hs_gun:                          # (c) SERT (kaçışlı): gün başına
         _gv = _pv_gun_var(ds)
-        _bos = model.NewBoolVar(f"provbos_{ds}")
-        prov_gun_bos[ds] = _bos
-        model.Add(sum(_gv) + _bos >= 1)            # hiç provizyoncu yoksa _bos=1
-        amac.append(PROVIZYON["W_PROV_GUN"] * _bos)
+        _mu = model.NewBoolVar(f"provgunmuaf_{ds}")
+        prov_gun_muaf[ds] = _mu
+        model.Add(sum(_gv) + _mu >= 1)
+        amac.append(PROVIZYON["W_PROV_GUN_MUAF"] * _mu)
+        _pv_rapor.append((ds, len(_gv)))
 
     print(f"provizyon [H14D]: {len(prov_agents)} agent {sorted(prov_agents)}")
     print(f"  (a) hafta sonu gerçek kova kapatıldı: {_pv_n_kapat}  |  "
           f"(b) diğerlerine flexy yasağı: {_pv_n_yasak}")
-    print(f"  (c) SERT: {len(_pv_gruplar)} hafta sonunda ≥1 provizyoncu ≥1 gün "
-          f"(kaçış ağ. {PROVIZYON['W_PROV_HS_MUAF']})  |  (d) YUMUŞAK: "
-          f"{len(_pv_hs_gun)} gün, boş gün başına {PROVIZYON['W_PROV_GUN']}")
-    print(f"  H18 (çift hafta sonu off) ve H20C (hafta sonu adaleti) provizyonculara "
-          f"UYGULANMAYACAK")
-    # FİZİBİLİTE ÖN KONTROLÜ: hafta sonunda hiç müsait provizyoncu yoksa (hepsi
-    # izinli / off_t2) (c) kaçışa düşer — çözmeden ÖNCE görünsün.
+    print(f"  (c) SERT: {len(_pv_hs_gun)} hafta sonu GÜNÜNÜN her birinde ≥1 provizyoncu "
+          f"(kaçış ağ. {PROVIZYON['W_PROV_GUN_MUAF']})")
+    print(f"  H18 (çift hafta sonu off) provizyonculara UYGULANIYOR; H20C (hafta sonu "
+          f"adaleti) UYGULANMIYOR")
+    # FİZİBİLİTE ÖN KONTROLÜ — çözmeden ÖNCE görünsün:
+    #  • o gün hiç müsait provizyoncu yoksa (hepsi izinli / off_t2) → kaçış
+    #  • tek provizyoncu varsa "her gün çalış" ile "1 çift off" çelişir
     _pv_bos = [g for g, n in _pv_rapor if n == 0]
     if _pv_bos:
-        print(f"  ⚠ {len(_pv_bos)} hafta sonunda HİÇ müsait provizyoncu yok "
-              f"(izin/off_t2) → o hafta sonu muafiyete düşecek: {_pv_bos}")
+        print(f"  ⚠ {len(_pv_bos)} hafta sonu gününde HİÇ müsait provizyoncu yok "
+              f"(izin/off_t2) → o gün muafiyete düşecek: {_pv_bos}")
     else:
-        print(f"  ✓ her hafta sonunda en az 1 müsait provizyoncu var")
+        print(f"  ✓ her hafta sonu gününde en az 1 müsait provizyoncu var")
+    if len(prov_agents) < 2 and CIFT_HS_OFF:
+        print(f"  ⚠ tek provizyoncu: her hafta sonu günü çalışması ile ayda 1 çift "
+              f"off (H18) birlikte TUTAMAZ → biri kaçışa düşecek.")
     _pv_sabah = sorted(prov_agents & sabah_agents)
     if _pv_sabah:
         print(f"  ⚠ sabahçı provizyoncu {_pv_sabah}: flexy vardiya 22:00'de bitiyor, "
@@ -2613,9 +2596,7 @@ n = 0
 _kt_cift = []                                    # TESHIS_MODU: çift hafta sonu off kısıtları
 cift_off_muaf = {}                               # agent → muafiyet göstergesi (CIFT_HS_OFF_ESNEK)
 if CIFT_HS_OFF:
-    for a in AGENTS:
-        if a in prov_agents:
-            continue                             # H14D: provizyoncu H18'den MUAF
+    for a in AGENTS:                             # provizyoncular DAHİL (2026-10-01)
         cift_off = []
         for cmt, pzr in hs_ciftleri:
             gun_var = [x[(a, cmt, v)] for v in gun_vardiyalari[cmt] if (a, cmt, v) in x]
@@ -5152,7 +5133,7 @@ _kd_ekle(f"H20E oransal mesai tavanı (ortalama+{MESAI_TOL})", "agent", _i,
 # model bir çift off bırakamadığını kanıtladı (aksi hâlde muaf 0 kalırdı).
 _kd_muaf18 = {a for a, _mv in cift_off_muaf.items() if solver.Value(_mv)}
 _i = ([(a, "tam Cmt+Pzr off yok") for a in _kd_agent
-       if a not in _kd_muaf18 and a not in prov_agents      # provizyoncu H18'den muaf (H14D)
+       if a not in _kd_muaf18
        and not any(all(roster.at[a, _c] in _OFF_LIKE for _c in (_cmt, _pzr))
                    for _cmt, _pzr in hs_ciftleri)]
       if CIFT_HS_OFF else [])
@@ -5161,8 +5142,6 @@ _kd_ekle("H18 ayda ≥1 TAM hafta sonu off", "agent", _i,
           f"{W_CIFT_OFF_MUAF}) → ihlal sayılmadı; listesi H21'de, roster'ın "
           f"cift_off_verildi kolonunda 0 olarak görünür" if _kd_muaf18 else
           "muaf agent yok — herkes çift off aldı")
-         + (f"  |  {len(prov_agents)} provizyoncu kuraldan MUAF (H14D)"
-            if prov_agents else "")
          if CIFT_HS_OFF else "KURAL KAPALI (CIFT_HS_OFF=False)")
 
 # ── PROVİZYON (H14D) ─────────────────────────────────────────────────
@@ -5176,20 +5155,12 @@ if prov_agents:
              "hafta sonu gerçek kovalar provizyoncuya kapalı")
     _pv_calisan = {r.tarih for r in _pv_sonuc.itertuples()
                    if r.vardiya == PROV_VARDIYA}
-    _pv_muaf = {g for g, _mv in prov_hs_muaf.items() if solver.Value(_mv)}
-    _i = []
-    for _g0 in prov_hs_muaf:                   # grup başlangıç günü → grup
-        _d0 = dt.date.fromisoformat(_g0)
-        _grp = [_g0] + ([(_d0 + dt.timedelta(days=1)).isoformat()]
-                        if _d0.weekday() == 5 else [])
-        if _g0 not in _pv_muaf and not any(g in _pv_calisan for g in _grp):
-            _i.append((_g0, "hafta sonunda hiç provizyoncu yok"))
-    _pv_bos_gun = sorted(ds for ds, _bv in prov_gun_bos.items() if solver.Value(_bv))
-    _kd_ekle("H14D her hafta sonu ≥1 provizyoncu ≥1 gün", "hafta sonu", _i,
-             (f"{len(_pv_muaf)} hafta sonu MUAF (hiç müsait provizyoncu yok): "
-              f"{sorted(_pv_muaf)}  |  " if _pv_muaf else "")
-             + f"provizyoncusuz GÜN (yumuşak, ihlal değil): {len(_pv_bos_gun)} "
-             + (f"{_pv_bos_gun}" if _pv_bos_gun else ""))
+    _pv_muaf = sorted(g for g, _mv in prov_gun_muaf.items() if solver.Value(_mv))
+    _i = [(g, "o gün hiç provizyoncu yok") for g in prov_gun_muaf
+          if g not in _pv_muaf and g not in _pv_calisan]
+    _kd_ekle("H14D her hafta sonu GÜNÜ ≥1 provizyoncu", "hafta sonu günü", _i,
+             (f"{len(_pv_muaf)} gün MUAF (hiç müsait provizyoncu yok / H18 ile "
+              f"çelişti): {_pv_muaf}" if _pv_muaf else "muaf gün yok"))
 
 # ── COVERAGE SERT BANDLARI (kova bazlı) ──────────────────────────────
 _hs_i, _gc_i, _mk_i = [], [], []
@@ -5560,9 +5531,9 @@ LEJANT = [
      "Provizyoncu (provizyon_flg=1) hafta sonu FLEXY vardiyası: "
      + " + ".join(f"{b}-{e}" for b, e in PROVIZYON["hs_parcalar"])
      + ". Coverage'a GİRMEZ (Stage-1 kovası yok), 1 iş günü sayılır. Etiket "
-     "(NORM/TELAFİ/MESAİ) günün ücret kategorisini gösterir. Her hafta sonunda "
-     "en az 1 provizyoncu en az 1 gün çalışır (H14D); provizyoncular H18 ve "
-     "H20C'den muaf"),
+     "(NORM/TELAFİ/MESAİ) günün ücret kategorisini gösterir. HER hafta sonu "
+     "gününde en az 1 provizyoncu çalışır (H14D); provizyoncular da ayda 1 tam "
+     "Cmt+Pzr off alır (H18), H20C'den muaf"),
     ("kırmızı hücre",     "offt_kars",  "FF7C80", "off_t talebi vardı ama KARŞILANMADI — agent o gün çalışıyor"),
     ("dolgusuz",          "normal",     None,     "Normal hafta içi çalışma"),
     (f"--- ÖNCEKİ AY ({'geçmiş, plan dışı, salt okunur'}) ---", None, None, ""),
