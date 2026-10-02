@@ -2,45 +2,31 @@
 # HAFTA SONU VARDİYA PİPELİNE — FORECAST v11
 # =============================================================================
 #
-# v10.9'un türevi. YALNIZ Cumartesi + Pazar.
+# KAPSAM: yalnız Cumartesi ve Pazar. Hafta içi tarih verilirse ValueError atar
+#         (hafta içi akışı: weekly_weekday_pipeline_forecast_v10).
 #
-# v10'DAN FARKLAR (hepsi config yapısıyla ilgili, MIP/Erlang motoru AYNI):
+# AKIŞ — run_queue_pipeline_forecast(df_forecast, df_shifts, tarih, kuyruk):
+#   1. Gün tipi belirlenir: weekday 5 → 'cumartesi', 6 → 'pazar'
+#   2. _blok_coz() → config['queue_configs'][kuyruk][gün] bloğu config'in
+#      ÜSTÜNE çıkarılır. Böylece alt fonksiyonlar config['erlang'],
+#      config['mip'], config['slot_cap'], config['rr_penalty'],
+#      config['hourly_report'] diye düz okuma yapar.
+#   3. prepare_forecast_calls_30()  → geniş format 15dk veri → 30dk slotlar
+#   4. calculate_erlang_all()       → slot başına Erlang ihtiyacı
+#   5. optimize_queue()             → MIP: vardiya × kişi ataması
+#   6. print_queue_report_forecast()→ terminal raporu
+#   Dönen dict: date · queue · label · day_type · erlang_by_slot ·
+#               weighted_aht_by_slot · mip_info · total_calls_day ·
+#               calls_by_slot · inhouse_min_by_slot · outsource_min_by_slot ·
+#               _config (çözülmüş blokla birlikte; monthly_run bunu okur)
 #
-#   1) CONFIG YAPISI — override YOK
-#      v10: global ayarlar + queue_overrides[kuyruk][gün] ile deep-merge delta
-#      v11: queue_configs[kuyruk][gün] → 6 TAM blok, miras yok
-#      Çözüm başında o (kuyruk, gün) bloğu config'in üstüne ÇIKARILIR
-#      (bkz. run_queue_pipeline_forecast) → aşağıdaki tüm fonksiyonlar
-#      config['erlang'] / ['mip'] / ['slot_cap'] / ['rr_penalty'] /
-#      ['hourly_report'] okumalarını AYNEN sürdürür, hiçbiri değişmedi.
-#      Bu bir "override" DEĞİL: config dosyasında miras/delta yok, sadece
-#      doğru blok seçilip öne alınıyor.
+# CONFIG: her (kuyruk, gün) bloğu kendi değerlerinin TAMAMINI içerir —
+#         hiçbir değer başka bloktan ya da üst seviyeden miras alınmaz.
+#         Eksik anahtar → _blok_coz ValueError atar (sessiz fallback yok).
 #
-#   2) HAFTA İÇİ GİRMEZ
-#      v10'da 'haftalici' gün tipi vardı (hafta sonu modeli ilk kurulduğunda
-#      kalmış). v11 hafta içi bir tarih verilirse ValueError atar — sessizce
-#      yanlış blokla çalışmaz. Hafta içi akışı:
-#      weekly_weekday_pipeline_forecast_v10.run_queue_pipeline_forecast
-#
-#   3) slot_cap['queues'] SÜZGECİ KALDIRILDI
-#      v10'da tek bant seti vardı ve 'queues' listesi "hangi kuyruklara
-#      uygulanacağını" söylüyordu. Listeye kuyruk eklemeyi unutursan cap
-#      SESSİZCE hiç uygulanmıyordu. Artık kuyruk zaten blok anahtarı.
-#
-#   4) config['report'] KALDIRILDI
-#      Tek anahtarı peak_threshold=0.70 idi, yalnız terminal çıktısındaki
-#      "* = peak" işaretini belirliyordu (Excel'e girmiyor). Hafta içi
-#      config'inde zaten yok. Kod anahtar bulamayınca 0.70 fallback'ini
-#      kullanıyordu → sabite çevrildi, davranış AYNI.
-#
-#   5) TEK BAŞINA IMPORT EDİLEBİLİR
-#      v10'da `config=CONFIG` varsayılanı modül seviyesinde CONFIG bekliyordu
-#      ve dosya notebook dışında import edilemiyordu (NameError). v11 config'i
-#      kendi dosyasından alır; notebook'tan `config=` ile ezilebilir.
-#
-# KORUNAN: prepare_forecast_calls_30 (geniş format 15dk → 30dk) · forecast_cols
-#          · Raporda "Gerçek" kolonu yok · Excel (Vardiya_Atamaları +
-#          Slot_Karşılaştırma + Özet) · otomatik tarih bazlı dosya adı
+# ÇIKTI: Excel → Vardiya_Atamaları + Slot_Karşılaştırma + Özet (TOPLAM dahil),
+#        dosya adı tarihten otomatik üretilir. Raporda "Gerçek" kolonu yok
+#        (forecast akışı; df_actual gerektirmez).
 #
 # =============================================================================
 
@@ -51,42 +37,40 @@ import calendar
 from pulp import *
 import copy
 
-# CONFIG — kendi dosyasından. Notebook'ta çalışıyorsan ve CONFIG'i orada
-# tanımlıyorsan sorun yok: bu sadece VARSAYILAN değer, her çağrıda
-# `config=...` ile ezebilirsin (monthly_run zaten öyle yapıyor).
-# ImportError → dosya yolda değil demektir; o durumda v10 davranışına döner
-# ve CONFIG'in notebook'ta tanımlı olmasını bekler.
+# CONFIG — varsayılan değer; her çağrıda `config=...` ile ezilebilir
+# (monthly_run öyle yapıyor). ImportError → dosya yolda değil; o durumda
+# CONFIG'in notebook'ta tanımlı olması beklenir.
 try:
-    from weekend_config_v11 import CONFIG_WEEKEND as CONFIG, WEEKEND_DAY_KEYS
+    from weekend_config_v11 import CONFIG_WEEKEND as CONFIG
 except ImportError:                      # notebook'a yapıştırılmış kullanım
-    WEEKEND_DAY_KEYS = ('cumartesi', 'pazar')
+    pass                                 # CONFIG notebook'ta tanımlı olmalı
 
 # Hafta sonu gün tipi → config anahtarı (weekday(): Cmt=5, Paz=6)
 _GUN_ANAHTARI = {5: 'cumartesi', 6: 'pazar'}
 _GUN_ETIKETI  = {'cumartesi': 'Cumartesi', 'pazar': 'Pazar'}
 
-# queue_configs bloğunda ARANAN anahtarlar — eksikse ValueError (sessiz
-# fallback yok; v11'in tek sözü "her blok tam").
+# queue_configs bloğunda ARANAN anahtarlar — eksikse ValueError
+# (sessiz fallback yok: her blok tam olmalı).
 _BLOK_ANAHTARLARI = ('erlang', 'mip', 'slot_cap', 'rr_penalty', 'hourly_report')
 
 
 def _blok_coz(config, queue, gun_anahtari):
     """queue_configs[queue][gün] bloğunu config'in ÜSTÜNE çıkarır.
 
-    Dönen config, aşağıdaki fonksiyonların beklediği düz yapıdadır:
-    config['erlang'], config['mip'], config['slot_cap'], config['rr_penalty'],
-    config['hourly_report'] — hepsi o (kuyruk, gün) bloğundan.
+    Dönen config düz yapıdadır: config['erlang'], config['mip'],
+    config['slot_cap'], config['rr_penalty'], config['hourly_report'] —
+    hepsi o (kuyruk, gün) bloğundan gelir. Alt fonksiyonlar bu anahtarları
+    doğrudan okur, hangi bloktan geldiğini bilmez.
 
-    OVERRIDE DEĞİL: config dosyasında miras/delta yok. Burada sadece 6 bloktan
-    doğru olanı seçip öne alıyoruz. Orijinal queue_configs da config'te kalır
-    (monthly_run onu okuyor).
+    Orijinal queue_configs config'te KALIR (monthly_run Kap_RR için onu okur).
+    Sığ kopya döner — çağıranın config'i değişmez.
     """
     qc = config.get('queue_configs')
     if not qc:
         raise ValueError(
-            "config['queue_configs'] YOK — bu v10 config'i olabilir. "
-            "v11 için weekend_config_v11.CONFIG_WEEKEND kullan "
-            "(v10'un 'queue_overrides' yapısı v11'de desteklenmiyor).")
+            "config['queue_configs'] YOK. Hafta sonu akışı "
+            "queue_configs[kuyruk][gün] yapısı bekler — "
+            "weekend_config_v11.CONFIG_WEEKEND kullan.")
     if queue not in qc:
         raise ValueError(f"config['queue_configs']['{queue}'] YOK — "
                          f"tanımlı kuyruklar: {sorted(qc)}")
@@ -97,8 +81,8 @@ def _blok_coz(config, queue, gun_anahtari):
     if eksik:
         raise ValueError(
             f"config['queue_configs']['{queue}']['{gun_anahtari}'] EKSİK: {eksik}. "
-            f"v11'de her blok {len(_BLOK_ANAHTARLARI)} anahtarın tamamını "
-            f"içermeli (miras yok).")
+            f"Her blok {len(_BLOK_ANAHTARLARI)} anahtarın tamamını içermeli "
+            f"(miras/fallback yok).")
     yeni = copy.copy(config)             # sığ kopya yeter: sadece üst anahtar ekliyoruz
     yeni.update({k: blok[k] for k in _BLOK_ANAHTARLARI})
     return yeni
@@ -398,9 +382,9 @@ def optimize_queue(erlang_by_slot, df_shifts, queue,
             else: effective_penalty = rr_penalty_per
             cost.append(excess[slot] * effective_penalty)
 
-    # v11: 'queues' SÜZGECİ YOK — slot_cap artık (kuyruk, gün) bloğundan geliyor,
-    # yani bu kuyruğa ait olduğu kesin. v10'da süzgeç listesine kuyruk eklemeyi
-    # unutmak cap'in SESSİZCE uygulanmamasına yol açıyordu.
+    # slot_cap bu (kuyruk, gün) bloğundan gelir → kuyruk süzgeci gerekmez.
+    # Fiili tavan = max(ceil(Erlang * max_ratio), 3); aşan kısım 'penalty' ile
+    # cezalanır. Slot hiçbir banda girmiyorsa cap uygulanmaz.
     sc_cfg = config.get('slot_cap', {}); slot_cap_detail = []; sc_excess = {}
     if sc_cfg.get('enabled', False):
         for slot in active_slots:
@@ -583,9 +567,9 @@ def print_queue_report_forecast(date, queue, erlang_by_slot, mip_info,
     print(f"   TOPLAM: In={mip_info['total_inhouse_kisi']} Out={mip_info['total_outsource_kisi']} PT={mip_info.get('total_part_time_kisi',0)} → {mip_info['total_kisi']}")
 
     # Slot bazlı
-    # v11: config['report'] kaldırıldı — v10'da da anahtar yoksa 0.70
-    # fallback'i kullanılıyordu, davranış AYNI. Sadece terminal
-    # çıktısındaki '*' peak işaretini belirler, Excel'e girmez.
+    # Terminal çıktısındaki '* = peak' işareti için eşik: Erlang >= max*0.70
+    # olan slotlar peak sayılır. Yalnız ekran gösterimi — Excel'e girmez,
+    # çözücüyü etkilemez (çözücünün peak eşiği rr_penalty içinde).
     peak_thr = 0.70
     max_e = max(erlang_by_slot.values()) if erlang_by_slot else 0
     peak_slots = {s for s, e in erlang_by_slot.items() if e >= max_e * peak_thr}
@@ -633,9 +617,9 @@ def run_queue_pipeline_forecast(df_forecast, df_shifts, target_date, queue,
     date_str = target_date.strftime('%Y-%m-%d')
     weekday = target_date.weekday()
 
-    # v11: HAFTA İÇİ BURAYA GİRMEZ. v10'da 'haftalici' gün tipi vardı ve
-    # hafta içi bir tarih sessizce global config ile çözülüyordu. Artık
-    # açıkça patlar — yanlış blokla plan üretilmesin.
+    # Bu modül yalnız hafta sonu içindir: config'te sadece 'cumartesi' ve
+    # 'pazar' blokları var. Hafta içi tarih gelirse açıkça patlar — sessizce
+    # yanlış blokla plan üretmesin.
     if weekday < 5:
         raise ValueError(
             f"{date_str} hafta içi (weekday={weekday}). weekend_forecast_v11 "
@@ -646,9 +630,9 @@ def run_queue_pipeline_forecast(df_forecast, df_shifts, target_date, queue,
     is_weekend = True
     day_label = _GUN_ETIKETI[override_key]
 
-    # v11: DEEP-MERGE YOK. queue_configs[kuyruk][gün] bloğu olduğu gibi
-    # config'in üstüne çıkarılır; aşağıdaki fonksiyonlar config['erlang'] vb.
-    # okumalarını AYNEN sürdürür. Blok eksikse _blok_coz ValueError atar.
+    # O (kuyruk, gün) bloğu config'in üstüne çıkarılır; aşağıdaki fonksiyonlar
+    # config['erlang'] / ['mip'] / ['slot_cap'] / ['rr_penalty'] /
+    # ['hourly_report'] diye düz okur. Blok ya da anahtar eksikse ValueError.
     config = _blok_coz(config, queue, override_key)
     if verbose:
         _sc = config['slot_cap']
