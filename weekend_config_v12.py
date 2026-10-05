@@ -1,0 +1,634 @@
+# -*- coding: utf-8 -*-
+# =============================================================================
+# CONFIG WEEKEND v11 — HAFTA SONU (yalnız Cumartesi + Pazar)
+# =============================================================================
+#
+# v10'DAN FARK — TEK BİR YAPISAL DEĞİŞİKLİK:
+#   v10: global ayarlar + 'queue_overrides'[kuyruk][gün] ile DELTA (deep-merge)
+#   v11: 'queue_configs'[kuyruk][gün] → 6 TAM BLOK, miras/override YOK
+#
+# NEDEN DEĞİŞTİ (kullanıcı kararı 2026-10-02):
+#   v10'da kuyruk katmanı YOKTU. Gün tipinden bağımsız ama kuyruğa özel olan
+#   her ayar (slot_cap, mip.min_per_shift, rr_penalty) 'cumartesi' ve 'pazar'
+#   override'larına AYRI AYRI yazılmak zorundaydı. Üstelik bir ayarın
+#   override'ı olup olmadığı tek bakışta görünmüyordu: yazılmamışsa sessizce
+#   global değere düşüyordu. "override var mı yok mu" karışıklığı buradan.
+#
+#   v11'de her (kuyruk, gün) bloğu KENDİ değerlerinin TAMAMINI içerir.
+#   Hiçbir değer başka bir yerden miras alınmaz → ne görüyorsan o çalışır.
+#   Hafta içi config'i (weekday_config_v11.py) ile aynı desen.
+#
+# YAPI:
+#   ÜST SEVİYE  = veriyi tanımlayan / çözücüyü ayarlamayan şeyler
+#                 (kolon isimleri, kuyruk tanımları, verimlilik katsayıları)
+#               + kuyruk bazlı ama GÜN TİPİNDEN BAĞIMSIZ olanlar
+#                 (part_time, outsource_ratio, time_cost_multipliers,
+#                  inhouse/outsource_only_subqueues)
+#   queue_configs[kuyruk][gün] = ÇÖZÜCÜ AYARLARI, 5 anahtar TAM:
+#                 erlang · mip · slot_cap · rr_penalty · hourly_report
+#
+# SİLİNENLER (v10'da vardı, v11'de YOK):
+#   • 'queue_overrides'  → yerine queue_configs (6 tam blok)
+#   • 'report'           → tek anahtarı 'peak_threshold': 0.70 idi ve SADECE
+#                          terminal çıktısındaki "* = peak" işaretini
+#                          belirliyordu; Excel'e girmiyordu. Hafta içi
+#                          config'inde zaten yok. Kod anahtar bulamazsa
+#                          0.70 fallback'ini kullanıyor → silmek davranışı
+#                          DEĞİŞTİRMEZ.
+#   • slot_cap['queues'] → v10'da "bu cap hangi kuyruklara uygulanır" süzgeci
+#                          vardı ve TEK bant seti tüm listeye uygulanıyordu.
+#                          Artık kuyruk zaten anahtar → süzgeç gereksiz.
+#                          (v10'daki sessiz hata kapısı da kapanıyor: listeye
+#                          kuyruk eklemeyi unutursan cap hiç uygulanmıyordu.)
+#
+# DEĞERLERİN KAYNAĞI: kullanıcının notebook'undaki CONFIG_WEEKEND (2026-10-02).
+#   Notebook o tarihte dosyadan İLERİDEYDİ (outsource_ratio.kitle 0.65/0.70,
+#   rr_penalty.peak_threshold 0.70) → notebook esas alındı ve bu dosyaya
+#   işlendi. Karşılaştırılan eski dosya artık bu pakette yok.
+#
+# HAFTA İÇİ BURAYA GİRMEZ: weekend_forecast_v12 hafta içi bir tarih verilirse
+#   ValueError atar. v10'da 'haftalici' gün tipi vardı (hafta sonu modeli ilk
+#   kurulduğunda kalmış); v11'de tamamen kaldırıldı. Hafta içi akışı
+#   weekly_weekday_pipeline_forecast_v11 üzerinden koşar.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# SHRINKAGE PROFİLLERİ — sadece OKUNURLUK için yorumda listelendi.
+# Blokların İÇİNE tam tam yazıldı (kullanıcı kararı: paylaşılan sabit YOK,
+# her blok kendi değerini taşısın). Aşağıdaki not, hangi blokların bugün
+# birbirinin aynı olduğunu gösterir — bir gün ayrışırlarsa diye.
+#
+#   Cumartesi kitle          : taban 0.06 · 17:0.24 · default 0.05
+#   Cumartesi kurumsal+gold  : taban 0.05 · 17:0.24 · default 0.05  (ikisi AYNI)
+#   Pazar     üç kuyruk da   : taban 0.07 · 17:0.33 · default 0.07  (üçü AYNI)
+#
+# KAPASİTE KAYBI (hourly_report):
+#   Cumartesi üç kuyruk da   : 9:0.16 10:0.08 ... 17:0.18   (v10'da hiçbir
+#                              kuyruk Cumartesi'yi override ETMİYORDU → global
+#                              değer kullanılıyordu; burada AÇIK yazıldı)
+#   Pazar     üç kuyruk da   : 9:0.19 10:0.10 ... 17:0.26
+# -----------------------------------------------------------------------------
+
+
+CONFIG_WEEKEND = {
+
+    # =========================================================================
+    # YAPISAL — veriyi tanımlar, çözücüyü ayarlamaz
+    # =========================================================================
+
+    # ---- KUYRUKLAR ----
+    # key        : kod içinde kullanılan kısa isim
+    # label      : raporlarda görünen isim
+    # call_col   : df_calls'daki kolon adı
+    # actual_name: df_actual'daki line_based_main_group değeri
+    # companies  : izin verilen company tipleri
+    'queues': {
+        'kitle': {
+            'label': 'kitle',
+            'call_col': 'kitle_nof_call',
+            'actual_name': 'kitle_cagrilar',
+            'companies': ['inhouse', 'outsource'],
+        },
+        'kurumsal': {
+            'label': 'kurumsal',
+            'call_col': 'kurumsal_nof_call',
+            'actual_name': 'kurumsal_cagrilar',
+            'companies': ['inhouse'],
+        },
+        'gold': {
+            'label': 'gold',
+            'call_col': 'gold_nof_call',
+            'actual_name': 'gold_cagrilar',
+            'companies': ['inhouse'],
+        },
+    },
+
+    # ---- ALT KUYRUKLAR VE SAAT BAZLI AHT ----
+    # load_aht_from_df() ile doldurulur:
+    #   CONFIG_WEEKEND['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG_WEEKEND)
+    'sub_queues': {},
+
+    # Manuel saat bazlı AHT override (varsa weighted AHT yerine kullanılır)
+    # Örnek: 'kitle': {9: 160, 10: 165}
+    'aht_overrides': {
+        'kitle': {},
+        'kurumsal': {},
+        'gold': {},
+    },
+
+    # Sub-queue ve override yoksa fallback
+    'default_aht': 150,
+
+    # ---- COMPANY TANIMLARI ----
+    # df_shifts'teki company kolonu değerleri ve df_actual'daki outsource_flg
+    'company': {
+        'inhouse':   {'shift_value': 'inhouse',   'outsource_flg': 0},
+        'outsource': {'shift_value': 'outsource', 'outsource_flg': 1},
+    },
+
+    # ---- KOLON İSİMLERİ ----
+    'shift_columns': {
+        'shift': 'shift',
+        'start': 'start',
+        'end': 'end',
+        'company': 'company',
+    },
+
+    'calls_columns': {
+        'date': 'data_date',
+        'time': 'min_time_period_value',
+        'sub_queue': 'resource_group_key',
+        'main_queue': 'line_based_main_group',
+        'calls': 'nof_call',
+    },
+
+    'actual_columns': {
+        'date': 'working_date',
+        'queue': 'line_based_main_group',
+        'location': 'working_main_group',
+        'shift_start': 'shifts_start_hour',
+        'shift_end': 'shifts_end_hour',
+        'outsource': 'outsource_flg',
+        'weekend': 'weekend_flg',
+        'count': 'calisan_kisi_sayisi',
+    },
+
+    # ---- FORECAST ÇAĞRI VERİSİ KOLON İSİMLERİ (geniş format) ----
+    'forecast_cols': {
+        'datetime': 'model_data_date',      # timestamp (15dk), 00:00'da saat yok
+        'date': 'truncddate',               # tarih kolonu
+        'kitle_total': 'kitle_nof_call',
+        'kurumsal_total': 'kurumsal_nof_call',
+        'gold_total': 'gold_nof_call',
+        # Alt kuyruk kolonları: sub queue ismiyle aynı + _NOF_CALL
+    },
+
+    # ---- KAPASİTE VERİMLİLİK KATSAYILARI ----
+    # Günlük kapasite hesabında kullanılır:
+    #   kapasite = kisi * (vardiya_suresi_sn / gunluk_weighted_aht) * verimlilik
+    'capacity': {
+        'efficiency': {
+            'inhouse': 0.70,
+            'outsource': 0.70,
+            'part_time': 0.80,
+        },
+    },
+
+    # ---- KÜÇÜK ATAMA CEZASI ----
+    # Her aktif shift için sabit maliyet ekler.
+    # MIP 2-3 kişilik shift açmak yerine mevcut shift'e eklemeyi tercih eder.
+    # penalty=3.0 → shift açmak 3 kişi atamanın base maliyetine eşdeğer
+    # NOT: kuyruk/gün bazlı DEĞİL — çözücü ayarı ama her yerde aynı.
+    #      Kuyruk bazlı yapmak istersen queue_configs bloklarına taşı.
+    'small_shift_penalty': {
+        'enabled': True,
+        'penalty': 10,
+    },
+
+
+    # =========================================================================
+    # KUYRUK BAZLI — GÜN TİPİNDEN BAĞIMSIZ
+    # (Cumartesi ile Pazar arasında değişmeyen, kuyruğa özel ayarlar)
+    # =========================================================================
+
+    # ---- PART-TIME ÇALIŞANLAR ----
+    # count: kuyruk başına mevcut part-time kişi sayısı
+    'part_time': {
+        'enabled': True,
+        'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
+        'count': {'kitle': 32, 'kurumsal': 0, 'gold': 0},
+    },
+
+    # ---- OUTSOURCE HEDEF (kuyruk bazlı, None = sadece inhouse) ----
+    'outsource_ratio': {
+        'kitle': {'min': 0.65, 'max': 0.70},
+        'kurumsal': None,
+        'gold': None,
+    },
+
+    # ---- SAAT BAZLI MALİYET ÇARPANLARI — KUYRUK BAZLI ----
+    # Erken saatlerde (07:00-08:30) vardiya açmayı pahalılaştırır.
+    'time_cost_multipliers': {
+        'kitle': {
+            'inhouse':   {'07:00': 1.8, '07:30': 1.5, '08:00': 1.3, '08:30': 1.3},
+            'outsource': {'07:00': 1.4, '07:30': 1.4, '08:00': 1.3, '08:30': 1.3},
+        },
+        'kurumsal': {
+            'inhouse':   {'07:00': 1.8, '07:30': 1.5},
+            'outsource': {},
+        },
+        'gold': {
+            'inhouse':   {'07:00': 2.0, '07:30': 1.7},
+            'outsource': {},
+        },
+        'default': {
+            'inhouse':   {'07:00': 1.5, '07:30': 1.3},
+            'outsource': {},
+        },
+    },
+
+    # ---- INHOUSE-ONLY ALT KUYRUKLAR ----
+    # Bu alt kuyruklardaki çağrıların min_ratio kadarı inhouse tarafından
+    # karşılanmalı. 'hours' verilmezse tüm gün geçerli.
+    'inhouse_only_subqueues': {
+        'kitle': [
+            {'sub_queue': 'retention_line', 'min_ratio': 1.0,
+             # 'hours': {'start': '08:00', 'end': '00:00'},
+             },
+            {'sub_queue': 'karttemelbankaclik', 'min_ratio': 0.20,
+             'hours': {'start': '08:00', 'end': '00:00'},
+             },
+        ],
+        'kurumsal': [],
+        'gold': [],
+    },
+
+    # ---- OUTSOURCE-ONLY ALT KUYRUKLAR ----
+    'outsource_only_subqueues': {
+        'kitle': [
+            {'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0,
+             # 'hours': {'start': '08:00', 'end': '00:00'},
+             },
+        ],
+        'kurumsal': [],
+        'gold': [],
+    },
+
+
+    # =========================================================================
+    # ÇÖZÜCÜ AYARLARI — 6 TAM BLOK (kuyruk × gün tipi)
+    #
+    # Her blok 5 anahtarın TAMAMINI içerir. Hiçbir değer başka bir bloktan
+    # ya da üst seviyeden miras ALINMAZ. Bir bloğu okuduğunda o (kuyruk, gün)
+    # için çalışacak her şeyi görmüş olursun.
+    #
+    #   erlang        : target_asa / target_seconds / shrinkage / interval_minutes
+    #   mip           : cost_inhouse / cost_outsource / min_per_shift
+    #   slot_cap      : saat aralığı bazlı üst sınır (Erlang'ın katı) + ceza
+    #   rr_penalty    : Erlang üstü fazla atama cezası
+    #   hourly_report : Kap_RR hesabı (terminal raporu + EXCEL kolonu)
+    # =========================================================================
+    'queue_configs': {
+
+        # ═════════════════════════════════════════════════════════════════════
+        # KİTLE
+        # ═════════════════════════════════════════════════════════════════════
+        'kitle': {
+
+            # ---------------------------------------------------------------
+            # KİTLE · CUMARTESİ
+            # ---------------------------------------------------------------
+            'cumartesi': {
+                # ---- ERLANG ----
+                # çağrı sonrası nefeslenme verimlilik kaybı 3 sn / 190 sn = %1,6
+                # mola için agent oranları vp_shrinkage excelinde hesaplandı
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.06, 1: 0.06, 2: 0.06, 3: 0.06, 4: 0.06, 5: 0.06, 6: 0.06,
+                        7: 0.06, 8: 0.06, 9: 0.21, 10: 0.14, 11: 0.13, 12: 0.15,
+                        13: 0.22, 14: 0.19, 15: 0.24, 16: 0.27, 17: 0.24, 18: 0.18,
+                        19: 0.14, 20: 0.17, 21: 0.13, 22: 0.16, 23: 0.13,
+                        'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+
+                # ---- MIP ----
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 5,
+                },
+
+                # ---- SLOT CAP (Saat Aralığı Bazlı Üst Sınır) ----
+                # Bir slota Erlang ihtiyacının max_ratio katından fazla kişi
+                # atanırsa aşan kısım 'penalty' ile cezalanır.
+                # Fiili tavan = max(ceil(Erlang * max_ratio), 3)
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '09:00', 'max_ratio': 1.10, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '10:00', 'end': '11:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                        {'start': '18:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                    ],
+                },
+
+                # ---- RR PENALTY (Fazla Atama Cezası) ----
+                # penalty_per_person: Erlang üstü her fazla kişi başına ceza
+                #                     (base_cost=1.0'a göre)
+                # peak_exempt       : True ise peak slotlarda peak_penalty geçerli
+                # peak_threshold    : max Erlang'ın bu oranı üstü = peak slot
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,      # gündüz off-peak ceza
+                    'peak_penalty': 2.0,            # peak slotlarda ceza
+                    'peak_threshold': 0.70,         # Erlang >= max*0.70 = peak
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+
+                # ---- HOURLY REPORT (Kap_RR) ----
+                # Kap_RR = net_mesai_tutan * (cagri_adedi/2) / cagri
+                #   net_mesai_tutan = atanan - round(atanan*rapor_etkisi)
+                #                            - round(atanan*kapasite_kaybi)
+                # NOT: v10'da Cumartesi için HİÇBİR kuyruk override etmiyordu →
+                #      global değer kullanılıyordu. Burada o değer AÇIK yazıldı.
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                        13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                        19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+
+            # ---------------------------------------------------------------
+            # KİTLE · PAZAR
+            # ---------------------------------------------------------------
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
+                        7: 0.07, 8: 0.07, 9: 0.25, 10: 0.18, 11: 0.20, 12: 0.17,
+                        13: 0.16, 14: 0.22, 15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17,
+                        19: 0.18, 20: 0.17, 21: 0.15, 22: 0.10, 23: 0.24,
+                        'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 5,
+                },
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '09:00', 'max_ratio': 1.10, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '10:00', 'end': '11:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                        {'start': '18:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.70,
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.19, 10: 0.10, 11: 0.13, 12: 0.10,
+                        13: 0.09, 14: 0.15, 15: 0.17, 16: 0.18, 17: 0.26, 18: 0.10,
+                        19: 0.11, 20: 0.10, 21: 0.08, 22: 0.03, 23: 0.17,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+        },
+
+        # ═════════════════════════════════════════════════════════════════════
+        # KURUMSAL
+        #   • outsource agent YOK (queues.companies = ['inhouse'])
+        #   • min_per_shift = 0 → vardiya başına alt sınır YOK (kullanıcı
+        #     kararı 2026-10-02). v10'da kurumsal override etmiyordu ve
+        #     global değere (5) düşüyordu; artık açıkça 0.
+        #   • slot_cap KAPALI → kurumsala özel bant girmek istersen
+        #     'enabled': True yapıp 'bands' listesini doldur.
+        # ═════════════════════════════════════════════════════════════════════
+        'kurumsal': {
+
+            # ---------------------------------------------------------------
+            # KURUMSAL · CUMARTESİ
+            # ---------------------------------------------------------------
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 5: 0.05, 6: 0.05,
+                        7: 0.05, 8: 0.05, 9: 0.21, 10: 0.13, 11: 0.12, 12: 0.14,
+                        13: 0.21, 14: 0.18, 15: 0.24, 16: 0.26, 17: 0.24, 18: 0.17,
+                        19: 0.14, 20: 0.17, 21: 0.12, 22: 0.15, 23: 0.13,
+                        'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                },
+                'slot_cap': {
+                    'enabled': False,
+                    'bands': [],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.70,
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                        13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                        19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+
+            # ---------------------------------------------------------------
+            # KURUMSAL · PAZAR
+            # ---------------------------------------------------------------
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
+                        7: 0.07, 8: 0.07, 9: 0.25, 10: 0.18, 11: 0.20, 12: 0.17,
+                        13: 0.16, 14: 0.22, 15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17,
+                        19: 0.18, 20: 0.17, 21: 0.15, 22: 0.10, 23: 0.24,
+                        'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                },
+                'slot_cap': {
+                    'enabled': False,
+                    'bands': [],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.70,
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.19, 10: 0.10, 11: 0.13, 12: 0.10,
+                        13: 0.09, 14: 0.15, 15: 0.17, 16: 0.18, 17: 0.26, 18: 0.10,
+                        19: 0.11, 20: 0.10, 21: 0.08, 22: 0.03, 23: 0.17,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+        },
+
+        # ═════════════════════════════════════════════════════════════════════
+        # GOLD
+        #   • outsource agent YOK · min_per_shift = 0 · slot_cap KAPALI
+        #   • Bugün shrinkage ve kapasite_kaybi değerleri KURUMSAL ile birebir
+        #     aynı. Ayrışırlarsa sadece bu bloğu değiştir — kurumsal etkilenmez.
+        # ═════════════════════════════════════════════════════════════════════
+        'gold': {
+
+            # ---------------------------------------------------------------
+            # GOLD · CUMARTESİ
+            # ---------------------------------------------------------------
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 5: 0.05, 6: 0.05,
+                        7: 0.05, 8: 0.05, 9: 0.21, 10: 0.13, 11: 0.12, 12: 0.14,
+                        13: 0.21, 14: 0.18, 15: 0.24, 16: 0.26, 17: 0.24, 18: 0.17,
+                        19: 0.14, 20: 0.17, 21: 0.12, 22: 0.15, 23: 0.13,
+                        'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                },
+                'slot_cap': {
+                    'enabled': False,
+                    'bands': [],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.70,
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                        13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                        19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+
+            # ---------------------------------------------------------------
+            # GOLD · PAZAR
+            # ---------------------------------------------------------------
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07,
+                        7: 0.07, 8: 0.07, 9: 0.25, 10: 0.18, 11: 0.20, 12: 0.17,
+                        13: 0.16, 14: 0.22, 15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17,
+                        19: 0.18, 20: 0.17, 21: 0.15, 22: 0.10, 23: 0.24,
+                        'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                },
+                'slot_cap': {
+                    'enabled': False,
+                    'bands': [],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.70,
+                    'night_multiplier': {
+                        'enabled': True,
+                        'hours': {'start': '00:00', 'end': '07:00'},
+                        'multiplier': 100.0,
+                    },
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                        7: 0.0, 8: 0.0, 9: 0.19, 10: 0.10, 11: 0.13, 12: 0.10,
+                        13: 0.09, 14: 0.15, 15: 0.17, 16: 0.18, 17: 0.26, 18: 0.10,
+                        19: 0.11, 20: 0.10, 21: 0.08, 22: 0.03, 23: 0.17,
+                        'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+        },
+    },
+}
