@@ -5791,7 +5791,8 @@ LEJANT = [
     ("--- gun özeti (rr_slot üst tablo) ---", None, None, ""),
     ("kap_rr / rr2 (gün)", None, None,
      "Σck ÷ Σçağrı ve Σkişi ÷ Σerlang_need — slot RR'larının ORTALAMASI DEĞİL, Model-1'in "
-     "kap_rr_day'i ile aynı toplama. ⚠ Fazla slot eksik slotu KAPATIR: 09:00'da %200, "
+     "kap_rr_day'i ile aynı toplama. rr2'de kişi YALNIZ erlang_need>0 slotlardan toplanır "
+     "(ihtiyacı 0 olan saatteki kişi başarı sayılmaz). ⚠ Fazla slot eksik slotu KAPATIR: 09:00'da %200, "
      "17:00'de %80 → gün %120 görünür ama 17:00'deki çağrılar kayıp"),
     ("cevaplanabilen_model2", None, None,
      "Σmin(ck, çağrı) ÷ Σçağrı — fazlayı eksiğe SAYDIRMAYAN toplam. kap_rr'dan düşükse "
@@ -6462,7 +6463,8 @@ df_rr_slot = (pd.DataFrame(_rr_satir) if _rr_satir
 
 # ── GÜN ÖZETİ: iki ölçü birden, Model-1 ile AYNI toplama ─────────────
 # İŞ BİRİMİ : kap_rr_day = Σck ÷ Σçağrı   (slot RR'larının ortalaması DEĞİL)
-# MODEL     : rr2_day    = Σkişi ÷ Σerlang_need
+# MODEL     : rr2_day    = Σkişi ÷ Σerlang_need — YALNIZ erlang_need>0 slotlar
+#             (Model-1 gibi: ihtiyacı 0 olan slottaki kişi payı şişirmesin)
 # ⚠ İkisi de fazla slotun eksik slotu kapatmasına izin verir → gün sayısı iyimser.
 #   Gizlenmeyen ölçü 'cevaplanabilen' kolonu: Σmin(ck, çağrı) ÷ Σçağrı.
 _rr_gun = []
@@ -6473,6 +6475,8 @@ if len(df_rr_slot):
         _s1, _s2 = _t["_ck1"].sum(), _t["_ck2"].sum()
         _cev = (_t[["_ck2", "forecast_cagri"]].min(axis=1).sum() / _c) if _c else None
         _sbt_g = int(_t["outsource"].sum() + _t["part_time"].sum())
+        _te = _t[_t["erlang_need"].fillna(0) > 0]      # rr2 için: ihtiyaçlı slotlar
+        _sbt_e = int(_te["outsource"].sum() + _te["part_time"].sum())
         _rr_gun.append({
             "tarih": _ds, "gun": _g, "forecast_cagri": round(_c),
             "model1_kisi_slot": int(_t["model1_kisi"].sum()),
@@ -6483,9 +6487,9 @@ if len(df_rr_slot):
             "kap_rr_model2": round(_s2 / _c, 3) if _c else None,
             "cevaplanabilen_model2": round(_cev, 3) if _cev is not None else None,
             "erlang_need_slot": (int(_e) if pd.notna(_e) else None),
-            "rr2_model1": (round((_t["model1_kisi"].sum() + _sbt_g) / _e, 3)
+            "rr2_model1": (round((_te["model1_kisi"].sum() + _sbt_e) / _e, 3)
                            if pd.notna(_e) and _e else None),
-            "rr2_model2": (round((_t["model2_kisi"].sum() + _sbt_g) / _e, 3)
+            "rr2_model2": (round((_te["model2_kisi"].sum() + _sbt_e) / _e, 3)
                            if pd.notna(_e) and _e else None),
             "kap<1_slot_model2": int((_t["kap_rr_model2"] < 1).sum()),
             "rr2<1_slot_model2": int((_t["rr2_model2"] < 1).sum()),
@@ -6606,7 +6610,8 @@ if _rr_cagri_yok:
 else:
     _c = df_rr_slot["forecast_cagri"].sum()
     _e = df_rr_slot["erlang_need"].sum(min_count=1)
-    _o = df_rr_slot["outsource"].sum() + df_rr_slot["part_time"].sum()
+    _rr_e = df_rr_slot[df_rr_slot["erlang_need"].fillna(0) > 0]   # rr2: ihtiyaçlı slotlar
+    _o = _rr_e["outsource"].sum() + _rr_e["part_time"].sum()
     print(f"  İŞ BİRİMİ (kişi × {_rr_k:g}, mola düşülmüş)")
     for _kol, _et in (("_ck1", "MODEL-1"), ("_ck2", "MODEL-2")):
         _rr = df_rr_slot[_kol].sum() / _c
@@ -6619,7 +6624,7 @@ else:
         print(f"       Model-1 akışı bu alanı üretiyor; eski bir pickle olabilir.")
     else:
         for _kol, _et in (("model1_kisi", "MODEL-1"), ("model2_kisi", "MODEL-2")):
-            _rr = (df_rr_slot[_kol].sum() + _o) / _e
+            _rr = (_rr_e[_kol].sum() + _o) / _e
             _alti = int((df_rr_slot["rr2_model2" if _kol == "model2_kisi"
                                     else "rr2_model1"] < 1).sum())
             print(f"     {_et}: ay rr2 {_rr:>10.1%}  |  rr2<1 slot {_alti}")
