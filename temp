@@ -30,7 +30,7 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
 
   SERT KISITLAR (ihlal edilemez):
     H9  müsaitlik    : izin + off_t2 → değişken yok (atanamaz). off_t YUMUŞAK: değişken açılır,
-                       model karşılayamazsa çalıştırır ve W_OFF_T cezası yer (H20B-3);
+                       model karaşılayamazsa çalıştırır ve W_OFF_T cezası yer (H20B-3);
                        karşılanmayan gün Excel'de KIRMIZI (H29 lejantı).
     H10 hafta sonu cov.: hafta sonu kovaları talep ± HS_TOL(2) sıkı band (tam otursun).
     H10 min kova     : talebi olan HER kova ≥ min(MIN_KOVA(1), talep) — aktif vardiya boş kalamaz.
@@ -5791,9 +5791,12 @@ LEJANT = [
     ("--- gun özeti (rr_slot üst tablo) ---", None, None, ""),
     ("kap_rr / rr2 (gün)", None, None,
      "Σck ÷ Σçağrı ve Σkişi ÷ Σerlang_need — slot RR'larının ORTALAMASI DEĞİL, Model-1'in "
-     "kap_rr_day'i ile aynı toplama. rr2'de kişi YALNIZ erlang_need>0 slotlardan toplanır "
-     "(ihtiyacı 0 olan saatteki kişi başarı sayılmaz). ⚠ Fazla slot eksik slotu KAPATIR: 09:00'da %200, "
-     "17:00'de %80 → gün %120 görünür ama 17:00'deki çağrılar kayıp"),
+     "kap_rr_day'i ile aynı toplama. ⚠ İKİ ÖLÇÜ DE yalnız erlang_need>0 slotları sayar: "
+     "Model-1 de `if erl <= 0: continue` bloğunun İÇİNDE topluyor. Gerekçe: çağrısı 0 olan "
+     "slot (gece nöbeti) paydaya 0 ekler ama paya kişi×7,5 ekler → süzülmezse kap_rr şişer "
+     "(ölçüldü: 09:00 ck 52,5 + 02:00 ck 22,5 = 75 ÷ 55 çağrı = %136; doğrusu 52,5 ÷ 55 = %95). "
+     "⚠ Fazla slot eksik slotu KAPATIR: 09:00'da %200, 17:00'de %80 → gün %120 görünür ama "
+     "17:00'deki çağrılar kayıp"),
     ("cevaplanabilen_model2", None, None,
      "Σmin(ck, çağrı) ÷ Σçağrı — fazlayı eksiğe SAYDIRMAYAN toplam. kap_rr'dan düşükse "
      "kadro MİKTARI yetiyor ama DAĞILIMI yetmiyor demektir. Gün içi yerleşim sorununu "
@@ -6470,12 +6473,22 @@ df_rr_slot = (pd.DataFrame(_rr_satir) if _rr_satir
 _rr_gun = []
 if len(df_rr_slot):
     for (_ds, _g), _t in df_rr_slot.groupby(["tarih", "gun"], sort=True):
-        _c = _t["forecast_cagri"].sum()
         _e = _t["erlang_need"].sum(min_count=1)
-        _s1, _s2 = _t["_ck1"].sum(), _t["_ck2"].sum()
-        _cev = (_t[["_ck2", "forecast_cagri"]].min(axis=1).sum() / _c) if _c else None
-        _sbt_g = int(_t["outsource"].sum() + _t["part_time"].sum())
-        _te = _t[_t["erlang_need"].fillna(0) > 0]      # rr2 için: ihtiyaçlı slotlar
+        _te = _t[_t["erlang_need"].fillna(0) > 0]      # İHTİYAÇLI slotlar
+        # TOPLAMA TABANI = _te (İKİ ÖLÇÜ İÇİN DE). Model-1 kap_rr_day'i de
+        # `if erl <= 0: continue` bloğunun İÇİNDE topluyor → ihtiyacı 0 olan
+        # slot her iki rapordan da düşüyor.
+        # NEDEN ŞART (ölçüldü): çağrısı 0 olan slot (gece nöbeti) paydaya 0
+        # ekler ama paya kişi×7,5 ekler → süzülmezse kap_rr ŞİŞER.
+        #   09:00: 55 çağrı, 8 kişi → ck 52,5   |   02:00: 0 çağrı, 3 kişi → ck 22,5
+        #   süzgeçsiz: 75,0 ÷ 55 = %136   ✗  (gece kapasitesi sabahın çağrısına yazıldı)
+        #   süzgeçli : 52,5 ÷ 55 =  %95   ✓  (Model-1 Excel'i ile çakışır)
+        # EMNİYET: erlang verisi HİÇ yoksa (_te boş) eski davranışa düşülür →
+        # eski pickle'da kap_rr yine hesaplanır, sadece rr2 boş kalır.
+        _kb = _te if len(_te) else _t
+        _c = _kb["forecast_cagri"].sum()
+        _s1, _s2 = _kb["_ck1"].sum(), _kb["_ck2"].sum()
+        _cev = (_kb[["_ck2", "forecast_cagri"]].min(axis=1).sum() / _c) if _c else None
         _sbt_e = int(_te["outsource"].sum() + _te["part_time"].sum())
         _rr_gun.append({
             "tarih": _ds, "gun": _g, "forecast_cagri": round(_c),
@@ -6530,6 +6543,9 @@ df_rr_mantik = pd.DataFrame([
      "kk=0,08 ise kayıp görünmesi için ≥7 kişi gerekir → az kadrolu slotta kap_rr değişmez."),
     ("FARK", 5, "Gün toplamı uyarısı", "Σck ÷ Σçağrı fazla slotu eksiğe saydırır", "",
      "gun özetindeki 'cevaplanabilen_model2' kolonu saydırmaz — gerçekçi olan o."),
+    ("FARK", 6, "Hangi slotlar toplanır", "gün/ay toplamı YALNIZ erlang_need>0 slotları "
+     "sayar — İKİ ÖLÇÜ DE", "", "Model-1 ile aynı: çağrısı 0 olan gece nöbeti paydaya 0 "
+     "ekleyip paya kişi×7,5 ekliyordu → kap_rr şişiyordu (%136 ↔ doğrusu %95)."),
 ], columns=["yaklasim", "adim", "islem", "formul", "ornek_hesap", "ornek_sonuc"])
 
 # ── EXCEL ────────────────────────────────────────────────────────────
@@ -6608,13 +6624,14 @@ print("=" * 86)
 if _rr_cagri_yok:
     print("  ⚠ pickle'da calls_by_slot YOK ya da hep 0 → RR hesaplanamadı (kolonlar boş).")
 else:
-    _c = df_rr_slot["forecast_cagri"].sum()
     _e = df_rr_slot["erlang_need"].sum(min_count=1)
-    _rr_e = df_rr_slot[df_rr_slot["erlang_need"].fillna(0) > 0]   # rr2: ihtiyaçlı slotlar
+    _rr_e = df_rr_slot[df_rr_slot["erlang_need"].fillna(0) > 0]   # İHTİYAÇLI slotlar
+    _kb_ay = _rr_e if len(_rr_e) else df_rr_slot   # gün özetiyle AYNI taban (bkz. yukarı)
+    _c = _kb_ay["forecast_cagri"].sum()
     _o = _rr_e["outsource"].sum() + _rr_e["part_time"].sum()
     print(f"  İŞ BİRİMİ (kişi × {_rr_k:g}, mola düşülmüş)")
     for _kol, _et in (("_ck1", "MODEL-1"), ("_ck2", "MODEL-2")):
-        _rr = df_rr_slot[_kol].sum() / _c
+        _rr = _kb_ay[_kol].sum() / _c
         _alti = int((df_rr_slot["kap_rr_model2" if _kol == "_ck2"
                                 else "kap_rr_model1"] < 1).sum())
         print(f"     {_et}: ay kap_rr {_rr:>6.1%}  |  kap_rr<1 slot {_alti}")
