@@ -574,9 +574,61 @@ ONCEKI_GOSTER = True           # Excel roster'ına ÖNCEKİ AY günlerini de bas
                                # Aralık = ONCEKI_GUNLER = ayın 1'inden önceki 6 gün
                                # (ör. 26-31 Ağu). Eskiden TASIMA_GUNLER'di → ay Salı
                                # başlayınca TEK gün basıyordu. df_onceki yoksa atlanır.
-RR_CAGRI_SAAT = 15             # H31B rr_slot: bir kişi saatte bu kadar çağrı karşılar
-                               # → 30 dk slotta RR_CAGRI_SAAT/2 (15 → 7,5). Ekibin kuralı.
-                               # RR = kişi × 7,5 ÷ forecast çağrı (kayıp DÜŞÜLMEZ).
+RR_CAGRI_SAAT = 15             # H31B: bir kişi saatte bu kadar çağrı karşılar
+                               # → 30 dk slotta RR_CAGRI_SAAT/2 (15 → 7,5).
+                               # İŞ BİRİMİNİN KURALI. Model-1'in config'inde
+                               # hourly_report.cagri_adedi olarak duruyor; buraya
+                               # elle kopyalandı (Model-2, o config'i import etmiyor).
+
+# ── H31B: KAPASİTE KAYBI (mola) — İŞ BİRİMİ YAKLAŞIMI ─────────────────
+# NE İŞE YARAR: roster bir kişiyi vardiyanın TAMAMI boyunca "var" sayar; molaya
+# çıkan kişi o anda telefonda değil. Bu tablo o çevirimi yapar:
+#     net telefonda (nmt) = kişi − round(kişi × rapor_etkisi) − round(kişi × kapasite_kaybi)
+#     karşılanabilir çağrı = nmt × (RR_CAGRI_SAAT / 2)
+#     kap_rr = karşılanabilir çağrı ÷ forecast çağrı
+# Zincir Model-1'in Kap_RR'ı ile BİREBİR aynı (forecast_monthly_run_v11, kişi
+# bazlı yuvarlama dahil) → iki raporun sayısı çakışır. Değerler Model-1'in
+# kurumsal config'inden kopyalandı; ORADA DEĞİŞİRSE BURAYI DA GÜNCELLE.
+#
+# ⚠ ÜÇ TABLO, ÜÇÜ DE FARKLI — gün tipine göre seçilir:
+#     hafta içi → forecast_monthly_run_v11 CONFIG_WEEKDAY
+#     Cmt/Pzr   → weekend_config_v11 queue_configs['kurumsal'][gün]
+# Saat 09:00 / 13:00 / 15:00-17:00 zirveleri mola ve vardiya değişimi deseni.
+#
+# ⚠ YUVARLAMA: kayıp TAM KİŞİYE yuvarlanıyor (Model-1 de öyle yapıyor).
+# Kurumsalda slot kadrosu küçük olduğu için kayıp çoğu slotta 0 çıkar —
+# ör. kk=0,08 ise kayıp görünmesi için en az 7 kişi gerekir. Beklenen davranış.
+KAP_KAYBI = {
+    'hafta_ici': {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                  7: 0.0, 8: 0.0, 9: 0.17, 10: 0.10, 11: 0.10, 12: 0.09,
+                  13: 0.12, 14: 0.14, 15: 0.18, 16: 0.19, 17: 0.22, 18: 0.11,
+                  19: 0.10, 20: 0.11, 21: 0.08, 22: 0.07, 23: 0.12,
+                  'default': 0.08},
+    'cumartesi': {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                  7: 0.0, 8: 0.0, 9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09,
+                  13: 0.16, 14: 0.13, 15: 0.19, 16: 0.21, 17: 0.18, 18: 0.12,
+                  19: 0.09, 20: 0.12, 21: 0.07, 22: 0.10, 23: 0.08,
+                  'default': 0.08},
+    'pazar':     {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0,
+                  7: 0.0, 8: 0.0, 9: 0.19, 10: 0.10, 11: 0.13, 12: 0.10,
+                  13: 0.09, 14: 0.15, 15: 0.17, 16: 0.18, 17: 0.26, 18: 0.10,
+                  19: 0.11, 20: 0.10, 21: 0.08, 22: 0.03, 23: 0.17,
+                  'default': 0.08},
+}
+RAPOR_ETKISI = {'default': 0.0}   # üç gün tipinde de 0 → fiilen etkisiz.
+                                  # Model-1 config'inde ayrı bir kalem; zincirde
+                                  # yerini koruyor ki oradan değer gelirse çalışsın.
+
+# ── H31B: ERLANG İHTİYACI — BİZİM MODELİN YAKLAŞIMI ───────────────────
+# erlang_need PICKLE'DAN OKUNUR, burada YENİDEN HESAPLANMAZ (kullanıcı kararı
+# 2026-10-05). Kaynak: results[gün][QUEUE]['erlang_by_slot'].
+#   girdi (Model-1 tarafında): çağrı · AHT · hedef ASA (kurumsal 30 sn)
+#   → ASA hedefini tutturan en az kişi, sonra shrinkage ile şişirilir
+#   çıktı: o slotta YAZILMASI gereken kişi
+# rr2 = (kişi + outsource) ÷ erlang_need
+# NEDEN YENİDEN HESAPLAMIYORUZ: Erlang parametreleri (AHT, hedef ASA, shrinkage)
+# Model-1 config'inde; burada kopyalamak iki yerde iki ayrı sayı riski demek.
+# Pickle'da yoksa o slotta kolon BOŞ kalır (uyarı basılır).
 
 
 # %% [HÜCRE 1] — PICKLE YÜKLE (planlama) ────────────────────────────────
@@ -5695,6 +5747,62 @@ LEJANT = [
     ("kapsam / ornek",    None, None,
      "kapsam = kuralın birimi (agent×gün, agent×hafta, kova...). ornek = ilk 3 ihlal "
      "kaydı; oradan roster'daki hücreye bakılır"),
+    ("--- rr_slot SAYFASI (H31B) ---", None, None, ""),
+    ("İKİ YAKLAŞIM",      None, None,
+     "Sayfa 'tahmini çağrının yüzde kaçını karşılarım' sorusuna İKİ ayrı cevap veriyor; "
+     "aynı satırda yan yana çünkü çelişebiliyorlar. Bantlar: ORTAK | İŞ BİRİMİ | MODEL. "
+     "Adım adım hesap 'rr_mantik' sayfasında"),
+    ("model1_kisi",        None, None,
+     "MODEL-1'in o slota yazdığı INHOUSE kişi (kova planı, pickle mip_in_by_slot). "
+     "İsim yok, sadece sayı"),
+    ("model2_kisi",        None, None,
+     "BU MODELİN o slota fiilen atadığı isimli agent sayısı. Arife yarım vardiyası ve "
+     "provizyon flexy HARİÇ (ikisi de coverage dışı sözde-vardiya)"),
+    ("fark_kisi",          None, None,
+     "model2_kisi − model1_kisi. EKSİ ise kova planı kadar kişi oturtulamadı — sebep "
+     "izin/kota/takım kuralları. Kayıptan ETKİLENMEZ, iki yaklaşımda da aynı"),
+    ("outsource",          None, None,
+     "pickle mip_out_by_slot — SABİT, modelin değiştirdiği bir şey değil. İKİ yaklaşımda "
+     "da kişi sayısına eklenir, çünkü Model-1 hem Erlang kısıtını hem Kap_RR'ı "
+     "inhouse+outsource TOPLAMI üzerinden kuruyor. Kurumsalda 0"),
+    ("kk_oran",            None, None,
+     "O slota uygulanan MOLA kaybı oranı (KAP_KAYBI, H0). Gün tipine göre seçilir: "
+     "hafta içi / Cumartesi / Pazar — ÜÇÜ DE FARKLI. Saat 09:00 · 13:00 · 15:00-17:00 "
+     "zirveleri mola ve vardiya değişimi deseni"),
+    ("nmt_model1 / nmt_model2", None, None,
+     "NET MASA TELEFONDA = kişi − round(kişi × kk_oran). Roster bir kişiyi vardiyanın "
+     "TAMAMI boyunca var sayar; molaya çıkan o anda telefonda değil. ⚠ Kayıp TAM KİŞİYE "
+     "yuvarlanıyor (Model-1 de öyle) → az kadrolu slotta kayıp 0 çıkar; ör. kk=0,08 ise "
+     "kayıp görünmesi için ≥7 kişi gerekir. Hata değil, eşik etkisi"),
+    ("kap_rr_model1 / kap_rr_model2", None, None,
+     "İŞ BİRİMİ CEVABI = nmt × 7,5 ÷ forecast_cagri. 'Bir agent saatte 15 çağrı karşılar' "
+     "kuralı (RR_CAGRI_SAAT, H0). Model-1 Excel'indeki Kap_RR ile BİREBİR aynı zincir → "
+     "iki rapor çakışır. ⚠ %100 'YETİYOR' DEMEK DEĞİL: agentın 30 dk boyunca hiç boş "
+     "durmadığını varsayar, yani %100 = doluluk %100, kuyruk payı sıfır. Teorik tavan"),
+    ("erlang_need",        None, None,
+     "MODEL-1'in Erlang hesabı: o çağrıyı hedef beklemeyle (kurumsal ASA 30 sn) "
+     "cevaplamak için YAZILMASI gereken kişi — shrinkage payı dahil. PICKLE'DAN okunur "
+     "(erlang_by_slot), burada yeniden HESAPLANMAZ. Boşsa pickle o alanı taşımıyor"),
+    ("rr2_model1 / rr2_model2", None, None,
+     "MODEL CEVABI = (kişi + outsource) ÷ erlang_need. Çağrının düzensiz geldiğini bilir, "
+     "beklemeyi hedefte tutmak için boşta pay bırakır → gerçekçi ihtiyaç. "
+     "rr2_model1 Model-1'de SERT KISIT olduğu için genelde ≥%100, ayırt etmez. "
+     "KARAR İÇİN BAKILACAK SAYI rr2_model2'dir"),
+    ("--- gun özeti (rr_slot üst tablo) ---", None, None, ""),
+    ("kap_rr / rr2 (gün)", None, None,
+     "Σck ÷ Σçağrı ve Σkişi ÷ Σerlang_need — slot RR'larının ORTALAMASI DEĞİL, Model-1'in "
+     "kap_rr_day'i ile aynı toplama. ⚠ Fazla slot eksik slotu KAPATIR: 09:00'da %200, "
+     "17:00'de %80 → gün %120 görünür ama 17:00'deki çağrılar kayıp"),
+    ("cevaplanabilen_model2", None, None,
+     "Σmin(ck, çağrı) ÷ Σçağrı — fazlayı eksiğe SAYDIRMAYAN toplam. kap_rr'dan düşükse "
+     "kadro MİKTARI yetiyor ama DAĞILIMI yetmiyor demektir. Gün içi yerleşim sorununu "
+     "sadece bu kolon gösterir"),
+    ("kap<1 / rr2<1 slot", None, None,
+     "O gün ilgili ölçünün 1'in altında kaldığı slot sayısı. Çağrısı 0 olan slot sayılmaz"),
+    ("renk (RR kolonları)", None, None,
+     "<1 kırmızı · 1–1,05 yeşil · >1,05 mavi. ⚠ Eşik kap_rr için İYİMSER: %100 doluluk "
+     "%100 demek. Hizmet hedefini tutmak için gereken kap_rr takım boyutuna göre değişir "
+     "(8 kişide ~%143, 20 kişide ~%118) — o yüzden karar rr2_model2'den verilir"),
 ]
 _FILL = {k: (PatternFill("solid", fgColor=c) if c else None)
          for _, k, c, _d in LEJANT if k}
@@ -6240,88 +6348,235 @@ print(f"    df = df_cmp.merge(p['interval'], on=['data_date','interval'], how='l
 print("=" * 78)
 
 
-# %% [HÜCRE 31B] — RR SAYFASI: MODEL-1 vs MODEL-2 (slot bazlı, Excel'e ek) ─
-# Ekibin RR tanımı: RR = kişi × (RR_CAGRI_SAAT / 2) ÷ forecast çağrı   (H0)
-#   15 çağrı/saat → 30 dk slotta 7,5 çağrı. Rapor etkisi / kapasite kaybı
-#   DÜŞÜLMEZ (Model-1 Excel'indeki Kap_RR'dan farkı bu).
-#   RR ≥ 1 → kadro o slotun çağrısına yetiyor;  < 1 → açık.
+# %% [HÜCRE 31B] — RR SAYFASI: İKİ YAKLAŞIM YAN YANA (Excel'e ek) ───────
+# SORU: tahmini çağrının yüzde kaçını karşılayabiliyorum?
+# İKİ CEVAP — aynı satırda yan yana, çünkü aynı slotta çelişebiliyorlar:
+#
+#   [İŞ BİRİMİ]  "yazdığım kadro bu çağrıyı kaç tane karşılar?"
+#       nmt    = kişi − round(kişi×rapor_etkisi) − round(kişi×kapasite_kaybi)
+#       ck     = nmt × (RR_CAGRI_SAAT/2)            # 15/saat → 7,5/slot
+#       kap_rr = ck ÷ forecast çağrı
+#     VARSAYIM: agent 30 dk boyunca HİÇ boş durmaz, çağrılar arka arkaya dizilir
+#     → teorik tavan. kap_rr %100 = doluluk %100 (kuyruk payı YOK).
+#     Zincir Model-1'in Kap_RR'ı ile BİREBİR (yuvarlama dahil) → sayılar çakışır.
+#
+#   [MODEL]      "bu çağrıyı 30 sn beklemeyle cevaplamak için kaç kişi gerekir?"
+#       erlang_need = PICKLE'DAN (results[gün][QUEUE]['erlang_by_slot'])
+#       rr2         = (kişi + outsource) ÷ erlang_need
+#     VARSAYIM: çağrı düzensiz gelir, hedefi tutmak için boşta pay şart
+#     → gerçekçi ihtiyaç. Yeniden hesap YOK, Model-1 ne dediyse o (H0).
+#
+# HANGİ SAYI İŞE YARAR: Model-1 kendi Erlang ihtiyacını MIP'te sert kısıt olarak
+# zorluyor → rr2_model1 genelde ≥%100 çıkar, ayırt etmez. Asıl ölçü rr2_model2:
+# isimli agent atarken izin/kota/takım kuralları yüzünden geride kalan kısım.
+#
 # KAYNAKLAR (yeni veri YOK):
-#   forecast çağrı  : pickle results[gün][QUEUE]['calls_by_slot']
-#   model1_kisi     : pickle mip_info['mip_in_by_slot']  (Model-1 INHOUSE planı)
-#   outsource       : pickle mip_info['mip_out_by_slot'] (kurumsalda 0) → iki tarafa
-#                     da AYNEN eklenir; Model-2 sadece inhouse atadığı için kıyas adil olsun
-#   model2_kisi     : H31 _at_slot (isimli atama; arife yarım + provizyon HARİÇ)
-# Excel'e 'rr_slot' sayfası EKLENİR (H29'un yazdığı dosya, diğer sayfalara dokunmaz).
-# Sayfa: üstte gün özeti (gün toplamı RR), altında gün × slot detay.
+#   forecast çağrı : results[gün][QUEUE]['calls_by_slot']
+#   erlang_need    : results[gün][QUEUE]['erlang_by_slot']
+#   model1_kisi    : mip_info['mip_in_by_slot']   (Model-1 INHOUSE kova planı)
+#   outsource      : mip_info['mip_out_by_slot']  (kurumsalda 0)
+#   part_time      : mip_info['mip_pt_by_slot']   (kurumsalda 0; kitlede hafta
+#                    sonu 32 kişi) → outsource ile birlikte İKİ tarafa da aynen
+#                    eklenir. Model-1 hem Erlang kısıtını hem Kap_RR'ı
+#                    mip_by_slot = inhouse+outsource+PT TOPLAMI üzerinden kuruyor;
+#                    aynı tabanı kullanmazsak sayılar Model-1 ile tutmaz.
+#                    Model-2 bu iki grubu HİÇ planlamıyor (PT H5'te eleniyor) →
+#                    ikisi de sabit, modelin değiştirdiği bir şey değil
+#   model2_kisi    : H31 _at_slot (isimli atama; arife yarım + provizyon HARİÇ)
+# Excel'e 'rr_slot' + 'rr_mantik' sayfaları EKLENİR, diğer sayfalara dokunulmaz.
 _rr_k = RR_CAGRI_SAAT / 2.0
+_RR_BLOK = ("ORTAK", "İŞ BİRİMİ (15 çağrı/saat)", "MODEL (Erlang)")
+
+
+def _rr_gun_tipi(_wd):
+    """hafta günü (0=Pzt) → KAP_KAYBI tablosu anahtarı."""
+    return "cumartesi" if _wd == 5 else "pazar" if _wd == 6 else "hafta_ici"
+
+
+def _rr_nmt(_kisi, _gt, _slot):
+    """İŞ BİRİMİ zinciri → (kk_oran, nmt). Model-1 ile aynı: TAM KİŞİ yuvarlama,
+    toplam (inhouse+outsource) üzerinde BİR kez."""
+    _h = int(_slot[:2])
+    _kk = KAP_KAYBI[_gt]
+    _kko = _kk.get(_h, _kk["default"])
+    _reo = RAPOR_ETKISI.get(_h, RAPOR_ETKISI["default"])
+    return _kko, _kisi - round(_kisi * _reo) - round(_kisi * _kko)
+
+
 _rr_satir = []
+_rr_erl_yok = 0                                    # erlang_need bulunamayan slot
 for _ds in PLAN_GUNLER:
     _rq = (results.get(_ds) or {}).get(QUEUE) or {}
     _mi = _rq.get("mip_info", {}) or {}
     _calls = _rq.get("calls_by_slot") or _mi.get("calls_by_slot") or {}
     _m1in = _mi.get("mip_in_by_slot") or _mi.get("mip_by_slot") or {}
     _m1out = _mi.get("mip_out_by_slot") or {}
+    _m1pt = _mi.get("mip_pt_by_slot") or {}
+    _erl = _mi.get("erlang_by_slot") or _rq.get("erlang_by_slot") or {}
     _d = dt.date.fromisoformat(_ds)
+    _gt = _rr_gun_tipi(_d.weekday())
     for _s in _SLOTS:
         _c = float(_calls.get(_s, 0) or 0)
         _k1 = float(_m1in.get(_s, 0) or 0)
         _k2 = float(_at_slot.get((_ds, _s), 0))
         _ko = float(_m1out.get(_s, 0) or 0)
+        _kp = float(_m1pt.get(_s, 0) or 0)
         if _c <= 0 and _k1 <= 0 and _k2 <= 0:
-            continue                                   # boş slot → satır yok
+            continue                               # boş slot → satır yok
+        _sbt = _ko + _kp                           # Model-2'nin planlamadığı sabit kadro
+        _t1, _t2 = _k1 + _sbt, _k2 + _sbt          # Model-1'in mip_by_slot'uyla aynı taban
+        _kko, _n1 = _rr_nmt(_t1, _gt, _s)
+        _,    _n2 = _rr_nmt(_t2, _gt, _s)
+        _ck1, _ck2 = _n1 * _rr_k, _n2 * _rr_k
+        _en = _erl.get(_s)                         # erlang_need — pickle'dan
+        if _en is None and _c > 0:
+            _rr_erl_yok += 1
+        _en = float(_en) if _en is not None else None
         _rr_satir.append({
+            # ── ORTAK
             "tarih": _ds, "gun": DAY_TR[_d.weekday()], "slot": _s,
             "forecast_cagri": round(_c, 1),
             "model1_kisi": int(_k1), "model2_kisi": int(_k2),
             "fark_kisi": int(_k2 - _k1),
-            "outsource": int(_ko),
-            "rr_model1": round((_k1 + _ko) * _rr_k / _c, 3) if _c > 0 else None,
-            "rr_model2": round((_k2 + _ko) * _rr_k / _c, 3) if _c > 0 else None,
+            "outsource": int(_ko), "part_time": int(_kp),
+            # ── İŞ BİRİMİ
+            "kk_oran": _kko,
+            "nmt_model1": int(_n1), "nmt_model2": int(_n2),
+            "kap_rr_model1": round(_ck1 / _c, 3) if _c > 0 else None,
+            "kap_rr_model2": round(_ck2 / _c, 3) if _c > 0 else None,
+            # ── MODEL
+            "erlang_need": (int(_en) if _en is not None else None),
+            "rr2_model1": round(_t1 / _en, 3) if _en else None,
+            "rr2_model2": round(_t2 / _en, 3) if _en else None,
+            # (gün özeti için, sayfaya yazılmaz)
+            "_ck1": _ck1, "_ck2": _ck2,
         })
-df_rr_slot = pd.DataFrame(_rr_satir)
+_RR_KOL = ["tarih", "gun", "slot", "forecast_cagri",
+           "model1_kisi", "model2_kisi", "fark_kisi", "outsource", "part_time",
+           "kk_oran", "nmt_model1", "nmt_model2",
+           "kap_rr_model1", "kap_rr_model2",
+           "erlang_need", "rr2_model1", "rr2_model2"]
+_RR_BLOK_SINIR = (9, 14)                           # ORTAK | İŞ BİRİMİ | MODEL kolon kesimi
+df_rr_slot = (pd.DataFrame(_rr_satir) if _rr_satir
+              else pd.DataFrame(columns=_RR_KOL + ["_ck1", "_ck2"]))
 
-# gün özeti: gün TOPLAMI üzerinden (Σkişi×7,5 ÷ Σçağrı) + açık slot sayısı
+# ── GÜN ÖZETİ: iki ölçü birden, Model-1 ile AYNI toplama ─────────────
+# İŞ BİRİMİ : kap_rr_day = Σck ÷ Σçağrı   (slot RR'larının ortalaması DEĞİL)
+# MODEL     : rr2_day    = Σkişi ÷ Σerlang_need
+# ⚠ İkisi de fazla slotun eksik slotu kapatmasına izin verir → gün sayısı iyimser.
+#   Gizlenmeyen ölçü 'cevaplanabilen' kolonu: Σmin(ck, çağrı) ÷ Σçağrı.
 _rr_gun = []
 if len(df_rr_slot):
     for (_ds, _g), _t in df_rr_slot.groupby(["tarih", "gun"], sort=True):
         _c = _t["forecast_cagri"].sum()
-        _o = _t["outsource"].sum()
+        _e = _t["erlang_need"].sum(min_count=1)
+        _s1, _s2 = _t["_ck1"].sum(), _t["_ck2"].sum()
+        _cev = (_t[["_ck2", "forecast_cagri"]].min(axis=1).sum() / _c) if _c else None
+        _sbt_g = int(_t["outsource"].sum() + _t["part_time"].sum())
         _rr_gun.append({
             "tarih": _ds, "gun": _g, "forecast_cagri": round(_c),
             "model1_kisi_slot": int(_t["model1_kisi"].sum()),
             "model2_kisi_slot": int(_t["model2_kisi"].sum()),
-            "rr_model1": round((_t["model1_kisi"].sum() + _o) * _rr_k / _c, 3) if _c else None,
-            "rr_model2": round((_t["model2_kisi"].sum() + _o) * _rr_k / _c, 3) if _c else None,
-            "rr<1_slot_model1": int((_t["rr_model1"] < 1).sum()),
-            "rr<1_slot_model2": int((_t["rr_model2"] < 1).sum()),
+            "outsource_slot": int(_t["outsource"].sum()),
+            "part_time_slot": int(_t["part_time"].sum()),
+            "kap_rr_model1": round(_s1 / _c, 3) if _c else None,
+            "kap_rr_model2": round(_s2 / _c, 3) if _c else None,
+            "cevaplanabilen_model2": round(_cev, 3) if _cev is not None else None,
+            "erlang_need_slot": (int(_e) if pd.notna(_e) else None),
+            "rr2_model1": (round((_t["model1_kisi"].sum() + _sbt_g) / _e, 3)
+                           if pd.notna(_e) and _e else None),
+            "rr2_model2": (round((_t["model2_kisi"].sum() + _sbt_g) / _e, 3)
+                           if pd.notna(_e) and _e else None),
+            "kap<1_slot_model2": int((_t["kap_rr_model2"] < 1).sum()),
+            "rr2<1_slot_model2": int((_t["rr2_model2"] < 1).sum()),
         })
 df_rr_gun = pd.DataFrame(_rr_gun)
 
-_rr_cagri_yok = len(df_rr_slot) == 0 or df_rr_slot["forecast_cagri"].sum() == 0
+# ── HESAP MANTIĞI SAYFASI (rr_mantik) — örnek sabit, formülü gösterir ──
+_MANTIK_ORNEK = "Cmt 17:00 · 50 çağrı · 8 kişi yazılı"
+df_rr_mantik = pd.DataFrame([
+    ("İŞ BİRİMİ", 0, "SORU", "Yazdığım kadro bu çağrıyı kaç tane karşılar?", "", ""),
+    ("İŞ BİRİMİ", 1, "Kişi başı çağrı", "RR_CAGRI_SAAT ÷ 2", "15 ÷ 2", "7,5 çağrı/kişi"),
+    ("İŞ BİRİMİ", 2, "Mola kaybı", "round(kişi × kapasite_kaybi)", "round(8 × 0,18)", "1 kişi"),
+    ("İŞ BİRİMİ", 3, "Net telefonda (nmt)", "kişi − mola", "8 − 1", "7 kişi"),
+    ("İŞ BİRİMİ", 4, "Karşılanabilir çağrı (ck)", "nmt × 7,5", "7 × 7,5", "52,5 çağrı"),
+    ("İŞ BİRİMİ", 5, "SONUÇ → kap_rr", "ck ÷ forecast çağrı", "52,5 ÷ 50", "%105 → yetiyor"),
+    ("İŞ BİRİMİ", 8, "VARSAYIM", "Agent 30 dk boyunca HİÇ boş durmaz; çağrılar arka "
+     "arkaya dizilir.", "", "Teorik tavan — kuyruk payı yok. %100 = doluluk %100."),
+    ("İŞ BİRİMİ", 9, "KAYNAK", "KAP_KAYBI (H0) · 3 gün tipi × 24 saat", "",
+     "Model-1 config'inden kopya; orada değişirse H0'ı güncelle."),
+    ("MODEL", 0, "SORU", "Bu çağrıyı 30 sn beklemeyle cevaplamak için kaç kişi gerekir?", "", ""),
+    ("MODEL", 1, "Trafik", "çağrı × (AHT ÷ 60) ÷ 30", "50 × 4 ÷ 30", "6,67 erlang"),
+    ("MODEL", 2, "Telefonda gereken (raw)", "Erlang-C: ASA ≤ 30 sn tutan en az kişi",
+     "→", "10 kişi (ASA 13 sn)"),
+    ("MODEL", 3, "Mola/devamsızlık payı", "ceil(raw ÷ (1 − shrinkage))", "ceil(10 ÷ 0,76)",
+     "14 kişi = erlang_need"),
+    ("MODEL", 4, "SONUÇ → rr2", "(kişi + outsource) ÷ erlang_need", "8 ÷ 14", "%57 → yetmiyor"),
+    ("MODEL", 8, "VARSAYIM", "Çağrılar düzensiz gelir; beklemeyi 30 sn'de tutmak için "
+     "boşta pay şart.", "", "Gerçekçi ihtiyaç."),
+    ("MODEL", 9, "KAYNAK", "PICKLE erlang_by_slot — burada YENİDEN HESAPLANMAZ", "",
+     "1-3. adımlar Model-1'de koşuyor; biz sonucu okuyoruz."),
+    ("FARK", 1, "İki cevap", "kap_rr %105  ↔  rr2 %57", "", "Aynı slot, farklı soru."),
+    ("FARK", 2, "Neden", "İş birimi doluluk %100 varsayıyor; Erlang kuyruk payı bırakıyor.",
+     "", "Fark zirve saatlerde (09:00 · 15:00-17:00) büyür."),
+    ("FARK", 3, "Hangisine bakmalı", "kap_rr: iş birimiyle aynı dili konuşurken. "
+     "rr2_model2: kadro kararı verirken.", "",
+     "rr2_model1 Model-1'de sert kısıt → genelde ≥%100, ayırt etmez."),
+    ("FARK", 4, "Yuvarlama uyarısı", "Kayıp TAM KİŞİYE yuvarlanır (Model-1 de öyle)", "",
+     "kk=0,08 ise kayıp görünmesi için ≥7 kişi gerekir → az kadrolu slotta kap_rr değişmez."),
+    ("FARK", 5, "Gün toplamı uyarısı", "Σck ÷ Σçağrı fazla slotu eksiğe saydırır", "",
+     "gun özetindeki 'cevaplanabilen_model2' kolonu saydırmaz — gerçekçi olan o."),
+], columns=["yaklasim", "adim", "islem", "formul", "ornek_hesap", "ornek_sonuc"])
+
+# ── EXCEL ────────────────────────────────────────────────────────────
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 _RR_KIR = PatternFill("solid", fgColor="FFC7CE")       # < 1   açık
 _RR_YES = PatternFill("solid", fgColor="C6EFCE")       # 1–1,05
 _RR_MAV = PatternFill("solid", fgColor="BDD7EE")       # > 1,05 fazla
-_ws_ad = "rr_slot"
-_wb_rr = load_workbook(XLSX_PATH)                      # yeniden koşuda eski sayfayı sil →
-if _ws_ad in _wb_rr.sheetnames:                        #   iki tablo aynı sayfaya 'overlay'
-    del _wb_rr[_ws_ad]                                 #   ile yazılıyor ('replace' ikinci
-    _wb_rr.save(XLSX_PATH)                             #   yazımda ilkini SİLİYORDU)
+_RR_BND = PatternFill("solid", fgColor="EDEDED")       # bant başlığı
+_RR_SAY = ("kap_rr_model1", "kap_rr_model2", "rr2_model1", "rr2_model2",
+           "cevaplanabilen_model2")                    # renklenecek kolonlar
+_rr_cagri_yok = len(df_rr_slot) == 0 or df_rr_slot["forecast_cagri"].sum() == 0
+
+_wb_rr = load_workbook(XLSX_PATH)                      # yeniden koşuda eski sayfaları
+for _ws_ad in ("rr_slot", "rr_mantik"):                #   sil → 'overlay' eski satırları
+    if _ws_ad in _wb_rr.sheetnames:                    #   bırakmasın
+        del _wb_rr[_ws_ad]
+_wb_rr.save(XLSX_PATH)
+
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="a",
                     if_sheet_exists="overlay") as _xl:
-    df_rr_gun.to_excel(_xl, sheet_name=_ws_ad, index=False, startrow=1)
+    # gün özeti: başlık r1, kolon r2, veri r3..
+    df_rr_gun.to_excel(_xl, sheet_name="rr_slot", index=False, startrow=1)
+    # slot detayı: başlık r_alt, BANT r_alt+1, kolon r_alt+2, veri r_alt+3..
     _alt = len(df_rr_gun) + 4
-    df_rr_slot.to_excel(_xl, sheet_name=_ws_ad, index=False, startrow=_alt)
-    _ws = _xl.sheets[_ws_ad]
-    _ws.cell(row=1, column=1, value=f"GÜN ÖZETİ — RR = kişi × {_rr_k:g} ÷ forecast çağrı "
-             f"(gün toplamı)").font = Font(bold=True)
-    _ws.cell(row=_alt, column=1, value="SLOT DETAYI (30 dk)").font = Font(bold=True)
-    for _bas_r, _n in ((2, len(df_rr_gun)), (_alt + 1, len(df_rr_slot))):
+    df_rr_slot[_RR_KOL].to_excel(_xl, sheet_name="rr_slot", index=False,
+                                 startrow=_alt + 1)
+    df_rr_mantik.to_excel(_xl, sheet_name="rr_mantik", index=False, startrow=1)
+    _ws = _xl.sheets["rr_slot"]
+    _ws.cell(row=1, column=1,
+             value=f"GÜN ÖZETİ — iş birimi: Σck ÷ Σçağrı  |  model: Σkişi ÷ Σerlang_need"
+                   f"  (kişi × {_rr_k:g} kuralı)").font = Font(bold=True)
+    _ws.cell(row=_alt, column=1,
+             value="SLOT DETAYI (30 dk) — iki yaklaşım yan yana").font = Font(bold=True)
+    # BANT BAŞLIKLARI: ORTAK | İŞ BİRİMİ | MODEL
+    _b0, _b1 = _RR_BLOK_SINIR
+    for _ad, _c1, _c2 in ((_RR_BLOK[0], 1, _b0), (_RR_BLOK[1], _b0 + 1, _b1),
+                          (_RR_BLOK[2], _b1 + 1, len(_RR_KOL))):
+        _ws.merge_cells(start_row=_alt + 1, start_column=_c1,
+                        end_row=_alt + 1, end_column=_c2)
+        _bc = _ws.cell(row=_alt + 1, column=_c1, value=_ad)
+        _bc.font = Font(bold=True)
+        _bc.alignment = Alignment(horizontal="center")
+        _bc.fill = _RR_BND
+    # kolon başlıkları BOLD + RR kolonlarını boya
+    for _bas_r, _n in ((2, len(df_rr_gun)), (_alt + 2, len(df_rr_slot))):
         _hdr = [c.value for c in _ws[_bas_r]]
         for _c in _ws[_bas_r]:
             _c.font = Font(bold=True)
-        for _kol in ("rr_model1", "rr_model2"):
+        for _kol in _RR_SAY:
             if _kol not in _hdr:
                 continue
             _ci = _hdr.index(_kol) + 1
@@ -6331,23 +6586,56 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="a",
                     _ws.cell(row=_r, column=_ci).fill = (
                         _RR_KIR if _v < 1 else _RR_YES if _v <= 1.05 else _RR_MAV)
     _ws.freeze_panes = "D3"
+    _wm = _xl.sheets["rr_mantik"]
+    _wm.cell(row=1, column=1,
+             value=f"RR HESAP MANTIĞI — örnek satırları SABİT ({_MANTIK_ORNEK}), "
+                   f"gerçek koşudan gelmez").font = Font(bold=True)
+    for _c, _w in (("A", 12), ("B", 6), ("C", 26), ("D", 52), ("E", 17), ("F", 46)):
+        _wm.column_dimensions[_c].width = _w
+    for _r in range(2, _wm.max_row + 1):
+        for _c in range(3, 7):
+            _wm.cell(row=_r, column=_c).alignment = Alignment(wrap_text=True,
+                                                              vertical="top")
+    _wm.freeze_panes = "C3"
 
-print("=" * 78)
-print(f"H31B — RR SAYFASI 'rr_slot' → {XLSX_PATH}")
-print("=" * 78)
+print("=" * 86)
+print(f"H31B — RR SAYFALARI 'rr_slot' + 'rr_mantik' → {XLSX_PATH}")
+print("=" * 86)
 if _rr_cagri_yok:
     print("  ⚠ pickle'da calls_by_slot YOK ya da hep 0 → RR hesaplanamadı (kolonlar boş).")
 else:
     _c = df_rr_slot["forecast_cagri"].sum()
-    _o = df_rr_slot["outsource"].sum()
-    for _kol, _et in (("model1_kisi", "MODEL-1"), ("model2_kisi", "MODEL-2")):
-        _rr = (df_rr_slot[_kol].sum() + _o) * _rr_k / _c
-        _alti = int((df_rr_slot[_kol.replace("_kisi", "").replace("model", "rr_model")]
-                     < 1).sum())
-        print(f"  {_et}: ay RR {_rr:.3f}  |  RR<1 slot {_alti}")
+    _e = df_rr_slot["erlang_need"].sum(min_count=1)
+    _o = df_rr_slot["outsource"].sum() + df_rr_slot["part_time"].sum()
+    print(f"  İŞ BİRİMİ (kişi × {_rr_k:g}, mola düşülmüş)")
+    for _kol, _et in (("_ck1", "MODEL-1"), ("_ck2", "MODEL-2")):
+        _rr = df_rr_slot[_kol].sum() / _c
+        _alti = int((df_rr_slot["kap_rr_model2" if _kol == "_ck2"
+                                else "kap_rr_model1"] < 1).sum())
+        print(f"     {_et}: ay kap_rr {_rr:>6.1%}  |  kap_rr<1 slot {_alti}")
+    print(f"  MODEL (Erlang, erlang_need pickle'dan)")
+    if pd.isna(_e) or not _e:
+        print(f"     ⚠ pickle'da erlang_by_slot YOK → rr2 kolonları BOŞ.")
+        print(f"       Model-1 akışı bu alanı üretiyor; eski bir pickle olabilir.")
+    else:
+        for _kol, _et in (("model1_kisi", "MODEL-1"), ("model2_kisi", "MODEL-2")):
+            _rr = (df_rr_slot[_kol].sum() + _o) / _e
+            _alti = int((df_rr_slot["rr2_model2" if _kol == "model2_kisi"
+                                    else "rr2_model1"] < 1).sum())
+            print(f"     {_et}: ay rr2 {_rr:>10.1%}  |  rr2<1 slot {_alti}")
+        if _rr_erl_yok:
+            print(f"     ⚠ {_rr_erl_yok} slotta çağrı var ama erlang_need yok → o "
+                  f"satırlarda rr2 boş")
+    if len(df_rr_gun):
+        _cev = df_rr_gun["cevaplanabilen_model2"].dropna()
+        if len(_cev):
+            print(f"  cevaplanabilen (Σmin(ck,çağrı)÷Σçağrı, gün ort.): {_cev.mean():.1%}")
+            print(f"     → kap_rr'dan düşükse kadro MİKTARI yetiyor, DAĞILIMI yetmiyor")
     print(f"  slot satırı {len(df_rr_slot):,}  |  gün {len(df_rr_gun)}  |  "
           f"renk: <1 kırmızı · 1–1,05 yeşil · >1,05 mavi")
-print("=" * 78)
+    print(f"  NOT: kap_rr %100 'yetiyor' DEĞİL — doluluk %100 demek (kuyruk payı yok).")
+    print(f"       Karar için rr2_model2'ye bak; gerekçe 'rr_mantik' sayfasında.")
+print("=" * 86)
 
 
 # %% [HÜCRE 32] — MESAİ AÇIĞI RÖNTGENİ (SALT OKUNUR, ÇÖZÜM GEREKMEZ) ────
