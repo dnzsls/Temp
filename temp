@@ -1,8 +1,31 @@
-_q, _d = 'kitle', '2026-10-16'
-_mi = results[_d][_q]['mip_info']
-_cov, _asg = _mi['shift_coverage'], _mi['assignments']
-print(f"{'vardiya':<18}{'saat':<16}{'şirket':<11}{'kişi':>5}{'sarkan slot':>13}")
-for _k in sorted(_cov, key=lambda k: _cov[k]['start']):
-    _c = _cov[_k]
-    print(f"{_k:<18}{_c['start']}-{_c['end']:<10}{str(_c['company']):<11}"
-          f"{_asg.get(_k,0):>5}{len(_c.get('slots_d1',[])):>13}")
+_q = 'kitle'
+_min = CONFIG_WEEKDAY['queue_configs'][_q]['mip']['min_per_shift']
+_ovr = CONFIG_WEEKDAY['queue_configs'][_q]['mip'].get('min_per_shift_overrides', {})
+print(f"config min_per_shift = {_min}   overrides = {_ovr}\n")
+
+_ihlal = []
+for _ds in sorted(results):
+    _r = (results.get(_ds) or {}).get(_q)
+    if not _r:
+        continue
+    _mi = _r['mip_info']
+    _hs = pd.to_datetime(_ds).weekday() >= 5
+    _kullanilan = _mi.get('min_per_shift_used', '—')
+    for _k, _v in _mi.get('assignments', {}).items():
+        _lim = _ovr.get(_mi['shift_coverage'][_k]['start'], _min)
+        if 0 < _v < _lim:
+            _ihlal.append((_ds, 'h.sonu' if _hs else 'h.içi',
+                           _k, _v, _lim, _kullanilan))
+
+print(f"{'tarih':<12}{'tip':<8}{'vardiya':<18}{'kişi':>5}{'limit':>7}{'used':>7}")
+for _r in _ihlal[:40]:
+    print(f"{_r[0]:<12}{_r[1]:<8}{_r[2]:<18}{_r[3]:>5}{_r[4]:>7}{str(_r[5]):>7}")
+print(f"\nToplam ihlal: {len(_ihlal)}")
+
+# V01_inhouse hafta içi günlerde sabit mi (stable kontrolü)
+print("\nV01_inhouse h.içi:", {
+    _ds: (results[_ds][_q]['mip_info']['assignments'].get('V01_inhouse', 0))
+    for _ds in sorted(results)
+    if results.get(_ds) and results[_ds].get(_q)
+    and pd.to_datetime(_ds).weekday() < 5
+})
