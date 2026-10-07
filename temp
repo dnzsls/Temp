@@ -1,31 +1,177 @@
-_q = 'kitle'
-_min = CONFIG_WEEKDAY['queue_configs'][_q]['mip']['min_per_shift']
-_ovr = CONFIG_WEEKDAY['queue_configs'][_q]['mip'].get('min_per_shift_overrides', {})
-print(f"config min_per_shift = {_min}   overrides = {_ovr}\n")
+# =============================================================================
+# BİRLEŞİK CONFIG — HAFTALIK MODEL (7 GÜN)
+# =============================================================================
+# CONFIG_WEEKDAY + CONFIG_WEEKEND → tek yapı, GÜN TİPİ anahtarlı.
+#
+# NEDEN TÜRETİLİYOR, ELLE YAZILMIYOR: sayılar mevcut iki config'ten okunuyor →
+# haftalık model ile bugünkü akış AYNI parametrelerle koşar, fark yalnız
+# çözüm yapısından gelir. Elle kopyalarsak sessiz sapma riski olur.
+#
+# GÜN TİPİ: 'hafta_ici' | 'cumartesi' | 'pazar'
+#   queue_configs[kuyruk][gün_tipi] → erlang · mip · slot_cap · rr_penalty ·
+#                                      hourly_report · balance_penalty
+#
+# NOTEBOOK'TA DEĞİŞTİRME: bu dosyayı import et, sonra istediğin dalı ez:
+#   CONFIG_UNIFIED['part_time']['count']['kitle'] = 19
+#   CONFIG_UNIFIED['queue_configs']['kitle']['hafta_ici']['rr_penalty'][...] = ...
+# =============================================================================
 
-_ihlal = []
-for _ds in sorted(results):
-    _r = (results.get(_ds) or {}).get(_q)
-    if not _r:
-        continue
-    _mi = _r['mip_info']
-    _hs = pd.to_datetime(_ds).weekday() >= 5
-    _kullanilan = _mi.get('min_per_shift_used', '—')
-    for _k, _v in _mi.get('assignments', {}).items():
-        _lim = _ovr.get(_mi['shift_coverage'][_k]['start'], _min)
-        if 0 < _v < _lim:
-            _ihlal.append((_ds, 'h.sonu' if _hs else 'h.içi',
-                           _k, _v, _lim, _kullanilan))
+import copy
 
-print(f"{'tarih':<12}{'tip':<8}{'vardiya':<18}{'kişi':>5}{'limit':>7}{'used':>7}")
-for _r in _ihlal[:40]:
-    print(f"{_r[0]:<12}{_r[1]:<8}{_r[2]:<18}{_r[3]:>5}{_r[4]:>7}{str(_r[5]):>7}")
-print(f"\nToplam ihlal: {len(_ihlal)}")
+from weekday_config_v11 import CONFIG_WEEKDAY as _CW
+from weekend_config_v12 import CONFIG_WEEKEND as _CE
 
-# V01_inhouse hafta içi günlerde sabit mi (stable kontrolü)
-print("\nV01_inhouse h.içi:", {
-    _ds: (results[_ds][_q]['mip_info']['assignments'].get('V01_inhouse', 0))
-    for _ds in sorted(results)
-    if results.get(_ds) and results[_ds].get(_q)
-    and pd.to_datetime(_ds).weekday() < 5
-})
+
+GUN_TIPLERI = ('hafta_ici', 'cumartesi', 'pazar')
+
+# gün tipi başına blok anahtarları. balance_penalty yalnız hafta içinde vardı →
+# hafta sonu için boş (kapalı) kurulur.
+_BLOK = ('erlang', 'mip', 'slot_cap', 'rr_penalty', 'hourly_report',
+         'balance_penalty')
+
+_KAPALI_BP = {'enabled': False, 'windows': []}
+
+
+def _blok_hafta_ici(queue):
+    q = _CW['queue_configs'][queue]
+    return {k: copy.deepcopy(q.get(k, _KAPALI_BP if k == 'balance_penalty' else {}))
+            for k in _BLOK}
+
+
+def _blok_hafta_sonu(queue, gun):
+    q = _CE['queue_configs'][queue][gun]
+    out = {k: copy.deepcopy(q[k]) for k in _BLOK if k in q}
+    out['balance_penalty'] = copy.deepcopy(_KAPALI_BP)
+    return out
+
+
+def _queue_configs():
+    out = {}
+    for queue in _CW['queues']:
+        out[queue] = {
+            'hafta_ici': _blok_hafta_ici(queue),
+            'cumartesi': _blok_hafta_sonu(queue, 'cumartesi'),
+            'pazar':     _blok_hafta_sonu(queue, 'pazar'),
+        }
+    return out
+
+
+CONFIG_UNIFIED = {
+
+    # ---- ortak (gün tipinden bağımsız) ----
+    'queues':        copy.deepcopy(_CW['queues']),
+    'forecast_cols': copy.deepcopy(_CW['forecast_cols']),
+    'company':       copy.deepcopy(_CW['company']),
+    'shift_columns': copy.deepcopy(_CW['shift_columns']),
+    'sub_queues':    {},                       # load_aht_from_df ile doldurulur
+    'aht_overrides': copy.deepcopy(_CW['aht_overrides']),
+    'default_aht':   _CW['default_aht'],
+    'time_cost_multipliers': copy.deepcopy(_CW['time_cost_multipliers']),
+    'inhouse_only_subqueues':  copy.deepcopy(_CW['inhouse_only_subqueues']),
+    'outsource_only_subqueues': copy.deepcopy(_CW['outsource_only_subqueues']),
+
+    # ---- gün tipi bazlı ----
+    'queue_configs': _queue_configs(),
+
+    # ---- PART-TIME (YENİ: hafta içine de yerleşir) ----
+    # KURAL (operasyon, 2026-10-07):
+    #   · her PT kişisi haftada TAM 5 gün çalışır
+    #   · hafta sonu günlerinde HEPSİ yazılır (mevcut davranış korunur)
+    #     → kişi başı 2 gün hafta sonu, kalan 3 gün hafta içi
+    #   · hafta içi saatleri hafta sonuyla AYNI
+    #   · PT inhouse SAYILIR (outsource oran bandında inhouse tarafında)
+    #   · PT inhouse kadro tavanına GİRMEZ (company='part_time')
+    'part_time': {
+        'enabled': True,
+        'shifts': copy.deepcopy(_CE['part_time']['shifts']),
+        'count': {'kitle': 19, 'kurumsal': 4, 'gold': 9},
+        'hafta_gun': 5,              # kişi başı haftalık çalışma günü
+        'hafta_sonu_tam': True,      # Cmt ve Paz'da hepsi yazılır
+        # PT'nin KENDİ min_per_shift'i. Tam zamanlının eşiğini (13) miras
+        # almaz: PT sayıları küçük (19/4/9), 13 eşiği günde tek PT vardiyası
+        # açılabilmesi demek olurdu ve kurumsal'da (4 kişi) çözümsüz kalırdı.
+        # 0 → eşik yok, ikili değişken de kurulmaz (çözücü hızlanır).
+        'min_per_shift': 0,
+    },
+
+    # ---- OUTSOURCE ORAN BANDI (yalnız hafta sonu) ----
+    'outsource_ratio': copy.deepcopy(_CE['outsource_ratio']),
+
+    # ---- KADRO ----
+    # inhouse: GÜNLÜK tavan (tarih > hafta_N > default — _resolve_kadro)
+    # outsource_adam_gun: HAFTALIK kişi-gün bütçesi
+    #   Artık ön türetme YOK: haftalık MIP bütçeyi doğrudan kısıt olarak alır
+    #   ve çağrının olduğu güne dağıtır.
+    #   KISMİ HAFTA: bütçe çözülen aya yazılır, bölünmez (operasyon kararı).
+    'kadro': {
+        'inhouse': {
+            q: copy.deepcopy(
+                (_CW['surplus_distribution']['total_kadro'].get(q) or {}).get('inhouse', {}))
+            for q in _CW['queues']
+        },
+        # True  → haftalık bütçe HEDEF (eşitlik): model tamamını kullanır ve
+        #          çağrının olduğu güne dağıtır. Bugünkü surplus doldurmasının
+        #          karşılığı, varsayılan bu.
+        # False → bütçe TAVAN: model yalnız gerektiği kadar kullanır.
+        'outsource_esitlik': True,
+        'outsource_adam_gun': copy.deepcopy(
+            {k: v for k, v in
+             (_CW['surplus_distribution'].get('outsource_adam_gun') or {}).items()
+             if k != 'enabled'}),
+    },
+
+    # ---- CEZA HİYERARŞİSİ ----
+    # Her yumuşak kısıtın slack'i buradan fiyatlanır. ÖNEMLİ OLAN SIRA:
+    # üsttekini bozmak her zaman alttakinden pahalı olmalı.
+    # RR cezaları gün tipi bloğundan (rr_penalty) gelir, burada DEĞİL.
+    'ceza': {
+        'kapsama_hafta_sonu': 50000.0,   # pratikte sert; ama asla INFEASIBLE olmaz
+        'kapsama_hafta_ici':   1000.0,   # bugünkü coverage_shortfall.penalty
+        'oran_sapma':           200.0,   # outsource oran bandı dışına çıkma
+        # PT haftalık kişi-gün hedefi SÖZLEŞMESEL bir gerçek (her kişi 5 gün),
+        # tercih değil → ceza yüksek. Slack yalnız kısmi hafta / çözümsüzlük
+        # emniyeti için duruyor, pratikte 0 çıkar.
+        'pt_hedef_sapma':      2000.0,
+        'adam_gun_sapma':       500.0,   # haftalık outsource bütçe hedefinden sapma
+    },
+
+    # ---- ÇÖZÜCÜ ----
+    'solver': {
+        'time_limit': 300,       # saniye; None → sınırsız
+        'gap_rel': 0.01,         # %1 optimallik boşluğu kabul
+        'msg': 0,
+    },
+}
+
+
+def gun_tipi(date_like):
+    """tarih → 'hafta_ici' | 'cumartesi' | 'pazar'"""
+    import pandas as pd
+    wd = pd.to_datetime(date_like).weekday()
+    return 'cumartesi' if wd == 5 else 'pazar' if wd == 6 else 'hafta_ici'
+
+
+def blok_coz(config, queue, date_like):
+    """queue_configs[queue][gün_tipi] bloğunu config'in ÜSTÜNE çıkarır.
+
+    Dönen config düz yapıdadır: config['erlang'], ['mip'], ['slot_cap'],
+    ['rr_penalty'], ['hourly_report'], ['balance_penalty'] — hepsi o
+    (kuyruk, gün tipi) bloğundan. Mevcut yardımcı fonksiyonlar bu anahtarları
+    doğrudan okur, hangi bloktan geldiğini bilmez.
+
+    Sığ kopya döner → çağıranın config'i değişmez.
+    """
+    tip = gun_tipi(date_like)
+    qc = config.get('queue_configs') or {}
+    if queue not in qc:
+        raise ValueError(f"queue_configs['{queue}'] YOK — tanımlı: {sorted(qc)}")
+    blok = qc[queue].get(tip)
+    if not blok:
+        raise ValueError(f"queue_configs['{queue}']['{tip}'] YOK")
+    eksik = [k for k in _BLOK if k not in blok]
+    if eksik:
+        raise ValueError(f"queue_configs['{queue}']['{tip}'] EKSİK: {eksik}")
+    yeni = copy.copy(config)
+    yeni.update({k: blok[k] for k in _BLOK})
+    yeni['_gun_tipi'] = tip
+    return yeni
