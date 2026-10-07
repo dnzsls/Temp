@@ -1,903 +1,1068 @@
 # =============================================================================
-# BİRLEŞİK CONFIG — HAFTALIK MODEL (7 GÜN)
+# BİRLEŞİK HAFTALIK MODEL — 7 GÜN TEK MIP
 # =============================================================================
-# Hafta içi ve hafta sonu artık AYRI config değil: gün tipi yalnız bir ANAHTAR.
-#   queue_configs[kuyruk][gün_tipi] → erlang · mip · slot_cap · rr_penalty ·
-#                                      hourly_report · balance_penalty
-#   gün tipi: 'hafta_ici' | 'cumartesi' | 'pazar'
+# Pazartesi→Pazar tek optimizasyonda çözülür. Hafta içi ve hafta sonu artık
+# AYRI model değil; gün tipi yalnız PARAMETRE.
 #
-# DEĞERLERİN KAYNAĞI: eski CONFIG_WEEKDAY + CONFIG_WEEKEND (2026-10-07'de
-# dondurularak buraya taşındı). Sayılar birebir aynı → haftalık model ile eski
-# akış AYNI parametrelerle koşar, fark yalnız çözüm yapısından gelir.
+# NEDEN: gece yarısını aşan vardiyanın kuyruğu ertesi güne ait. Ayrı modellerde
+# Cuma→Cmt ve Cmt→Paz geçişleri tek yönlü devirle (tur 1/2/3) taşınıyordu:
+# Cuma kendi maliyetine göre karar veriyor, sarkmanın Cumartesi'de bir gece
+# vardiyasını gereksiz kıldığını GÖRMÜYORDU. Tek MIP'te o geçişler değişken →
+# model iki günü birlikte dengeler.
 #
-# NOTEBOOK'TA DEĞİŞTİRME: import et, istediğin dalı ez:
-#   CONFIG_UNIFIED['part_time']['count']['kitle'] = 19
-#   CONFIG_UNIFIED['queue_configs']['kitle']['hafta_ici']['mip']['min_per_shift'] = 13
-#   CONFIG_UNIFIED['ceza']['kapsama_hafta_ici'] = 1500
+# NE KALKTI
+#   · TUR 1 / TUR 2 / TUR 3 akışı
+#   · outsource adam-gün ön türetimi + dondurulmuş bütçe
+#   · surplus dağıtım heuristiği (pencere oranları)
+#   · STAGE 2 shrinkage gevşetme  (hiç taşınmadı — Erlang artık kurcalanmıyor)
+#   · STAGE 1/3 ayrımı — slack baştan modelde, TEK çözüm
+#
+# YUMUŞAK KISITLAR: kapsama açığı, outsource oran sapması, haftalık PT hedefi.
+# Hepsi slack + ceza. Model "çözemedim" demez, "şunu şu kadar esnettim" der.
+# Ceza sırası config['ceza'] içinde.
+#
+# ÇIKTI SÖZLEŞMESİ: info_per_day[tarih] şeması eski mip_info ile AYNI anahtarları
+# taşır → Model-2 (agent modeli) ve tüm Excel sheet'leri bozulmaz.
 # =============================================================================
 
+import math
 import copy
+import pandas as pd
+from pulp import (LpProblem, LpMinimize, LpVariable, LpStatus, lpSum, value,
+                  PULP_CBC_CMD)
 
-GUN_TIPLERI = ('hafta_ici', 'cumartesi', 'pazar')
-
-_BLOK = ('erlang', 'mip', 'slot_cap', 'rr_penalty', 'hourly_report',
-         'balance_penalty')
-
-
-CONFIG_UNIFIED = {
-
-    # ---- KUYRUKLAR ----
-    'queues': {'kitle': {'label': 'kitle',
-               'actual_name': 'kitle_cagrilar',
-               'companies': ['inhouse', 'outsource']},
-     'kurumsal': {'label': 'kurumsal',
-                  'actual_name': 'kurumsal_cagrilar',
-                  'companies': ['inhouse']},
-     'gold': {'label': 'gold',
-              'actual_name': 'gold_cagrilar',
-              'companies': ['inhouse']}},
-
-    # ---- FORECAST KOLON İSİMLERİ ----
-    'forecast_cols': {'datetime': 'model_data_date',
-     'date': 'truncddate',
-     'kitle_total': 'kitle_nof_call',
-     'kurumsal_total': 'kurumsal_nof_call',
-     'gold_total': 'gold_total_call'},
-
-    # ---- ŞİRKET / VARDİYA KOLONLARI ----
-    'company': {'inhouse': {'shift_value': 'inhouse'}, 'outsource': {'shift_value': 'outsource'}},
-    'shift_columns': {'shift': 'shift', 'start': 'start', 'end': 'end', 'company': 'company'},
-
-    # ---- AHT ----
-    'sub_queues': {},                  # load_aht_from_df ile doldurulur
-    'aht_overrides': {'kitle': {}, 'kurumsal': {}, 'gold': {}},
-    'default_aht': 150,
-
-    # ---- SAAT BAZLI MALİYET ÇARPANLARI ----
-    'time_cost_multipliers': {'kitle': {'inhouse': {'07:00': 15.0, '07:30': 10.0}, 'outsource': {}},
-     'kurumsal': {'inhouse': {'07:00': 15.0, '07:30': 10.0}, 'outsource': {}},
-     'gold': {'inhouse': {'07:00': 15.0, '07:30': 10.0}, 'outsource': {}},
-     'default': {'inhouse': {'07:00': 3.8, '07:30': 2.0}, 'outsource': {}}},
-
-    # ---- ALT-KUYRUK MİN (K5) ----
-    'inhouse_only_subqueues': {'kitle': [{'sub_queue': 'retention_line',
-                'min_ratio': 1.0,
-                'hours': {'start': '08:00', 'end': '00:00'}},
-               {'sub_queue': 'karttemelbankaclik',
-                'min_ratio': 0.2,
-                'hours': {'start': '08:00', 'end': '00:00'}}],
-     'kurumsal': [],
-     'gold': []},
-    'outsource_only_subqueues': {'kitle': [{'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0}],
-     'kurumsal': [],
-     'gold': []},
-
-    # ---- PART-TIME ----
-    # KURAL (operasyon, 2026-10-07):
-    #   · her PT kişisi haftada TAM 5 gün çalışır
-    #   · hafta sonu günlerinde HEPSİ yazılır (eski davranış korunur)
-    #     → kişi başı 2 gün hafta sonu, kalan 3 gün hafta içi
-    #   · hafta içi saatleri hafta sonuyla AYNI
-    #   · PT inhouse SAYILIR (outsource oran bandının inhouse tarafında)
-    #   · PT inhouse kadro tavanına GİRMEZ (company='part_time')
-    #   · min_per_shift: PT tam zamanlının eşiğini MİRAS ALMAZ. Sayılar küçük
-    #     (19/4/9); 13 eşiği günde tek PT vardiyası demek olur, kurumsal'da
-    #     (4 kişi) çözümsüz kalır. 0 → eşik yok, ikili değişken kurulmaz.
-    'part_time': {'enabled': True,
-     'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
-     'count': {'kitle': 19, 'kurumsal': 4, 'gold': 9},
-     'hafta_gun': 5,
-     'hafta_sonu_tam': True,
-     'min_per_shift': 0},
-
-    # ---- OUTSOURCE ORAN BANDI (yalnız hafta sonu) ----
-    'outsource_ratio': {'kitle': {'min': 0.65, 'max': 0.7}, 'kurumsal': None, 'gold': None},
-
-    # ---- KADRO ----
-    # inhouse            : GÜNLÜK tavan, yalnız HAFTA İÇİ (tarih > hafta_N >
-    #                      default). Hafta sonunda kadro tavanı YOK.
-    # outsource_adam_gun : HAFTALIK kişi-gün bütçesi. Ön türetme YOK — haftalık
-    #                      MIP bütçeyi doğrudan kısıt alır ve çağrının olduğu
-    #                      güne dağıtır. Kısmi hafta: bütçe çözülen aya yazılır.
-    # outsource_esitlik  : True  → bütçe HEDEF, tamamı kullanılır (eski surplus
-    #                              doldurmasının karşılığı — varsayılan)
-    #                      False → bütçe TAVAN, yalnız gerektiği kadar
-    'kadro': {'inhouse': {'kitle': {'hafta_1': 412,
-                           'hafta_2': 413,
-                           'hafta_3': 414,
-                           'hafta_4': 420,
-                           'hafta_5': 428,
-                           'default': 420},
-                 'kurumsal': {'hafta_1': 47,
-                              'hafta_2': 49,
-                              'hafta_3': 46,
-                              'hafta_4': 44,
-                              'hafta_5': 48,
-                              'default': 52},
-                 'gold': {'hafta_1': 115,
-                          'hafta_2': 112,
-                          'hafta_3': 112,
-                          'hafta_4': 116,
-                          'hafta_5': 124,
-                          'default': 129}},
-     'outsource_esitlik': True,
-     'outsource_adam_gun': {'kitle': {'hafta_1': 1613,
-                                      'hafta_2': 1978,
-                                      'hafta_3': 2042,
-                                      'hafta_4': 2106,
-                                      'hafta_5': 950}}},
-
-    # ---- CEZA HİYERARŞİSİ ----
-    # Her yumuşak kısıtın slack'i buradan fiyatlanır. ÖNEMLİ OLAN SIRA:
-    # üsttekini bozmak her zaman alttakinden pahalı olmalı.
-    # RR ve slot_cap cezaları gün tipi bloğundan gelir, burada DEĞİL.
-    'ceza': {'kapsama_hafta_sonu': 50000.0,
-     'kapsama_hafta_ici': 1000.0,
-     'oran_sapma': 200.0,
-     'pt_hedef_sapma': 2000.0,
-     'adam_gun_sapma': 500.0},
-
-    # ---- ÇÖZÜCÜ ----
-    # gap_rel: %1 optimallik boşluğu kadro planında anlamsız, süreyi çok kısaltır
-    # time_limit'e takılırsa çözüm KABUL EDİLİR (kanıtlanmamış ama geçerli)
-    'solver': {'time_limit': 300, 'gap_rel': 0.01, 'msg': 0},
-
-    # =========================================================================
-    # GÜN TİPİ BAZLI BLOKLAR
-    # =========================================================================
-    'queue_configs': {'kitle': {'hafta_ici': {'erlang': {'target_asa': 30,
-                                        'shrinkage': {0: 0.0,
-                                                      1: 0.0,
-                                                      2: 0.0,
-                                                      3: 0.0,
-                                                      4: 0.0,
-                                                      5: 0.0,
-                                                      6: 0.0,
-                                                      7: 0.0,
-                                                      8: 0.0,
-                                                      9: 0.18,
-                                                      10: 0.17,
-                                                      11: 0.17,
-                                                      12: 0.16,
-                                                      13: 0.19,
-                                                      14: 0.21,
-                                                      15: 0.25,
-                                                      16: 0.26,
-                                                      17: 0.29,
-                                                      18: 0.18,
-                                                      19: 0.17,
-                                                      20: 0.18,
-                                                      21: 0.14,
-                                                      22: 0.13,
-                                                      23: 0.19,
-                                                      'default': 0.0},
-                                        'interval_minutes': 30},
-                             'mip': {'cost_inhouse': 1.0,
-                                     'cost_outsource': 1.0,
-                                     'min_per_shift': 13,
-                                     'min_per_shift_overrides': {'00:00': 0},
-                                     'weekly_shrinkage_fallback': {'enabled': False,
-                                                                   'per_day': False,
-                                                                   'step': 0.1,
-                                                                   'floor': 0.0},
-                                     'coverage_shortfall': {'enabled': True,
-                                                            'penalty': 1000.0}},
-                             'slot_cap': {'enabled': True,
-                                          'bands': [{'start': '07:00',
-                                                     'end': '08:00',
-                                                     'max_ratio': 1.2,
-                                                     'penalty': 120.0},
-                                                    {'start': '08:00',
-                                                     'end': '09:00',
-                                                     'max_ratio': 1.4,
-                                                     'penalty': 100.0},
-                                                    {'start': '09:00',
-                                                     'end': '11:00',
-                                                     'max_ratio': 1.3,
-                                                     'penalty': 80.0},
-                                                    {'start': '22:00',
-                                                     'end': '00:00',
-                                                     'max_ratio': 1.15,
-                                                     'penalty': 100.0},
-                                                    {'start': '00:00',
-                                                     'end': '07:00',
-                                                     'max_ratio': 1.0,
-                                                     'penalty': 500.0}]},
-                             'rr_penalty': {'enabled': True,
-                                            'peak_exempt': True,
-                                            'penalty_per_person': 4.0,
-                                            'peak_penalty': 2.0,
-                                            'peak_threshold': 0.85,
-                                            'night_multiplier': {'enabled': False,
-                                                                 'hours': {'start': '00:00',
-                                                                           'end': '07:00'},
-                                                                 'multiplier': 100.0}},
-                             'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                               'kapasite_kaybi': {0: 0.0,
-                                                                  1: 0.0,
-                                                                  2: 0.0,
-                                                                  3: 0.0,
-                                                                  4: 0.0,
-                                                                  5: 0.0,
-                                                                  6: 0.0,
-                                                                  7: 0.0,
-                                                                  8: 0.0,
-                                                                  9: 0.17,
-                                                                  10: 0.1,
-                                                                  11: 0.1,
-                                                                  12: 0.09,
-                                                                  13: 0.12,
-                                                                  14: 0.14,
-                                                                  15: 0.18,
-                                                                  16: 0.19,
-                                                                  17: 0.22,
-                                                                  18: 0.11,
-                                                                  19: 0.1,
-                                                                  20: 0.11,
-                                                                  21: 0.08,
-                                                                  22: 0.07,
-                                                                  23: 0.12,
-                                                                  'default': 0.08},
-                                               'cagri_adedi': {'default': 15}},
-                             'balance_penalty': {'enabled': True,
-                                                 'penalty_per_diff': 2.0,
-                                                 'windows': [{'name': 'sabah',
-                                                              'start': '07:00',
-                                                              'end': '11:59',
-                                                              'penalty': 2.0},
-                                                             {'name': 'aksam',
-                                                              'start': '12:00',
-                                                              'end': '23:30',
-                                                              'penalty': 2.0}]}},
-               'cumartesi': {'erlang': {'target_asa': 30,
-                                        'target_seconds': 30,
-                                        'shrinkage': {0: 0.06,
-                                                      1: 0.06,
-                                                      2: 0.06,
-                                                      3: 0.06,
-                                                      4: 0.06,
-                                                      5: 0.06,
-                                                      6: 0.06,
-                                                      7: 0.06,
-                                                      8: 0.06,
-                                                      9: 0.21,
-                                                      10: 0.14,
-                                                      11: 0.13,
-                                                      12: 0.15,
-                                                      13: 0.22,
-                                                      14: 0.19,
-                                                      15: 0.24,
-                                                      16: 0.27,
-                                                      17: 0.24,
-                                                      18: 0.18,
-                                                      19: 0.14,
-                                                      20: 0.17,
-                                                      21: 0.13,
-                                                      22: 0.16,
-                                                      23: 0.13,
-                                                      'default': 0.05},
-                                        'interval_minutes': 30},
-                             'mip': {'cost_inhouse': 1.0,
-                                     'cost_outsource': 1.0,
-                                     'min_per_shift': 5},
-                             'slot_cap': {'enabled': True,
-                                          'bands': [{'start': '07:00',
-                                                     'end': '09:00',
-                                                     'max_ratio': 1.1,
-                                                     'penalty': 50.0},
-                                                    {'start': '09:00',
-                                                     'end': '10:00',
-                                                     'max_ratio': 1.25,
-                                                     'penalty': 50.0},
-                                                    {'start': '10:00',
-                                                     'end': '11:00',
-                                                     'max_ratio': 1.3,
-                                                     'penalty': 50.0},
-                                                    {'start': '18:00',
-                                                     'end': '00:00',
-                                                     'max_ratio': 1.25,
-                                                     'penalty': 50.0}]},
-                             'rr_penalty': {'enabled': True,
-                                            'peak_exempt': True,
-                                            'penalty_per_person': 4.0,
-                                            'peak_penalty': 2.0,
-                                            'peak_threshold': 0.7,
-                                            'night_multiplier': {'enabled': True,
-                                                                 'hours': {'start': '00:00',
-                                                                           'end': '07:00'},
-                                                                 'multiplier': 100.0}},
-                             'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                               'kapasite_kaybi': {0: 0.0,
-                                                                  1: 0.0,
-                                                                  2: 0.0,
-                                                                  3: 0.0,
-                                                                  4: 0.0,
-                                                                  5: 0.0,
-                                                                  6: 0.0,
-                                                                  7: 0.0,
-                                                                  8: 0.0,
-                                                                  9: 0.16,
-                                                                  10: 0.08,
-                                                                  11: 0.07,
-                                                                  12: 0.09,
-                                                                  13: 0.16,
-                                                                  14: 0.13,
-                                                                  15: 0.19,
-                                                                  16: 0.21,
-                                                                  17: 0.18,
-                                                                  18: 0.12,
-                                                                  19: 0.09,
-                                                                  20: 0.12,
-                                                                  21: 0.07,
-                                                                  22: 0.1,
-                                                                  23: 0.08,
-                                                                  'default': 0.08},
-                                               'cagri_adedi': {'default': 15}},
-                             'balance_penalty': {'enabled': False, 'windows': []}},
-               'pazar': {'erlang': {'target_asa': 30,
-                                    'target_seconds': 30,
-                                    'shrinkage': {0: 0.07,
-                                                  1: 0.07,
-                                                  2: 0.07,
-                                                  3: 0.07,
-                                                  4: 0.07,
-                                                  5: 0.07,
-                                                  6: 0.07,
-                                                  7: 0.07,
-                                                  8: 0.07,
-                                                  9: 0.25,
-                                                  10: 0.18,
-                                                  11: 0.2,
-                                                  12: 0.17,
-                                                  13: 0.16,
-                                                  14: 0.22,
-                                                  15: 0.24,
-                                                  16: 0.24,
-                                                  17: 0.33,
-                                                  18: 0.17,
-                                                  19: 0.18,
-                                                  20: 0.17,
-                                                  21: 0.15,
-                                                  22: 0.1,
-                                                  23: 0.24,
-                                                  'default': 0.07},
-                                    'interval_minutes': 30},
-                         'mip': {'cost_inhouse': 1.0,
-                                 'cost_outsource': 1.0,
-                                 'min_per_shift': 5},
-                         'slot_cap': {'enabled': True,
-                                      'bands': [{'start': '07:00',
-                                                 'end': '09:00',
-                                                 'max_ratio': 1.1,
-                                                 'penalty': 50.0},
-                                                {'start': '09:00',
-                                                 'end': '10:00',
-                                                 'max_ratio': 1.25,
-                                                 'penalty': 50.0},
-                                                {'start': '10:00',
-                                                 'end': '11:00',
-                                                 'max_ratio': 1.3,
-                                                 'penalty': 50.0},
-                                                {'start': '18:00',
-                                                 'end': '00:00',
-                                                 'max_ratio': 1.25,
-                                                 'penalty': 50.0}]},
-                         'rr_penalty': {'enabled': True,
-                                        'peak_exempt': True,
-                                        'penalty_per_person': 4.0,
-                                        'peak_penalty': 2.0,
-                                        'peak_threshold': 0.7,
-                                        'night_multiplier': {'enabled': True,
-                                                             'hours': {'start': '00:00',
-                                                                       'end': '07:00'},
-                                                             'multiplier': 100.0}},
-                         'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                           'kapasite_kaybi': {0: 0.0,
-                                                              1: 0.0,
-                                                              2: 0.0,
-                                                              3: 0.0,
-                                                              4: 0.0,
-                                                              5: 0.0,
-                                                              6: 0.0,
-                                                              7: 0.0,
-                                                              8: 0.0,
-                                                              9: 0.19,
-                                                              10: 0.1,
-                                                              11: 0.13,
-                                                              12: 0.1,
-                                                              13: 0.09,
-                                                              14: 0.15,
-                                                              15: 0.17,
-                                                              16: 0.18,
-                                                              17: 0.26,
-                                                              18: 0.1,
-                                                              19: 0.11,
-                                                              20: 0.1,
-                                                              21: 0.08,
-                                                              22: 0.03,
-                                                              23: 0.17,
-                                                              'default': 0.08},
-                                           'cagri_adedi': {'default': 15}},
-                         'balance_penalty': {'enabled': False, 'windows': []}}},
-     'kurumsal': {'hafta_ici': {'erlang': {'target_asa': 30,
-                                           'shrinkage': {0: 0.07,
-                                                         1: 0.07,
-                                                         2: 0.07,
-                                                         3: 0.07,
-                                                         4: 0.07,
-                                                         5: 0.07,
-                                                         6: 0.07,
-                                                         7: 0.07,
-                                                         8: 0.07,
-                                                         9: 0.24,
-                                                         10: 0.17,
-                                                         11: 0.17,
-                                                         12: 0.16,
-                                                         13: 0.19,
-                                                         14: 0.21,
-                                                         15: 0.25,
-                                                         16: 0.26,
-                                                         17: 0.29,
-                                                         18: 0.18,
-                                                         19: 0.17,
-                                                         20: 0.18,
-                                                         21: 0.14,
-                                                         22: 0.13,
-                                                         23: 0.19,
-                                                         'default': 0.0},
-                                           'interval_minutes': 30},
-                                'mip': {'cost_inhouse': 1.0,
-                                        'cost_outsource': 1.0,
-                                        'min_per_shift': 0,
-                                        'min_per_shift_overrides': {},
-                                        'weekly_shrinkage_fallback': {'enabled': False,
-                                                                      'per_day': False,
-                                                                      'step': 0.1,
-                                                                      'floor': 0.0},
-                                        'coverage_shortfall': {'enabled': True,
-                                                               'penalty': 1000.0}},
-                                'slot_cap': {'enabled': True,
-                                             'bands': [{'start': '20:00',
-                                                        'end': '00:00',
-                                                        'max_ratio': 1.2,
-                                                        'penalty': 80.0},
-                                                       {'start': '00:00',
-                                                        'end': '07:00',
-                                                        'max_ratio': 1.0,
-                                                        'penalty': 100.0}]},
-                                'rr_penalty': {'enabled': False,
-                                               'peak_exempt': False,
-                                               'penalty_per_person': 4.0,
-                                               'peak_penalty': 2.0,
-                                               'peak_threshold': 0.7,
-                                               'night_multiplier': {'enabled': False,
-                                                                    'hours': {'start': '00:00',
-                                                                              'end': '07:00'},
-                                                                    'multiplier': 100.0}},
-                                'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                                  'kapasite_kaybi': {0: 0.0,
-                                                                     1: 0.0,
-                                                                     2: 0.0,
-                                                                     3: 0.0,
-                                                                     4: 0.0,
-                                                                     5: 0.0,
-                                                                     6: 0.0,
-                                                                     7: 0.0,
-                                                                     8: 0.0,
-                                                                     9: 0.17,
-                                                                     10: 0.1,
-                                                                     11: 0.1,
-                                                                     12: 0.09,
-                                                                     13: 0.12,
-                                                                     14: 0.14,
-                                                                     15: 0.18,
-                                                                     16: 0.19,
-                                                                     17: 0.22,
-                                                                     18: 0.11,
-                                                                     19: 0.1,
-                                                                     20: 0.11,
-                                                                     21: 0.08,
-                                                                     22: 0.07,
-                                                                     23: 0.12,
-                                                                     'default': 0.08},
-                                                  'cagri_adedi': {'default': 15}},
-                                'balance_penalty': {'enabled': False, 'windows': []}},
-                  'cumartesi': {'erlang': {'target_asa': 30,
-                                           'target_seconds': 30,
-                                           'shrinkage': {0: 0.05,
-                                                         1: 0.05,
-                                                         2: 0.05,
-                                                         3: 0.05,
-                                                         4: 0.05,
-                                                         5: 0.05,
-                                                         6: 0.05,
-                                                         7: 0.05,
-                                                         8: 0.05,
-                                                         9: 0.21,
-                                                         10: 0.13,
-                                                         11: 0.12,
-                                                         12: 0.14,
-                                                         13: 0.21,
-                                                         14: 0.18,
-                                                         15: 0.24,
-                                                         16: 0.26,
-                                                         17: 0.24,
-                                                         18: 0.17,
-                                                         19: 0.14,
-                                                         20: 0.17,
-                                                         21: 0.12,
-                                                         22: 0.15,
-                                                         23: 0.13,
-                                                         'default': 0.05},
-                                           'interval_minutes': 30},
-                                'mip': {'cost_inhouse': 1.0,
-                                        'cost_outsource': 1.0,
-                                        'min_per_shift': 0},
-                                'slot_cap': {'enabled': False, 'bands': []},
-                                'rr_penalty': {'enabled': True,
-                                               'peak_exempt': True,
-                                               'penalty_per_person': 4.0,
-                                               'peak_penalty': 2.0,
-                                               'peak_threshold': 0.7,
-                                               'night_multiplier': {'enabled': True,
-                                                                    'hours': {'start': '00:00',
-                                                                              'end': '07:00'},
-                                                                    'multiplier': 100.0}},
-                                'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                                  'kapasite_kaybi': {0: 0.0,
-                                                                     1: 0.0,
-                                                                     2: 0.0,
-                                                                     3: 0.0,
-                                                                     4: 0.0,
-                                                                     5: 0.0,
-                                                                     6: 0.0,
-                                                                     7: 0.0,
-                                                                     8: 0.0,
-                                                                     9: 0.16,
-                                                                     10: 0.08,
-                                                                     11: 0.07,
-                                                                     12: 0.09,
-                                                                     13: 0.16,
-                                                                     14: 0.13,
-                                                                     15: 0.19,
-                                                                     16: 0.21,
-                                                                     17: 0.18,
-                                                                     18: 0.12,
-                                                                     19: 0.09,
-                                                                     20: 0.12,
-                                                                     21: 0.07,
-                                                                     22: 0.1,
-                                                                     23: 0.08,
-                                                                     'default': 0.08},
-                                                  'cagri_adedi': {'default': 15}},
-                                'balance_penalty': {'enabled': False, 'windows': []}},
-                  'pazar': {'erlang': {'target_asa': 30,
-                                       'target_seconds': 30,
-                                       'shrinkage': {0: 0.07,
-                                                     1: 0.07,
-                                                     2: 0.07,
-                                                     3: 0.07,
-                                                     4: 0.07,
-                                                     5: 0.07,
-                                                     6: 0.07,
-                                                     7: 0.07,
-                                                     8: 0.07,
-                                                     9: 0.25,
-                                                     10: 0.18,
-                                                     11: 0.2,
-                                                     12: 0.17,
-                                                     13: 0.16,
-                                                     14: 0.22,
-                                                     15: 0.24,
-                                                     16: 0.24,
-                                                     17: 0.33,
-                                                     18: 0.17,
-                                                     19: 0.18,
-                                                     20: 0.17,
-                                                     21: 0.15,
-                                                     22: 0.1,
-                                                     23: 0.24,
-                                                     'default': 0.07},
-                                       'interval_minutes': 30},
-                            'mip': {'cost_inhouse': 1.0,
-                                    'cost_outsource': 1.0,
-                                    'min_per_shift': 0},
-                            'slot_cap': {'enabled': False, 'bands': []},
-                            'rr_penalty': {'enabled': True,
-                                           'peak_exempt': True,
-                                           'penalty_per_person': 4.0,
-                                           'peak_penalty': 2.0,
-                                           'peak_threshold': 0.7,
-                                           'night_multiplier': {'enabled': True,
-                                                                'hours': {'start': '00:00',
-                                                                          'end': '07:00'},
-                                                                'multiplier': 100.0}},
-                            'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                              'kapasite_kaybi': {0: 0.0,
-                                                                 1: 0.0,
-                                                                 2: 0.0,
-                                                                 3: 0.0,
-                                                                 4: 0.0,
-                                                                 5: 0.0,
-                                                                 6: 0.0,
-                                                                 7: 0.0,
-                                                                 8: 0.0,
-                                                                 9: 0.19,
-                                                                 10: 0.1,
-                                                                 11: 0.13,
-                                                                 12: 0.1,
-                                                                 13: 0.09,
-                                                                 14: 0.15,
-                                                                 15: 0.17,
-                                                                 16: 0.18,
-                                                                 17: 0.26,
-                                                                 18: 0.1,
-                                                                 19: 0.11,
-                                                                 20: 0.1,
-                                                                 21: 0.08,
-                                                                 22: 0.03,
-                                                                 23: 0.17,
-                                                                 'default': 0.08},
-                                              'cagri_adedi': {'default': 15}},
-                            'balance_penalty': {'enabled': False, 'windows': []}}},
-     'gold': {'hafta_ici': {'erlang': {'target_asa': 30,
-                                       'shrinkage': {0: 0.07,
-                                                     1: 0.07,
-                                                     2: 0.07,
-                                                     3: 0.07,
-                                                     4: 0.07,
-                                                     5: 0.07,
-                                                     6: 0.07,
-                                                     7: 0.07,
-                                                     8: 0.07,
-                                                     9: 0.24,
-                                                     10: 0.17,
-                                                     11: 0.17,
-                                                     12: 0.16,
-                                                     13: 0.19,
-                                                     14: 0.21,
-                                                     15: 0.25,
-                                                     16: 0.26,
-                                                     17: 0.29,
-                                                     18: 0.18,
-                                                     19: 0.17,
-                                                     20: 0.18,
-                                                     21: 0.14,
-                                                     22: 0.13,
-                                                     23: 0.19,
-                                                     'default': 0.0},
-                                       'interval_minutes': 30},
-                            'mip': {'cost_inhouse': 1.0,
-                                    'cost_outsource': 1.0,
-                                    'min_per_shift': 13,
-                                    'min_per_shift_overrides': {'18:00': 0,
-                                                                '19:00': 0,
-                                                                '00:00': 0},
-                                    'weekly_shrinkage_fallback': {'enabled': False,
-                                                                  'per_day': False,
-                                                                  'step': 0.1,
-                                                                  'floor': 0.0},
-                                    'coverage_shortfall': {'enabled': True,
-                                                           'penalty': 1000.0}},
-                            'slot_cap': {'enabled': False,
-                                         'bands': [{'start': '07:00',
-                                                    'end': '08:00',
-                                                    'max_ratio': 1.15,
-                                                    'penalty': 50.0},
-                                                   {'start': '09:00',
-                                                    'end': '10:00',
-                                                    'max_ratio': 1.3,
-                                                    'penalty': 50.0},
-                                                   {'start': '00:00',
-                                                    'end': '07:00',
-                                                    'max_ratio': 1.0,
-                                                    'penalty': 100.0}]},
-                            'rr_penalty': {'enabled': False,
-                                           'peak_exempt': False,
-                                           'penalty_per_person': 2.0,
-                                           'peak_penalty': 4.0,
-                                           'peak_threshold': 0.7,
-                                           'night_multiplier': {'enabled': False,
-                                                                'hours': {'start': '00:00',
-                                                                          'end': '07:00'},
-                                                                'multiplier': 100.0}},
-                            'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                              'kapasite_kaybi': {0: 0.0,
-                                                                 1: 0.0,
-                                                                 2: 0.0,
-                                                                 3: 0.0,
-                                                                 4: 0.0,
-                                                                 5: 0.0,
-                                                                 6: 0.0,
-                                                                 7: 0.0,
-                                                                 8: 0.0,
-                                                                 9: 0.17,
-                                                                 10: 0.1,
-                                                                 11: 0.1,
-                                                                 12: 0.09,
-                                                                 13: 0.12,
-                                                                 14: 0.14,
-                                                                 15: 0.18,
-                                                                 16: 0.19,
-                                                                 17: 0.22,
-                                                                 18: 0.11,
-                                                                 19: 0.1,
-                                                                 20: 0.11,
-                                                                 21: 0.08,
-                                                                 22: 0.07,
-                                                                 23: 0.12,
-                                                                 'default': 0.08},
-                                              'cagri_adedi': {'default': 15}},
-                            'balance_penalty': {'enabled': False, 'windows': []}},
-              'cumartesi': {'erlang': {'target_asa': 30,
-                                       'target_seconds': 30,
-                                       'shrinkage': {0: 0.05,
-                                                     1: 0.05,
-                                                     2: 0.05,
-                                                     3: 0.05,
-                                                     4: 0.05,
-                                                     5: 0.05,
-                                                     6: 0.05,
-                                                     7: 0.05,
-                                                     8: 0.05,
-                                                     9: 0.21,
-                                                     10: 0.13,
-                                                     11: 0.12,
-                                                     12: 0.14,
-                                                     13: 0.21,
-                                                     14: 0.18,
-                                                     15: 0.24,
-                                                     16: 0.26,
-                                                     17: 0.24,
-                                                     18: 0.17,
-                                                     19: 0.14,
-                                                     20: 0.17,
-                                                     21: 0.12,
-                                                     22: 0.15,
-                                                     23: 0.13,
-                                                     'default': 0.05},
-                                       'interval_minutes': 30},
-                            'mip': {'cost_inhouse': 1.0,
-                                    'cost_outsource': 1.0,
-                                    'min_per_shift': 0},
-                            'slot_cap': {'enabled': False, 'bands': []},
-                            'rr_penalty': {'enabled': True,
-                                           'peak_exempt': True,
-                                           'penalty_per_person': 4.0,
-                                           'peak_penalty': 2.0,
-                                           'peak_threshold': 0.7,
-                                           'night_multiplier': {'enabled': True,
-                                                                'hours': {'start': '00:00',
-                                                                          'end': '07:00'},
-                                                                'multiplier': 100.0}},
-                            'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                              'kapasite_kaybi': {0: 0.0,
-                                                                 1: 0.0,
-                                                                 2: 0.0,
-                                                                 3: 0.0,
-                                                                 4: 0.0,
-                                                                 5: 0.0,
-                                                                 6: 0.0,
-                                                                 7: 0.0,
-                                                                 8: 0.0,
-                                                                 9: 0.16,
-                                                                 10: 0.08,
-                                                                 11: 0.07,
-                                                                 12: 0.09,
-                                                                 13: 0.16,
-                                                                 14: 0.13,
-                                                                 15: 0.19,
-                                                                 16: 0.21,
-                                                                 17: 0.18,
-                                                                 18: 0.12,
-                                                                 19: 0.09,
-                                                                 20: 0.12,
-                                                                 21: 0.07,
-                                                                 22: 0.1,
-                                                                 23: 0.08,
-                                                                 'default': 0.08},
-                                              'cagri_adedi': {'default': 15}},
-                            'balance_penalty': {'enabled': False, 'windows': []}},
-              'pazar': {'erlang': {'target_asa': 30,
-                                   'target_seconds': 30,
-                                   'shrinkage': {0: 0.07,
-                                                 1: 0.07,
-                                                 2: 0.07,
-                                                 3: 0.07,
-                                                 4: 0.07,
-                                                 5: 0.07,
-                                                 6: 0.07,
-                                                 7: 0.07,
-                                                 8: 0.07,
-                                                 9: 0.25,
-                                                 10: 0.18,
-                                                 11: 0.2,
-                                                 12: 0.17,
-                                                 13: 0.16,
-                                                 14: 0.22,
-                                                 15: 0.24,
-                                                 16: 0.24,
-                                                 17: 0.33,
-                                                 18: 0.17,
-                                                 19: 0.18,
-                                                 20: 0.17,
-                                                 21: 0.15,
-                                                 22: 0.1,
-                                                 23: 0.24,
-                                                 'default': 0.07},
-                                   'interval_minutes': 30},
-                        'mip': {'cost_inhouse': 1.0,
-                                'cost_outsource': 1.0,
-                                'min_per_shift': 0},
-                        'slot_cap': {'enabled': False, 'bands': []},
-                        'rr_penalty': {'enabled': True,
-                                       'peak_exempt': True,
-                                       'penalty_per_person': 4.0,
-                                       'peak_penalty': 2.0,
-                                       'peak_threshold': 0.7,
-                                       'night_multiplier': {'enabled': True,
-                                                            'hours': {'start': '00:00',
-                                                                      'end': '07:00'},
-                                                            'multiplier': 100.0}},
-                        'hourly_report': {'rapor_etkisi': {'default': 0.0},
-                                          'kapasite_kaybi': {0: 0.0,
-                                                             1: 0.0,
-                                                             2: 0.0,
-                                                             3: 0.0,
-                                                             4: 0.0,
-                                                             5: 0.0,
-                                                             6: 0.0,
-                                                             7: 0.0,
-                                                             8: 0.0,
-                                                             9: 0.19,
-                                                             10: 0.1,
-                                                             11: 0.13,
-                                                             12: 0.1,
-                                                             13: 0.09,
-                                                             14: 0.15,
-                                                             15: 0.17,
-                                                             16: 0.18,
-                                                             17: 0.26,
-                                                             18: 0.1,
-                                                             19: 0.11,
-                                                             20: 0.1,
-                                                             21: 0.08,
-                                                             22: 0.03,
-                                                             23: 0.17,
-                                                             'default': 0.08},
-                                          'cagri_adedi': {'default': 15}},
-                        'balance_penalty': {'enabled': False, 'windows': []}}}},
-}
+from config_unified_v1 import CONFIG_UNIFIED, gun_tipi, blok_coz
 
 
-def gun_tipi(date_like):
-    """tarih → 'hafta_ici' | 'cumartesi' | 'pazar'"""
-    import pandas as pd
-    wd = pd.to_datetime(date_like).weekday()
-    return 'cumartesi' if wd == 5 else 'pazar' if wd == 6 else 'hafta_ici'
+SLOTS_30 = [f"{h:02d}:{m}" for h in range(24) for m in ['00', '30']]
+DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+TUM_GUN = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+
+CONFIG = None   # dışarıdan verilir; fonksiyonların config= argümanı zorunlu
 
 
-def blok_coz(config, queue, date_like):
-    """queue_configs[queue][gün_tipi] bloğunu config'in ÜSTÜNE çıkarır.
+# =============================================================================
+# ÇEKİRDEK YARDIMCILAR — çağrı · AHT · Erlang · vardiya kapsaması · kadro
+# =============================================================================
+# Bu katman MODEL BİLMEZ: ne hafta içi/hafta sonu ayrımı, ne tur kavramı.
+# Yalnız "çağrıdan ihtiyaca" ve "vardiyadan slota" dönüşümlerini yapar.
+#
+# GÜN SINIRI: create_shift_coverage üç alan üretir —
+#   slots      → yalnız AYNI güne düşen slotlar
+#   slots_d1   → gece yarısını aşıp ERTESİ güne taşan kuyruk
+#   slots_full → ikisinin birleşimi (geriye uyum)
+# =============================================================================
 
-    Dönen config düz yapıdadır: config['erlang'], ['mip'], ['slot_cap'],
-    ['rr_penalty'], ['hourly_report'], ['balance_penalty'] — hepsi o
-    (kuyruk, gün tipi) bloğundan. Yardımcı fonksiyonlar bu anahtarları
-    doğrudan okur, hangi bloktan geldiğini bilmez.
+def load_aht_from_df(df_aht, config=CONFIG):
+    """AHT verisini config['sub_queues']'a uygun yapıya çevirir.
 
-    Sığ kopya döner → çağıranın config'i değişmez.
+    df_aht kolonları: 'saat', 'sub_queue', 'line_based_main_group', 'weighted_avg_aht'
+    Returns: {queue_key: {'queues': [...], 'aht': {sq: {hour: aht}}}}
+    """
+    required_cols = ['saat', 'sub_queue', 'line_based_main_group', 'weighted_avg_aht']
+    missing = [c for c in required_cols if c not in df_aht.columns]
+    if missing:
+        raise ValueError(f"df_aht'de eksik kolonlar: {missing}")
+
+    main_queue_map = {
+        qcfg['actual_name']: qkey
+        for qkey, qcfg in config['queues'].items()
+    }
+
+    sub_queues_cfg = {}
+    for main_group, queue_key in main_queue_map.items():
+        df_q = df_aht[df_aht['line_based_main_group'] == main_group]
+        if len(df_q) == 0:
+            print(f"   ⚠ {main_group} için AHT verisi bulunamadı")
+            continue
+        sub_queues_cfg[queue_key] = {'queues': [], 'aht': {}}
+        for sq in sorted(df_q['sub_queue'].unique()):
+            sub_queues_cfg[queue_key]['queues'].append(sq)
+            df_sq = df_q[df_q['sub_queue'] == sq].copy()
+            aht_dict = dict(zip(df_sq['saat'].astype(int),
+                                 df_sq['weighted_avg_aht'].astype(int)))
+            aht_dict['default'] = int(df_sq['weighted_avg_aht'].mean())
+            sub_queues_cfg[queue_key]['aht'][sq] = aht_dict
+        print(f"   ✓ {queue_key}: {len(sub_queues_cfg[queue_key]['queues'])} alt kuyruk yüklendi "
+              f"({', '.join(sub_queues_cfg[queue_key]['queues'])})")
+
+    return sub_queues_cfg
+
+def is_slot_in_shift(slot, start, end):
+    """slot vardiyanın (start, end) aralığına düşüyor mu? Wrap-around destekli."""
+    if start <= end:
+        return start <= slot < end
+    else:
+        return slot >= start or slot < end
+
+def get_time_cost_multiplier(queue, company_type, start_hour, config=CONFIG):
+    time_mults_all = config.get('time_cost_multipliers', {})
+    time_mults = time_mults_all.get(queue, time_mults_all.get('default', {}))
+    return time_mults.get(company_type, {}).get(start_hour, 1.0)
+
+def _shift_available_on_day(shift_row_or_dict, day_label):
+    """'available_days' alanı varsa kontrol et, yoksa her gün aktif kabul et."""
+    if hasattr(shift_row_or_dict, 'get'):
+        avail = shift_row_or_dict.get('available_days')
+    else:
+        avail = getattr(shift_row_or_dict, 'available_days', None)
+    if avail is None or (isinstance(avail, float) and pd.isna(avail)):
+        return True
+    if isinstance(avail, (list, tuple, set)):
+        return day_label in avail
+    if isinstance(avail, str):
+        return day_label in [x.strip() for x in avail.split(',')]
+    return True
+
+def _classify_shifts_by_days(df_shifts, day_labels=DAY_LABELS):
+    """Her shift için hangi günlerde aktif. {shift_key: set(day_labels_active)}"""
+    out = {}
+    for _, row in df_shifts.iterrows():
+        key = f"{row['shift']}_{row['company']}"
+        active_days = {d for d in day_labels if _shift_available_on_day(row, d)}
+        out[key] = active_days
+    return out
+
+def _date_to_day_label(date_str):
+    """'2026-02-09' → 'Mon'"""
+    d = pd.to_datetime(date_str)
+    return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d.weekday()]
+
+def _week_of_month(date_str):
+    """Tarihin ayın kaçıncı haftasında olduğunu döner (1-tabanlı).
+
+    Hafta tanımı: AY SINIRINA SAYGILI, Pzt başlangıçlı.
+    Ayın 1'i hangi gün-of-week'e denk gelirse hafta_1 oradan başlar.
+    Bir sonraki Pzt → hafta_2, sonraki → hafta_3, vs.
+
+    Önemli: Ay sınırını GEÇMEZ. Aynı Pzt-Pzr blok'unda iki farklı ay varsa,
+    her gün kendi ayının hafta numarasında değerlendirilir:
+
+      Örnekler:
+        2026-04-01 (Çar): Nisan hafta_1   (Nisan'ın 1'i Çar)
+        2026-04-30 (Per): Nisan hafta_5   (1'i Çar → 30. gün 5. haftada)
+        2026-05-01 (Cum): Mayıs hafta_1   (Mayıs'ın 1'i Cum)
+        2026-05-04 (Pzt): Mayıs hafta_2
+        2026-05-11 (Pzt): Mayıs hafta_3
+
+    Formül:
+        first_weekday = ayın 1'inin weekday()'i (0=Pzt, ..., 6=Pzr)
+        week_num = ((day_of_month + first_weekday - 1) // 7) + 1
+    """
+    d = pd.to_datetime(date_str)
+    first_day = d.replace(day=1)
+    first_weekday = first_day.weekday()
+    return ((d.day + first_weekday - 1) // 7) + 1
+
+def create_shift_coverage(df_shifts, config=CONFIG):
+    """Vardiya → kapsadığı 30dk slot listesi map'i."""
+    scol = config['shift_columns']
+    cov = {}
+    for _, row in df_shifts.iterrows():
+        shift = row[scol['shift']]
+        start = str(row[scol['start']])[:5]
+        end = str(row[scol['end']])[:5]
+        company = row[scol['company']]
+        key = f"{shift}_{company}"
+        slots_full = [s for s in SLOTS_30 if is_slot_in_shift(s, start, end)]
+        # ── GÜN SINIRI (model-2) ─────────────────────────────────────
+        # 'slots' artık YALNIZ AYNI GÜNE düşen kısım. Gece yarısını aşan
+        # vardiyanın (17:00-01:30) kuyruğu 'slots_d1'e ayrılır ve ERTESİ
+        # günün kısıtına yazılır. Böylece tüm mevcut `['slots']` okumaları
+        # kendiliğinden doğru güne bakar.
+        # Gece vardiyası (00:00-08:00 / 24:00-08:00) ETKİLENMEZ: başlangıç
+        # normalize edilince '00:00' olur, hiçbir slot ondan küçük değildir.
+        _bn = f"{int(start[:2]) % 24:02d}:{start[3:5]}"
+        slots = [s for s in slots_full if s >= _bn]
+        slots_d1 = [s for s in slots_full if s < _bn]
+        cov[key] = {'shift': shift, 'company': company,
+                    'start': start, 'end': end, 'slots': slots,
+                    'slots_d1': slots_d1, 'slots_full': slots_full}
+    return cov
+
+def get_sub_queue_aht(queue, sub_queue, slot, config=CONFIG):
+    sub_cfg = config['sub_queues'].get(queue, {})
+    aht_cfg = sub_cfg.get('aht', {}).get(sub_queue, {})
+    hour = int(slot.split(':')[0])
+    if hour in aht_cfg:
+        return aht_cfg[hour]
+    if 'default' in aht_cfg:
+        return aht_cfg['default']
+    return config.get('default_aht', 150)
+
+def calculate_weighted_aht(row, queue, slot, config=CONFIG):
+    """Bir slot için weighted AHT: alt-kuyruk çağrı dağılımına göre."""
+    overrides = config.get('aht_overrides', {}).get(queue, {})
+    if overrides:
+        hour = int(slot[:2])
+        if hour in overrides:
+            return overrides[hour]
+
+    sub_cfg = config['sub_queues'].get(queue, {})
+    sub_queues = sub_cfg.get('queues', [])
+    total_calls = 0
+    weighted_sum = 0
+    for sq in sub_queues:
+        col = f"{sq}_calls"
+        if col in row.index:
+            calls = row[col]
+            if pd.notna(calls) and calls > 0:
+                aht = get_sub_queue_aht(queue, sq, slot, config)
+                weighted_sum += calls * aht
+                total_calls += calls
+
+    if total_calls > 0:
+        return round(weighted_sum / total_calls, 1)
+    if sub_queues:
+        ahts = [get_sub_queue_aht(queue, sq, slot, config) for sq in sub_queues]
+        return round(sum(ahts) / len(ahts), 1)
+    return config.get('default_aht', 150)
+
+def prepare_forecast_calls_30(df_forecast, config=CONFIG):
+    """Forecast geniş formatını (15dk, KITLE_NOF_CALL vs.) 30dk internal format'a
+    çevirir: data_date, slot_30, {queue}_total, {sub_queue}_calls.
+
+    config['forecast_cols'] kolonu beklenir:
+        'datetime': tam timestamp kolon adı (örn. 'forecast_datetime')
+        'date': tarih kolon adı (örn. 'forecast_date')
+        'kitle_total':    'KITLE_NOF_CALL'  (default)
+        'kurumsal_total': 'KURUMSAL_NOF_CALL'
+        'gold_total':     'GOLD_NOF_CALL'
+
+    Alt-kuyruk kolonları config['sub_queues']'tan otomatik tespit edilir:
+    {sq}_NOF_CALL, {sq}_nof_call veya {sq}.
+    """
+    fcols = config['forecast_cols']
+    df = df_forecast.copy()
+    df[fcols['datetime']] = df[fcols['datetime']].astype(str).str.strip()
+
+    def extract_time(val):
+        val = str(val).strip()
+        return val.split(' ', 1)[1].strip()[:5] if ' ' in val else '00:00'
+
+    df['_time_str'] = df[fcols['datetime']].apply(extract_time)
+    hour = df['_time_str'].str.split(':').str[0].astype(int)
+    minute = df['_time_str'].str.split(':').str[1].astype(int)
+    df['slot_30'] = (hour.astype(str).str.zfill(2) + ':' +
+                     ((minute // 30) * 30).astype(str).str.zfill(2))
+    df['data_date'] = pd.to_datetime(df[fcols['date']], dayfirst=True)
+
+    queue_total_map = {
+        'kitle':    fcols.get('kitle_total', 'KITLE_NOF_CALL'),
+        'kurumsal': fcols.get('kurumsal_total', 'KURUMSAL_NOF_CALL'),
+        'gold':     fcols.get('gold_total', 'GOLD_NOF_CALL'),
+    }
+    agg_cols = {}
+    for qk, cn in queue_total_map.items():
+        if cn in df.columns:
+            agg_cols[cn] = 'sum'
+
+    sub_queues_cfg = config.get('sub_queues', {})
+    for qk, sq_cfg in sub_queues_cfg.items():
+        for sq in sq_cfg.get('queues', []):
+            for cand in [f"{sq}_NOF_CALL", f"{sq}_nof_call", sq]:
+                if cand in df.columns:
+                    agg_cols[cand] = 'sum'
+                    break
+
+    df_30 = df.groupby(['data_date', 'slot_30']).agg(agg_cols).reset_index()
+
+    for qk, cn in queue_total_map.items():
+        if cn in df_30.columns:
+            df_30 = df_30.rename(columns={cn: f"{qk}_total"})
+
+    for qk, sq_cfg in sub_queues_cfg.items():
+        for sq in sq_cfg.get('queues', []):
+            for cand in [f"{sq}_NOF_CALL", f"{sq}_nof_call", sq]:
+                if cand in df_30.columns:
+                    df_30 = df_30.rename(columns={cand: f"{sq}_calls"})
+                    break
+
+    return df_30.sort_values(['data_date', 'slot_30']).reset_index(drop=True)
+
+def erlang_c(agents, traffic):
+    """Erlang-C formülü — kuyruğa düşme olasılığı."""
+    if agents <= traffic or agents == 0:
+        return 1.0
+    eb = traffic / agents
+    for i in range(2, int(agents) + 1):
+        eb = (traffic * eb) / (i + traffic * eb)
+    return min(eb / (1 - (traffic / agents) * (1 - eb)), 1.0)
+
+def calc_asa(agents, traffic, aht):
+    """ASA (Average Speed of Answer) saniye cinsinden."""
+    if agents <= traffic or agents == 0:
+        return 999
+    ec = erlang_c(agents, traffic)
+    return (ec * (aht / 60)) / (agents - traffic) * 60
+
+def find_optimal_agents(calls, aht, slot, queue, config=CONFIG):
+    """Bir slot için minimum agent sayısı (shrinkage uygulanmış)."""
+    ecfg = config['queue_configs'][queue]['erlang']
+    if calls == 0:
+        return 0, 0, 0
+    traffic = (calls * (aht / 60)) / ecfg['interval_minutes']
+    if traffic == 0:
+        return 0, 0, 0
+
+    min_a = math.ceil(traffic)
+    max_a = math.ceil(traffic * 3) + 10
+    raw = max_a
+    for a in range(min_a, max_a + 1):
+        if calc_asa(a, traffic, aht) <= ecfg['target_asa']:
+            raw = a
+            break
+
+    hour = int(slot[:2])
+    shrinkage_cfg = ecfg['shrinkage']
+    if isinstance(shrinkage_cfg, dict):
+        shrinkage = shrinkage_cfg.get(hour, shrinkage_cfg.get('default', 0.10))
+    else:
+        shrinkage = shrinkage_cfg
+
+    final = math.ceil(raw / (1 - shrinkage))
+    asa = calc_asa(raw, traffic, aht)
+    return final, round(asa, 1), round(raw, 0)
+
+def calculate_erlang_all(df_calls_30, config=CONFIG):
+    """Her (tarih × slot × kuyruk) için Erlang ihtiyacı hesapla."""
+    results = []
+    for _, row in df_calls_30.iterrows():
+        date = row['data_date']
+        slot = row['slot_30']
+        for queue, qcfg in config['queues'].items():
+            total_col = f"{queue}_total"
+            calls = row.get(total_col, 0)
+            if pd.isna(calls):
+                calls = 0
+            weighted_aht = calculate_weighted_aht(row, queue, slot, config)
+            need, asa, _ = find_optimal_agents(calls, weighted_aht, slot, queue, config)
+            results.append({
+                'date': date, 'slot': slot, 'queue': queue,
+                'label': qcfg['label'], 'calls': int(calls),
+                'weighted_aht': weighted_aht, 'erlang_need': need, 'asa': asa
+            })
+    return pd.DataFrame(results)
+
+def _resolve_kadro(kadro_value, date_str=None):
+    """Kadro tavanını 3 katmanlı çözer: tarih > hafta_N > default
+
+    Not: Gün-of-week (Mon..Sun) katmanı yok. Haftalık MIP'te inhouse hafta
+    boyunca sabit (stable) olduğundan, aynı hafta içinde günden güne farklı
+    kadro vermek stable inhouse'u en kısıtlı güne zorlardı. Hafta bazlı
+    (`hafta_N`) ve tarih bazlı override yeterli.
+
+    kadro_value: int (tüm günlerde aynı) VEYA dict.
+        Dict ise key'ler:
+          - 'YYYY-MM-DD'   → o gün için (en spesifik)
+          - 'hafta_1', 'hafta_2', ...  → o ayın N. haftası (ay-içi sıralı,
+              ay sınırı geçmez, _week_of_month formülü ile)
+          - 'default'      → diğer hepsi
+
+    Örnekler:
+        _resolve_kadro(380, ...)  → 380
+
+        # Hafta bazlı:
+        d = {'hafta_1': 400, 'hafta_2': 410, 'default': 380}
+        _resolve_kadro(d, date_str='2026-02-02')  → 410  (Şubat'ın 2. haftası)
+        _resolve_kadro(d, date_str='2026-02-09')  → ?    (Şubat hafta_3, dict yok → 380)
+        _resolve_kadro(d, date_str='2026-02-23')  → 380  (default)
+
+        # Karışık (tarih en üstte):
+        d = {'2026-02-09': 500, 'hafta_3': 410, 'default': 380}
+        _resolve_kadro(d, date_str='2026-02-09')  → 500  (tarih)
+        _resolve_kadro(d, date_str='2026-02-10')  → 410  (hafta_3)
+        _resolve_kadro(d, date_str='2026-02-16')  → 380  (hafta_4 yok → default)
+    """
+    if isinstance(kadro_value, (int, float)):
+        return int(kadro_value)
+    if isinstance(kadro_value, dict):
+        # 1) Belirli tarih (en spesifik)
+        if date_str and date_str in kadro_value:
+            return int(kadro_value[date_str])
+        # 2) Hafta-N (ay içi sıralı, _week_of_month ile)
+        if date_str:
+            week_key = f"hafta_{_week_of_month(date_str)}"
+            if week_key in kadro_value:
+                return int(kadro_value[week_key])
+        # 3) Default
+        return int(kadro_value.get('default', 0))
+    return 0
+
+def _build_subqueue_min_slots(df_calls_30, queue, target_date, erlang_by_slot, config):
+    """Bir gün için alt-kuyruk bazlı min inhouse/outsource ihtiyacını slot
+    bazında hesaplar (K5 kısıtı).
+
+    inhouse_only_subqueues / outsource_only_subqueues config'inden okur:
+    her alt-kuyruğun o slotaki çağrı payı kadar Erlang'ın min_ratio katı,
+    o şirket tipinin minimum coverage'ı olarak zorlanır.
+
+    Returns: (inhouse_min_by_slot, outsource_min_by_slot)
+    """
+    target_date = pd.to_datetime(target_date)
+    df_day = df_calls_30[df_calls_30['data_date'] == target_date]
+    if len(df_day) == 0:
+        return {}, {}
+
+    inhouse_min_by_slot = {}
+    outsource_min_by_slot = {}
+    total_col = f"{queue}_total"
+
+    for item in config.get('inhouse_only_subqueues', {}).get(queue, []):
+        sq_name = item if isinstance(item, str) else item['sub_queue']
+        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
+        hours = None if isinstance(item, str) else item.get('hours')
+        sq_col = f"{sq_name}_calls"
+        for _, row in df_day.iterrows():
+            slot = row['slot_30']
+            erlang = erlang_by_slot.get(slot, 0)
+            if erlang <= 0:
+                continue
+            if hours and not is_slot_in_shift(slot, hours['start'], hours['end']):
+                continue                       # kural sadece 'hours' aralığında (örn. gündüz)
+            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
+            total_calls = row.get(total_col, 0) if total_col in row.index else 0
+            if total_calls > 0 and sq_calls > 0:
+                call_ratio = sq_calls / total_calls
+                min_need = math.ceil(erlang * call_ratio * min_ratio)
+                inhouse_min_by_slot[slot] = inhouse_min_by_slot.get(slot, 0) + min_need
+
+    for item in config.get('outsource_only_subqueues', {}).get(queue, []):
+        sq_name = item if isinstance(item, str) else item['sub_queue']
+        min_ratio = 1.0 if isinstance(item, str) else item.get('min_ratio', 1.0)
+        hours = None if isinstance(item, str) else item.get('hours')
+        sq_col = f"{sq_name}_calls"
+        for _, row in df_day.iterrows():
+            slot = row['slot_30']
+            erlang = erlang_by_slot.get(slot, 0)
+            if erlang <= 0:
+                continue
+            if hours and not is_slot_in_shift(slot, hours['start'], hours['end']):
+                continue
+            sq_calls = row.get(sq_col, 0) if sq_col in row.index else 0
+            total_calls = row.get(total_col, 0) if total_col in row.index else 0
+            if total_calls > 0 and sq_calls > 0:
+                call_ratio = sq_calls / total_calls
+                min_need = math.ceil(erlang * call_ratio * min_ratio)
+                outsource_min_by_slot[slot] = outsource_min_by_slot.get(slot, 0) + min_need
+
+    return inhouse_min_by_slot, outsource_min_by_slot
+
+
+
+GUN_TR = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+
+# =============================================================================
+# PART-TIME VARDİYALARI
+# =============================================================================
+
+def pt_vardiyalari(config):
+    """config['part_time']['shifts'] → kapsama sözlüğü (gün sınırı ayrılmış).
+
+    PT artık hafta içinde de kullanılıyor; vardiya saatleri gün tipine göre
+    DEĞİŞMİYOR (operasyon kararı, 2026-10-07).
+    """
+    pt = config.get('part_time', {}) or {}
+    if not pt.get('enabled', False):
+        return {}
+    out = {}
+    for s in pt.get('shifts', []):
+        bas, bit = s.split('-')
+        tum = [t for t in SLOTS_30 if is_slot_in_shift(t, bas, bit)]
+        bn = f"{int(bas[:2]) % 24:02d}:{bas[3:5]}"
+        key = f"pt_{bas.replace(':', '')}_{bit.replace(':', '')}"
+        out[key] = {
+            'shift': key, 'company': 'part_time', 'start': bas, 'end': bit,
+            'slots':    [t for t in tum if t >= bn],
+            'slots_d1': [t for t in tum if t <  bn],
+            'slots_full': tum,
+        }
+    return out
+
+
+# =============================================================================
+# ERLANG — GÜN TİPİ BAZLI
+# =============================================================================
+
+def _erlang_cfg(config, date_like):
+    """calculate_erlang_all'ın beklediği ŞEKİLDE config döndürür.
+
+    find_optimal_agents `config['queue_configs'][queue]['erlang']` diye
+    okuyor — yani gün tipi katmanını bilmiyor. Burada o günün tipine ait
+    blok, queue_configs'in DOĞRUDAN altına taşınır. Tüm kuyruklar için
+    yapılır, çünkü calculate_erlang_all hepsini dolaşıyor.
     """
     tip = gun_tipi(date_like)
-    qc = config.get('queue_configs') or {}
-    if queue not in qc:
-        raise ValueError(f"queue_configs['{queue}'] YOK — tanımlı: {sorted(qc)}")
-    blok = qc[queue].get(tip)
-    if not blok:
-        raise ValueError(f"queue_configs['{queue}']['{tip}'] YOK")
-    eksik = [k for k in _BLOK if k not in blok]
-    if eksik:
-        raise ValueError(f"queue_configs['{queue}']['{tip}'] EKSİK: {eksik}")
+    qc = {q: config['queue_configs'][q][tip] for q in config['queues']}
     yeni = copy.copy(config)
-    yeni.update({k: blok[k] for k in _BLOK})
-    yeni['_gun_tipi'] = tip
+    yeni['queue_configs'] = qc
     return yeni
+
+
+def erlang_per_day(df_calls_30, queue, dates, config):
+    """{tarih: {slot: ihtiyaç}} — her gün KENDİ gün tipinin shrinkage'ı ile.
+
+    Shrinkage hafta içi / Cumartesi / Pazar için farklı. Tek config ile
+    hesaplanamaz, bu yüzden gün gün blok çözülüp o günün satırları süzülür.
+    """
+    out = {}
+    for ds in dates:
+        cfg_d = _erlang_cfg(config, ds)
+        df_g = df_calls_30[df_calls_30['data_date'] == pd.to_datetime(ds)]
+        if len(df_g) == 0:
+            out[ds] = {}
+            continue
+        df_e = calculate_erlang_all(df_g, config=cfg_d)
+        df_q = df_e[df_e['queue'] == queue]
+        out[ds] = {s: int(v) for s, v in zip(df_q['slot'], df_q['erlang_need'])}
+    return out
+
+
+# =============================================================================
+# ANA ÇÖZÜCÜ
+# =============================================================================
+
+def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
+               sarkan_ilk_gun=None, inhouse_esitlik=True, verbose=True):
+    """Bir haftayı (1-7 gün) tek MIP'te çözer.
+
+    dates           : sıralı tarih string listesi ('YYYY-MM-DD'), Pzt başlangıçlı
+                      olmak zorunda değil; kısmi hafta olabilir
+    sarkan_ilk_gun  : {slot: kişi} — ilk günün ilk saatlerine ÖNCEKİ günden
+                      (bu haftanın dışından) gelen kadro. None → 0
+    inhouse_esitlik : True  → Σ inhouse = günlük kadro   (MIP2: "elimizdeki kadro")
+                      False → Σ inhouse ≤ günlük kadro   (MIP1: "en az kaç yeter")
+
+    Returns: (info_per_day, ozet)
+      info_per_day[tarih] → eski mip_info sözleşmesiyle aynı anahtarlar
+      ozet                → hangi kısıt ne kadar esnedi
+    """
+    dates = list(dates)
+    if not dates:
+        return {}, None
+
+    scol = config['shift_columns']
+    ccfg = config['company']
+    qcfg = config['queues'][queue]
+    inhouse_value = ccfg['inhouse']['shift_value']
+    outsource_value = ccfg['outsource']['shift_value']
+
+    allowed = qcfg['companies']
+    allowed_values = [ccfg[c]['shift_value'] for c in allowed]
+    df_sf = df_shifts[df_shifts[scol['company']].isin(allowed_values)].copy()
+
+    # ---- vardiya kapsaması (normal + part-time) ----
+    cov = create_shift_coverage(df_sf, config)
+    gun_etiket = {ds: _date_to_day_label(ds) for ds in dates}
+    shift_days = _classify_shifts_by_days(df_sf, day_labels=list(TUM_GUN))
+    for k, c in cov.items():
+        c['available_days'] = shift_days.get(k, set(TUM_GUN))
+
+    pt_cov = pt_vardiyalari(config)
+    pt_sayi = int((config.get('part_time', {}).get('count', {}) or {}).get(queue, 0) or 0)
+    if pt_sayi <= 0:
+        pt_cov = {}
+    cov.update(pt_cov)
+    for k in pt_cov:
+        cov[k]['available_days'] = set(TUM_GUN)
+
+    inh = [s for s in cov if cov[s]['company'] == inhouse_value]
+    out = [s for s in cov if cov[s]['company'] == outsource_value]
+    pts = list(pt_cov.keys())
+
+    # ---- gün tipleri ----
+    tip = {ds: gun_tipi(ds) for ds in dates}
+    h_ici = [ds for ds in dates if tip[ds] == 'hafta_ici']
+    h_son = [ds for ds in dates if tip[ds] != 'hafta_ici']
+
+    # ---- gün tipi bazlı config blokları ----
+    cfg_d = {ds: blok_coz(config, queue, ds) for ds in dates}
+
+    # ---- Erlang (HAM — hiçbir aşamada kurcalanmaz) ----
+    erl = erlang_per_day(df_calls_30, queue, dates, config)
+
+    # ---- alt-kuyruk min (K5) ----
+    sq_in, sq_out = {}, {}
+    for ds in dates:
+        a, b = _build_subqueue_min_slots(df_calls_30, queue, ds, erl[ds], cfg_d[ds])
+        sq_in[ds], sq_out[ds] = a or {}, b or {}
+
+    prob = LpProblem(f"W_{queue}_{dates[0]}", LpMinimize)
+    cost = []
+
+    # =====================================================================
+    # KARAR DEĞİŞKENLERİ
+    # =====================================================================
+    # İnhouse HAFTA İÇİ SABİT (operasyon kuralı korunuyor): tek değişken,
+    # 5 güne de aynı sayı. Hafta sonu inhouse gün bazlı.
+    M = {}
+    for ds in dates:
+        kad_in = _resolve_kadro(config['kadro']['inhouse'].get(queue, {}), ds)
+        M[ds] = max(50, int(kad_in or 0) + 50)      # big-M: gerçekçi tavan
+
+    xw = {s: LpVariable(f"xw_{s}", lowBound=0, cat='Integer') for s in inh} if h_ici else {}
+    yw = {s: LpVariable(f"yw_{s}", cat='Binary') for s in inh} if h_ici else {}
+
+    gun_shift = []                      # gün bazlı (s, ds) çiftleri
+    for ds in dates:
+        lbl = gun_etiket[ds]
+        for s in cov:
+            if lbl not in cov[s]['available_days']:
+                continue
+            if s in inh and tip[ds] == 'hafta_ici':
+                continue                # xw ile temsil ediliyor
+            gun_shift.append((s, ds))
+    xd = {p: LpVariable(f"xd_{p[0]}_{p[1]}", lowBound=0, cat='Integer')
+          for p in gun_shift}
+    yd = {p: LpVariable(f"yd_{p[0]}_{p[1]}", cat='Binary') for p in gun_shift}
+
+    def n(s, ds):
+        """vardiya s, gün ds → kişi ifadesi (0 ise sayı döner)."""
+        if s in inh and tip[ds] == 'hafta_ici':
+            return xw.get(s, 0)
+        return xd.get((s, ds), 0)
+
+    # =====================================================================
+    # MALİYET
+    # =====================================================================
+    for ds in dates:
+        mcfg = cfg_d[ds]['mip']
+        for s in cov:
+            v = n(s, ds)
+            if isinstance(v, int):          # o gün bu vardiya yok
+                continue
+            if s in pts:
+                taban, ctip = mcfg['cost_inhouse'], 'inhouse'
+            elif s in inh:
+                taban, ctip = mcfg['cost_inhouse'], 'inhouse'
+            else:
+                taban, ctip = mcfg['cost_outsource'], 'outsource'
+            carp = get_time_cost_multiplier(queue, ctip, cov[s]['start'], config)
+            # hafta içi inhouse tek değişken 5 günü temsil ediyor → maliyeti
+            # yalnız BİR kez say, gün döngüsünde tekrarlamasın
+            if s in inh and tip[ds] == 'hafta_ici' and ds != h_ici[0]:
+                continue
+            kat = len(h_ici) if (s in inh and tip[ds] == 'hafta_ici') else 1
+            cost.append(v * (taban * carp * kat))
+
+    # =====================================================================
+    # K1 — KAPSAMA (sarkan dahil, slack'li)
+    # =====================================================================
+    onc = {dates[i]: dates[i - 1] for i in range(1, len(dates))}
+    sk0 = {k: int(v or 0) for k, v in (sarkan_ilk_gun or {}).items()}
+
+    sf = {}          # kapsama açığı
+    exc = {}         # RR fazlalığı
+    sc_exc = {}      # slot_cap aşımı
+    kapsama_ifade = {}
+
+    for ds in dates:
+        c_d = cfg_d[ds]
+        rr = c_d.get('rr_penalty', {}) or {}
+        rr_on = rr.get('enabled', False)
+        rr_pen = rr.get('penalty_per_person', 5.0)
+        rr_peak_pen = rr.get('peak_penalty', rr_pen)
+        rr_peak_muaf = rr.get('peak_exempt', False)
+        rr_peak_esik = rr.get('peak_threshold', 0.70)
+        nm = rr.get('night_multiplier', {}) or {}
+        nm_on = nm.get('enabled', False)
+        nm_kat = nm.get('multiplier', 3.0)
+        nm_bas = nm.get('hours', {}).get('start', '22:00')
+        nm_bit = nm.get('hours', {}).get('end', '08:00')
+        sc = c_d.get('slot_cap', {}) or {}
+        sc_on = sc.get('enabled', False)
+        sf_pen = (config['ceza']['kapsama_hafta_ici'] if tip[ds] == 'hafta_ici'
+                  else config['ceza']['kapsama_hafta_sonu'])
+
+        aktif = [t for t in SLOTS_30 if erl[ds].get(t, 0) > 0]
+        max_erl = max((erl[ds].get(t, 0) for t in aktif), default=0)
+        peak = ({t for t in aktif if erl[ds].get(t, 0) >= max_erl * rr_peak_esik}
+                if (rr_peak_muaf and max_erl > 0) else set())
+
+        _o = onc.get(ds)
+        for t in SLOTS_30:
+            ihtiyac = erl[ds].get(t, 0)
+            gelen = (sk0.get(t, 0) if _o is None else 0)
+            terim = [n(s, ds) for s in cov if t in cov[s]['slots']]
+            if _o is not None:
+                terim += [n(s, _o) for s in cov if t in cov[s].get('slots_d1', [])]
+            terim = [z for z in terim if not isinstance(z, int)]
+            if not terim and not gelen and ihtiyac <= 0:
+                continue
+            ifade = lpSum(terim) + gelen
+            kapsama_ifade[(ds, t)] = ifade
+
+            if ihtiyac > 0:
+                v = LpVariable(f"sf_{ds}_{t}", lowBound=0, cat='Continuous')
+                sf[(ds, t)] = v
+                prob += ifade + v >= ihtiyac
+                cost.append(v * sf_pen)
+
+            if rr_on and (ihtiyac > 0 or gelen > 0):
+                e = LpVariable(f"ex_{ds}_{t}", lowBound=0, cat='Continuous')
+                exc[(ds, t)] = e
+                prob += e >= ifade - ihtiyac
+                p = (rr_peak_pen if t in peak
+                     else (rr_pen * nm_kat if (nm_on and is_slot_in_shift(t, nm_bas, nm_bit))
+                           else rr_pen))
+                cost.append(e * p)
+
+            if sc_on and ihtiyac > 0:
+                bant = next((b for b in sc.get('bands', [])
+                             if is_slot_in_shift(t, b['start'], b['end'])), None)
+                if bant is not None:
+                    tavan = max(math.ceil(ihtiyac * bant.get('max_ratio', 1.20)), 3)
+                    e = LpVariable(f"sc_{ds}_{t}", lowBound=0, cat='Continuous')
+                    sc_exc[(ds, t)] = (e, bant.get('penalty', 50.0))
+                    prob += e >= ifade - tavan
+                    cost.append(e * bant.get('penalty', 50.0))
+
+        # ---- K5 alt-kuyruk min (inhouse / outsource) ----
+        for t, mn in (sq_in.get(ds) or {}).items():
+            if mn and mn > 0:
+                tr = [n(s, ds) for s in (inh + pts) if t in cov[s]['slots']]
+                tr = [z for z in tr if not isinstance(z, int)]
+                if tr:
+                    prob += lpSum(tr) >= mn
+        for t, mn in (sq_out.get(ds) or {}).items():
+            if mn and mn > 0:
+                tr = [n(s, ds) for s in out if t in cov[s]['slots']]
+                tr = [z for z in tr if not isinstance(z, int)]
+                if tr:
+                    prob += lpSum(tr) >= mn
+
+    # =====================================================================
+    # K2 — min_per_shift (big-M, gün tipine göre)
+    # =====================================================================
+    for ds in dates:
+        mcfg = cfg_d[ds]['mip']
+        mn_def = mcfg['min_per_shift']
+        mn_ovr = mcfg.get('min_per_shift_overrides', {}) or {}
+        pt_mn = int((config.get('part_time', {}) or {}).get('min_per_shift', 0) or 0)
+        for s in cov:
+            # PT kendi eşiğini kullanır — tam zamanlının 13'ünü miras almaz
+            mn = pt_mn if s in pts else mn_ovr.get(cov[s]['start'], mn_def)
+            if s in inh and tip[ds] == 'hafta_ici':
+                if ds != h_ici[0] or s not in xw:
+                    continue
+                v, b = xw[s], yw[s]
+            else:
+                if (s, ds) not in xd:
+                    continue
+                v, b = xd[(s, ds)], yd[(s, ds)]
+            if mn and mn > 0:
+                prob += v >= mn * b
+                prob += v <= M[ds] * b
+            else:
+                # min yok → ikili değişkene gerek yok, sadece tavan
+                prob += v <= M[ds]
+
+    # =====================================================================
+    # K3 — İNHOUSE GÜNLÜK KADRO  (PT GİRMEZ: company='part_time')
+    # =====================================================================
+    # YALNIZ HAFTA İÇİ. Kadro sayıları (412-428) hafta içi kadrosudur; hafta
+    # sonunda bugünkü modelde de kadro tavanı YOK — hafta sonu inhouse'u
+    # kapsama ihtiyacı + maliyet belirliyor. Hafta sonuna 414 dayatmak
+    # gerçek dışı (fiilen Cmt'de ~146 inhouse çalışıyor).
+    for ds in h_ici:
+        kad = _resolve_kadro(config['kadro']['inhouse'].get(queue, {}), ds)
+        if not kad or kad <= 0:
+            continue
+        tr = [n(s, ds) for s in inh]
+        tr = [z for z in tr if not isinstance(z, int)]
+        if not tr:
+            continue
+        if inhouse_esitlik:
+            prob += lpSum(tr) == kad
+        else:
+            prob += lpSum(tr) <= kad
+
+    # =====================================================================
+    # K4 — OUTSOURCE HAFTALIK ADAM-GÜN  (ön türetme YOK)
+    # =====================================================================
+    # Bütçe TAVAN mı HEDEF mi: bugünkü akışta surplus dağıtımı outsource'u
+    # türetilen kadroya kadar DOLDURUYOR → fiilen hedef. Aynı davranışı
+    # korumak için varsayılan eşitlik (slack'li). 'outsource_esitlik': False
+    # dersen tavan gibi davranır, model yalnız gerektiği kadar kullanır.
+    adam_gun = None
+    ag_sl = None
+    ag_cfg = (config['kadro'].get('outsource_adam_gun') or {}).get(queue)
+    if ag_cfg and out:
+        hafta = _week_of_month(dates[0])
+        adam_gun = ag_cfg.get(f"hafta_{hafta}")
+        if adam_gun:
+            # kısmi hafta: bütçe çözülen aya yazılır, bölünmez (operasyon
+            # kararı 2026-10-07) → gün sayısına göre ölçeklenir
+            hedef_ag = int(round(int(adam_gun) * len(dates) / 7.0))
+            tr = [xd[(s, ds)] for ds in dates for s in out if (s, ds) in xd]
+            if tr:
+                if config['kadro'].get('outsource_esitlik', True):
+                    a = LpVariable("ag_lo", lowBound=0, cat='Continuous')
+                    b = LpVariable("ag_hi", lowBound=0, cat='Continuous')
+                    ag_sl = (a, b, hedef_ag)
+                    prob += lpSum(tr) + a - b == hedef_ag
+                    cost.append((a + b) * config['ceza']['adam_gun_sapma'])
+                else:
+                    prob += lpSum(tr) <= hedef_ag
+
+    # =====================================================================
+    # K5 — OUTSOURCE ORAN BANDI (yalnız hafta sonu, slack'li)
+    # =====================================================================
+    oran_sl = {}
+    o_cfg = (config.get('outsource_ratio') or {}).get(queue)
+    if o_cfg and out:
+        for ds in h_son:
+            t_in = [n(s, ds) for s in (inh + pts)]
+            t_in = [z for z in t_in if not isinstance(z, int)]
+            t_ou = [n(s, ds) for s in out]
+            t_ou = [z for z in t_ou if not isinstance(z, int)]
+            if not t_in or not t_ou:
+                continue
+            A, B = lpSum(t_in), lpSum(t_ou)
+            s1 = LpVariable(f"or_lo_{ds}", lowBound=0, cat='Continuous')
+            s2 = LpVariable(f"or_hi_{ds}", lowBound=0, cat='Continuous')
+            oran_sl[ds] = (s1, s2)
+            rmin, rmax = o_cfg['min'], o_cfg['max']
+            prob += (1 - rmin) * B + s1 >= rmin * A
+            prob += (1 - rmax) * B - s2 <= rmax * A
+            cost.append((s1 + s2) * config['ceza']['oran_sapma'])
+
+    # =====================================================================
+    # K6 — PART-TIME
+    # =====================================================================
+    # · günlük tavan     : Σ PT[gün] ≤ P
+    # · hafta sonu       : Σ PT[gün] = P   (hafta_sonu_tam → mevcut davranış)
+    # · haftalık kişi-gün: Σ_tüm gün = hafta_gun · P   (slack'li)
+    #   Kısmi haftada hedef gün sayısına göre ölçeklenir.
+    pt_sl = None
+    if pts and pt_sayi > 0:
+        ptc = config['part_time']
+        for ds in dates:
+            tr = [xd[(s, ds)] for s in pts if (s, ds) in xd]
+            if not tr:
+                continue
+            if ptc.get('hafta_sonu_tam', True) and tip[ds] != 'hafta_ici':
+                prob += lpSum(tr) == pt_sayi
+            else:
+                prob += lpSum(tr) <= pt_sayi
+        tum = [xd[(s, ds)] for ds in dates for s in pts if (s, ds) in xd]
+        if tum:
+            hedef = int(round(ptc.get('hafta_gun', 5) * pt_sayi * len(dates) / 7.0))
+            a = LpVariable("pt_lo", lowBound=0, cat='Continuous')
+            b = LpVariable("pt_hi", lowBound=0, cat='Continuous')
+            pt_sl = (a, b, hedef)
+            prob += lpSum(tum) + a - b == hedef
+            cost.append((a + b) * config['ceza']['pt_hedef_sapma'])
+
+    # =====================================================================
+    # K7 — DENGE CEZASI (yalnız hafta içi, gün tipi bloğundan)
+    # =====================================================================
+    for ds in h_ici:
+        bp = cfg_d[ds].get('balance_penalty', {}) or {}
+        if not bp.get('enabled', False) or not out:
+            continue
+        for w in bp.get('windows', []):
+            ic = [n(s, ds) for s in inh if w['start'] <= cov[s]['start'] <= w['end']]
+            oc = [n(s, ds) for s in out if w['start'] <= cov[s]['start'] <= w['end']]
+            ic = [z for z in ic if not isinstance(z, int)]
+            oc = [z for z in oc if not isinstance(z, int)]
+            if not ic or not oc:
+                continue
+            p = LpVariable(f"bp_{ds}_{w['name']}_p", lowBound=0, cat='Continuous')
+            m_ = LpVariable(f"bp_{ds}_{w['name']}_m", lowBound=0, cat='Continuous')
+            prob += lpSum(ic) - lpSum(oc) == p - m_
+            cost.append((p + m_) * w.get('penalty', bp.get('penalty_per_diff', 2.0)))
+
+    # =====================================================================
+    # ÇÖZ
+    # =====================================================================
+    prob += lpSum(cost)
+    sol = config.get('solver', {}) or {}
+    kw = {'msg': sol.get('msg', 0)}
+    if sol.get('time_limit'):
+        kw['timeLimit'] = sol['time_limit']
+    if sol.get('gap_rel'):
+        kw['gapRel'] = sol['gap_rel']
+    import time as _t
+    _t0 = _t.time()
+    prob.solve(PULP_CBC_CMD(**kw))
+    sure = round(_t.time() - _t0, 1)
+    durum = LpStatus[prob.status]
+
+    # ZAMAN LİMİTİ TOLERANSI: CBC limite takılırsa optimalliği KANITLAMAZ ama
+    # bulduğu çözüm geçerlidir. Değişkenlere değer atanmışsa kabul edilir —
+    # kadro planında %1-2 boşluk anlamsız, çözümsüz kalmak anlamlı.
+    _deger_var = any(v.varValue is not None for v in prob.variables())
+    kabul = (durum == 'Optimal') or _deger_var
+    if verbose:
+        print(f"  [solve_week] {queue} {dates[0]}→{dates[-1]} · {len(dates)} gün "
+              f"· {len(xd) + len(xw)} tamsayı · durum={durum} · {sure} sn"
+              + ('' if durum == 'Optimal' else
+                 ('  ⚠ optimallik kanıtlanmadı, çözüm kabul edildi' if kabul
+                  else '  ✗ çözüm yok')))
+    if not kabul:
+        return None, {'durum': durum, 'sure': sure}
+
+    # =====================================================================
+    # SONUÇ TOPLA — eski mip_info sözleşmesiyle aynı anahtarlar
+    # =====================================================================
+    def _v(z):
+        return 0 if isinstance(z, int) else int(round(value(z) or 0))
+
+    atama = {ds: {} for ds in dates}
+    for ds in dates:
+        for s in cov:
+            k = _v(n(s, ds))
+            if k > 0:
+                atama[ds][s] = k
+
+    info_per_day = {}
+    for ds in dates:
+        a = atama[ds]
+        _o = onc.get(ds)
+        mip, mi_in, mi_ou, mi_pt = {}, {}, {}, {}
+        for t in SLOTS_30:
+            tt = ii = oo = pp = 0
+            for s, k in a.items():
+                if t not in cov[s]['slots']:
+                    continue
+                tt += k
+                if s in pts:
+                    pp += k
+                elif s in inh:
+                    ii += k
+                else:
+                    oo += k
+            mip[t], mi_in[t], mi_ou[t], mi_pt[t] = tt, ii, oo, pp
+
+        # önceki günden sarkan (hafta içindeyse atamadan, ilk günse dışarıdan)
+        sg = {}
+        if _o is None:
+            sg = dict(sk0)
+        else:
+            for s, k in atama[_o].items():
+                for t in cov[s].get('slots_d1', []):
+                    sg[t] = sg.get(t, 0) + k
+        fiili = {t: mip.get(t, 0) + sg.get(t, 0) for t in SLOTS_30}
+
+        sf_slot = {t: int(round(value(v) or 0))
+                   for (d2, t), v in sf.items()
+                   if d2 == ds and int(round(value(v) or 0)) > 0}
+        ex_slot = {t: int(round(value(v) or 0))
+                   for (d2, t), v in exc.items()
+                   if d2 == ds and int(round(value(v) or 0)) > 0}
+        sc_slot = {t: (int(round(value(v) or 0)), p)
+                   for (d2, t), (v, p) in sc_exc.items()
+                   if d2 == ds and int(round(value(v) or 0)) > 0}
+
+        t_in = sum(k for s, k in a.items() if s in inh)
+        t_ou = sum(k for s, k in a.items() if s in out)
+        t_pt = sum(k for s, k in a.items() if s in pts)
+        t_all = t_in + t_ou + t_pt
+
+        info_per_day[ds] = {
+            'assignments': a,
+            'shift_coverage': cov,
+            'erlang_by_slot': dict(erl[ds]),
+            'erlang_by_slot_ham': dict(erl[ds]),   # artık kurcalanmıyor → aynı
+            'mip_by_slot': mip,
+            'mip_in_by_slot': mi_in,
+            'mip_out_by_slot': mi_ou,
+            'mip_pt_by_slot': mi_pt,
+            'sarkan_gelen_by_slot': sg,
+            'fiili_by_slot': fiili,
+            'total_kisi': t_all,
+            'total_inhouse_kisi': t_in,
+            'total_outsource_kisi': t_ou,
+            'total_part_time_kisi': t_pt,
+            'outsource_ratio': (t_ou / t_all) if t_all > 0 else 0,
+            'pt_available': pt_sayi,
+            'target_date': ds,
+            'gun_tipi': tip[ds],
+            'total_shortfall': int(sum(sf_slot.values())),
+            'shortfall_by_slot': sf_slot,
+            'rr_excess_by_slot': ex_slot,
+            'rr_total_excess': int(sum(ex_slot.values())),
+            'sc_excess_by_slot': sc_slot,
+            'inhouse_min_by_slot': sq_in.get(ds, {}),
+            'outsource_min_by_slot': sq_out.get(ds, {}),
+            'solution_stage': ('TEK ÇÖZÜM' if not sf_slot
+                               else f"TEK ÇÖZÜM + eksik {sum(sf_slot.values())} kişi-slot"),
+            'min_per_shift_used': cfg_d[ds]['mip']['min_per_shift'],
+        }
+
+    # =====================================================================
+    # ÖZET — "neden böyle çözdü"
+    # =====================================================================
+    ozet = {
+        'durum': durum,
+        'sure_sn': sure,
+        'kuyruk': queue,
+        'gun_sayisi': len(dates),
+        'tarih_aralik': (dates[0], dates[-1]),
+        'hafta': _week_of_month(dates[0]),
+        'amac': round(value(prob.objective) or 0, 1),
+        'kapsama_acik': {ds: info_per_day[ds]['total_shortfall'] for ds in dates},
+        'rr_fazla': {ds: info_per_day[ds]['rr_total_excess'] for ds in dates},
+        'slot_cap_asim': {ds: sum(v for v, _ in info_per_day[ds]['sc_excess_by_slot'].values())
+                          for ds in dates},
+        'oran_sapma': {ds: round((value(a) or 0) + (value(b) or 0), 2)
+                       for ds, (a, b) in oran_sl.items()},
+        'adam_gun_butce': adam_gun,
+        'adam_gun_hedef': (ag_sl[2] if ag_sl else None),
+        'adam_gun_sapma': (round((value(ag_sl[0]) or 0) + (value(ag_sl[1]) or 0), 2)
+                           if ag_sl else 0),
+        'adam_gun_kullanilan': sum(info_per_day[ds]['total_outsource_kisi'] for ds in dates),
+        'pt_hedef': (pt_sl[2] if pt_sl else None),
+        'pt_gerceklesen': sum(info_per_day[ds]['total_part_time_kisi'] for ds in dates),
+        'pt_sapma': (round((value(pt_sl[0]) or 0) + (value(pt_sl[1]) or 0), 2)
+                     if pt_sl else 0),
+        'toplam_kisi': {ds: info_per_day[ds]['total_kisi'] for ds in dates},
+    }
+    return info_per_day, ozet
+
+
+# =============================================================================
+# ÖZET YAZDIRMA
+# =============================================================================
+
+def print_ozet(ozet):
+    """'Neden böyle çözdü' tablosu — hangi kısıt ne kadar esnedi."""
+    if not ozet:
+        print("  (özet yok)")
+        return
+    if 'toplam_kisi' not in ozet:
+        print(f"  ⚠ durum: {ozet.get('durum')} — çözüm yok")
+        return
+    a, b = ozet['tarih_aralik']
+    print(f"\n  ── {ozet['kuyruk']} · hafta {ozet['hafta']} · {a}→{b} "
+          f"({ozet['gun_sayisi']} gün) · amaç={ozet['amac']:,.0f} "
+          f"· {ozet.get('sure_sn')} sn"
+          + ('' if ozet.get('durum') == 'Optimal' else f" · {ozet.get('durum')}"))
+    satir = [
+        ('kapsama açığı (kişi-slot)', ozet['kapsama_acik']),
+        ('RR fazlalığı (kişi-slot)',  ozet['rr_fazla']),
+        ('slot_cap aşımı',            ozet['slot_cap_asim']),
+        ('toplam kişi',               ozet['toplam_kisi']),
+    ]
+    gunler = list(ozet['toplam_kisi'])
+    bas = '  ' + ' ' * 28 + ''.join(f"{GUN_TR[pd.to_datetime(d).weekday()]:>7}"
+                                     for d in gunler) + f"{'Σ':>8}"
+    print(bas)
+    for ad, d in satir:
+        vals = [d.get(g, 0) for g in gunler]
+        print('  ' + f"{ad:<28}" + ''.join(f"{v:>7}" for v in vals)
+              + f"{sum(vals):>8}")
+    if ozet['oran_sapma']:
+        print('  ' + f"{'outsource oran sapması':<28}"
+              + '  '.join(f"{g[-5:]}={v}" for g, v in ozet['oran_sapma'].items()))
+    if ozet['adam_gun_butce']:
+        k = ozet['adam_gun_kullanilan']
+        t = ozet.get('adam_gun_hedef') or ozet['adam_gun_butce']
+        sp = ozet.get('adam_gun_sapma', 0)
+        print('  ' + f"{'adam-gün kullanımı':<28}{k} / {t}"
+              + (f"  sapma {sp}" if sp else '  ✓'))
+    if ozet['pt_hedef']:
+        print('  ' + f"{'PT kişi-gün':<28}{ozet['pt_gerceklesen']} / {ozet['pt_hedef']}"
+              + (f"  sapma {ozet['pt_sapma']}" if ozet['pt_sapma'] else ''))
