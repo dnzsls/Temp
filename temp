@@ -1,86 +1,80 @@
-import datetime as _dt
-import pandas as _pd
+# %% GEÇİCİ TEŞHİS — H18E neyi bozuyor? (salt okunur; HS_TEK_GUN değerinden BAĞIMSIZ)
+_aksam_dk = dakika(AKSAM_BASLANGIC)
+_normal = set(hs_tek_normal)                      # H18E kapsamı
+_hs_gun = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
 
-Q = 'kitle'
-print("=" * 92)
-print("[1] HAFTALIK OUTSOURCE ADAM-GÜN: hafta içi mi yiyor, hafta sonu mu?")
-print("=" * 92)
+def _grup(bas):
+    if bas in GECE_BASLANGIC: return "gece"
+    return "aksam" if dakika(bas) >= _aksam_dk else "gunduz"
 
-from weekly_pipeline_unified_v1 import _week_of_month
-AG = CONFIG['kadro']['outsource_adam_gun'].get(Q, {})
+def _yapar(a, ds, grup=None):
+    return any(_kova_calisabilir(a, ds, v) for v in gun_vardiyalari.get(ds, [])
+               if (ds, v) in talep and (grup is None or _grup(saat[(ds, v)][0]) in grup))
 
-for h in (1, 2, 3, 4, 5):
-    gun = [d for d in sorted(results) if _week_of_month(d) == h]
-    if not gun:
-        continue
-    hi = [d for d in gun if _pd.to_datetime(d).weekday() < 5]
-    hs = [d for d in gun if _pd.to_datetime(d).weekday() >= 5]
+def _hs_tavan(a):                                 # H18 + H18E ile ayda hafta sonu tavanı
+    _cift = {g for c in hs_ciftleri for g in c}
+    _k = [(min(1, _yapar(a, c) + _yapar(a, p)) if a in _normal
+           else _yapar(a, c) + _yapar(a, p)) for c, p in hs_ciftleri]
+    _tek = sum(_yapar(a, ds) for ds in _hs_gun if ds not in _cift)
+    return sum(_k) - (max(_k) if CIFT_HS_OFF and _k else 0) + _tek
 
-    def _out(lst):
-        t = 0
-        for d in lst:
-            r = results[d].get(Q)
-            if r:
-                t += r['mip_info'].get('total_outsource_kisi', 0)
-        return t
+# ── [A] KOTA ─────────────────────────────────────────────────────────
+_A = []
+for a in _normal:
+    if a not in kota_map: continue
+    _hi = sum(1 for ds in PLAN_GUNLER
+              if dt.date.fromisoformat(ds).weekday() < 5 and _yapar(a, ds))
+    _hs = _hs_tavan(a)
+    if _hi + _hs < kota_map[a]:
+        _A.append((a, kota_map[a], _hi, _hs,
+                   sorted(d.isoformat() for d in off_block_map.get(a, set()) if d.weekday() < 5)))
+print(f"[A] KOTA: dolduramayan normal agent {len(_A)}")
+for a, k, hi, hs, o2 in _A[:15]:
+    print(f"   {a}: kota {k} > hafta içi {hi} + hafta sonu tavanı {hs}  | off_t2 {o2}")
 
-    o_hi, o_hs = _out(hi), _out(hs)
-    butce = AG.get('hafta_' + str(h))
-    hedef = int(round(butce * len(gun) / 7.0)) if butce else None
-    print("  hafta" + str(h) + "  gun=" + str(len(gun)).rjust(2)
-          + "  butce=" + str(butce).rjust(5)
-          + "  hedef=" + str(hedef).rjust(5)
-          + "  kullanilan=" + str(o_hi + o_hs).rjust(5)
-          + "   h.ici=" + str(o_hi).rjust(5)
-          + "  h.sonu=" + str(o_hs).rjust(4)
-          + "   h.sonu payi=" + ("%.1f%%" % (100 * o_hs / max(1, o_hi + o_hs))))
+# ── [B] HAFTA SONU KOVA TİPİ ─────────────────────────────────────────
+print(f"\n[B] HAFTA SONU TİP BAZLI (gereken = Σ(talep−{HS_TOL}), Cmt+Pzr birlikte)")
+_B = []
+for c, p in hs_ciftleri:
+    for _ad, _g in (("gece", {"gece"}), ("akşam", {"aksam"}),
+                    ("akşam+gece", {"aksam", "gece"}), ("gündüz", {"gunduz"}),
+                    ("TÜMÜ", {"gece", "aksam", "gunduz"})):
+        _ger = sum(max(0, talep[(ds, v)] - HS_TOL) for ds in (c, p)
+                   for v in gun_vardiyalari[ds]
+                   if (ds, v) in talep and _grup(saat[(ds, v)][0]) in _g)
+        if not _ger: continue
+        _kap_yeni = _kap_eski = 0
+        for a in AGENTS:
+            _n = _yapar(a, c, _g) + _yapar(a, p, _g)
+            _kap_eski += _n
+            _kap_yeni += min(1, _n) if a in _normal else _n
+        _B.append((c, _ad, _ger, _kap_eski, _kap_yeni))
+for c, _ad, _ger, _ke, _ky in sorted(_B, key=lambda r: r[4] - r[2])[:15]:
+    print(f"   {c} {_ad:<11} gereken {_ger:>4} | kapasite H18E öncesi {_ke:>4} → sonrası {_ky:>4}"
+          f"  pay {_ky - _ger:+d}" + ("   ⚠ DOLMAZ" if _ky < _ger else ""))
 
-print()
-print("=" * 92)
-print("[2] HAFTA SONU KISI DAGILIMI + OUTSOURCE ORANI")
-print("=" * 92)
-band = CONFIG['outsource_ratio'].get(Q)
-print("  config bandi: " + str(band))
-print("  tarih        gun   inhouse  outsource  part_time  toplam   oran    band disi")
-for d in sorted(results):
-    wd = _pd.to_datetime(d).weekday()
-    if wd < 5:
-        continue
-    r = results[d].get(Q)
-    if not r:
-        continue
-    mi = r['mip_info']
-    i_ = mi.get('total_inhouse_kisi', 0)
-    o_ = mi.get('total_outsource_kisi', 0)
-    p_ = mi.get('total_part_time_kisi', 0)
-    t_ = i_ + o_ + p_
-    oran = o_ / t_ if t_ else 0
-    if band:
-        sap = max(0, band['min'] - oran) + max(0, oran - band['max'])
-    else:
-        sap = 0
-    print("  " + d + "   " + ('Cmt' if wd == 5 else 'Paz')
-          + "   " + str(i_).rjust(7) + "  " + str(o_).rjust(9)
-          + "  " + str(p_).rjust(9) + "  " + str(t_).rjust(6)
-          + "   " + ("%5.1f%%" % (100 * oran))
-          + "   " + (("%.3f" % sap) if sap > 0.001 else "-"))
-
-print()
-print("=" * 92)
-print("[3] 4 EKIM PAZAR — TUM VARDIYALAR (sabah dahil)")
-print("=" * 92)
-ds = '2026-10-04'
-mi = results[ds][Q]['mip_info']
-cov = mi['shift_coverage']
-print("  vardiya            saat           kisi   sirket      ertesi gune")
-for k in sorted(cov, key=lambda z: (cov[z]['start'], cov[z]['company'])):
-    v = mi['assignments'].get(k, 0)
-    if v <= 0:
-        continue
-    d1 = cov[k].get('slots_d1') or []
-    print("     " + k.ljust(16) + " " + cov[k]['start'] + "-" + cov[k]['end'].ljust(7)
-          + " " + str(v).rjust(5) + "   " + cov[k]['company'].ljust(11)
-          + (str(len(d1)) + " slot" if d1 else "sarkmaz"))
-print("  TOPLAM  inhouse=" + str(mi['total_inhouse_kisi'])
-      + "  outsource=" + str(mi['total_outsource_kisi'])
-      + "  part_time=" + str(mi['total_part_time_kisi']))
+# ── [C] AKŞAM HAFTASI BÜTÇESİ (H16D) ─────────────────────────────────
+# hafta başına akşam/gece'de olması gereken EN AZ farklı kişi:
+#   hafta içi: en dar günün sert alt sınırı | hafta sonu: Σ(talep−HS_TOL), normal agent ≤1 gün
+_ak_uygun = [a for a in AGENTS if any(_yapar(a, ds, {"aksam", "gece"}) for ds in PLAN_GUNLER)]
+_top_yeni = _top_eski = 0
+print(f"\n[C] AKŞAM HAFTASI BÜTÇESİ (agent ayda ≤{MAX_AKSAM_HAFTA} hafta)")
+for wk, gl in sorted(haftalar.items()):
+    _hi = [ds for ds in gl if dt.date.fromisoformat(ds).weekday() < 5]
+    _hs = [ds for ds in gl if dt.date.fromisoformat(ds).weekday() >= 5]
+    _hi_ger = max((sum(max(talep[(ds, v)] - GECE_BUFFER, min(MIN_KOVA, talep[(ds, v)]))
+                       if saat[(ds, v)][0] in GECE_BASLANGIC else min(MIN_KOVA, talep[(ds, v)])
+                       for v in gun_vardiyalari[ds]
+                       if (ds, v) in talep and _grup(saat[(ds, v)][0]) != "gunduz")
+                   for ds in _hi), default=0)
+    _hs_gun_ger = [sum(max(0, talep[(ds, v)] - HS_TOL) for v in gun_vardiyalari[ds]
+                       if (ds, v) in talep and _grup(saat[(ds, v)][0]) != "gunduz") for ds in _hs]
+    _eski = max([_hi_ger] + _hs_gun_ger)          # eskiden aynı kişi Cmt+Pzr tutabiliyordu
+    _yeni = max(_hi_ger, sum(_hs_gun_ger))        # H18E: her gün ayrı kişi
+    _top_eski += _eski; _top_yeni += _yeni
+    print(f"   {wk[0]}-W{wk[1]}: hafta içi {_hi_ger:>3} | hafta sonu {_hs_gun_ger} "
+          f"→ en az kişi-hafta önce {_eski}, sonra {_yeni}")
+_kap = MAX_AKSAM_HAFTA * len(_ak_uygun)
+print(f"   TOPLAM gereken: önce {_top_eski}, sonra {_top_yeni}  |  kapasite "
+      f"{len(_ak_uygun)} × {MAX_AKSAM_HAFTA} = {_kap}"
+      + ("   ⚠ AŞILDI" if _top_yeni > _kap else f"   (doluluk %{100*_top_yeni/max(1,_kap):.0f})"))
