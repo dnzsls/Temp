@@ -258,12 +258,34 @@ CONFIG_UNIFIED = {
     # yayma eşit maliyetli seçenekler arasındaki beraberliği bozar, kapsamayı
     # ya da gece tavanını satmaz.
     #
+    # 'oran_sapma' 200 → 200.000 (2026-10-08). HAFTA SONU OUTSOURCE ORAN BANDI.
+    # Eski ayrı hafta sonu modelinde (weekend_forecast_v12.py:466-471) bu bant
+    # SERT'ti, slack YOKTU. Birleşik modele slack + 200 ceza ile taşımak bandı
+    # fiilen DEVRE DIŞI bıraktı: model cezayı ödeyip hafta sonunu inhouse'la
+    # doldurdu. Ölçüm (Ekim 2026 gerçek veri, 4 Ekim Pazar):
+    #   inhouse 285 · outsource 77 → oran %20, band %65-70 istiyor
+    #   ödenen ceza: 171 kişi × 200 = 34.200/gün, dokuz hafta sonu ~300 bin
+    # Neden ödüyordu: alternatif outsource adam-gününü hafta içinden çekmek ve
+    # orada kapsama_hafta_ici (5000/kişi-slot) yemek — daha pahalı.
+    #
+    # ZİNCİR: bant yumuşak → hafta sonu inhouse sınırsız (K3 yalnız hafta içi,
+    # hafta sonunda kadro tavanı YOK) → inhouse'un 15:00 sonrası tek vardiyası
+    # V18, 106 kişiyle düz blok → 15:00-17:30 %138 → sarkan vardiyalar (V20/V21)
+    # 5-7'de kalıyor → Pazartesi 00:00'a kadro sarkmıyor → gece V01 şişiyor.
+    #
+    # NEDEN SERT DEĞİL, ÇOK YÜKSEK CEZA: davranış sert bantla aynı olur
+    # (kapsama_hafta_sonu 50.000'in üstünde), ama slack durduğu için model
+    # hiçbir koşulda çözümsüz kalmaz. Eski model gerçekten sertti; birleşik
+    # modelde adam-gün eşitliğiyle çakışma riski var, onun slack'i (500) yol verir.
+    # Sert bantla hafta sonu şekli: B ≥ 1.857·A → arz ~400'de A≈140, B≈260
+    # (sahadaki gerçek: Cmt'de ~146 inhouse).
+    #
     # ÖNEMLİ OLAN SIRA: üsttekini bozmak her zaman alttakinden pahalı olmalı.
     # RR ve slot_cap cezaları gün tipi bloğundan gelir, burada DEĞİL.
     'ceza': {
         'kapsama_hafta_sonu': 50000.0,
         'kapsama_hafta_ici': 5000.0,
-        'oran_sapma': 200.0,
+        'oran_sapma': 200000.0,
         'pt_hedef_sapma': 2000.0,
         'adam_gun_sapma': 500.0,
         'yayma': 50.0,
