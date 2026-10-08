@@ -3,23 +3,44 @@ from weekly_pipeline_unified_v1 import is_slot_in_shift
 from config_unified_v1 import blok_coz
 
 ds, q = '2026-10-04', 'kitle'
-mi = results[ds][q]['mip_info']; cov = mi['shift_coverage']
-b = blok_coz(CONFIG, q, ds); sc = b['slot_cap']
-print(f"=== {ds} {q} — gün tipi {b['_gun_tipi']} ===")
-print(f"  {'slot':<7}{'ihtiyaç':>8}{'arz':>6}{'oran':>7}{'inh':>5}{'out':>5}"
-      f"   {'bant':<14}{'tavan':>6}{'aşım':>6}{'ceza':>8}")
-for t in [f"{h:02d}:{m:02d}" for h in range(14, 24) for m in (0, 30)]:
-    ih = mi['erlang_by_slot_ham'].get(t, 0); ar = mi['fiili_by_slot'].get(t, 0)
-    bn = next((x for x in sc['bands'] if is_slot_in_shift(t, x['start'], x['end'])), None)
-    tav = max(math.ceil(ih * bn['max_ratio']), 3) if (bn and ih > 0) else 0
-    asim = max(0, ar - tav) if tav else 0
-    print(f"  {t:<7}{ih:>8}{ar:>6}{(ar/ih*100 if ih else 0):>6.0f}%"
-          f"{mi['mip_in_by_slot'].get(t,0):>5}{mi['mip_out_by_slot'].get(t,0):>5}"
-          f"   {(f'{bn[chr(39)]}' if False else (f\"{bn['start']}-{bn['end']}\" if bn else '— yok')):<14}"
-          f"{tav:>6}{asim:>6}{asim*(bn['penalty'] if bn else 0):>8,.0f}")
+mi = results[ds][q]['mip_info']
+cov = mi['shift_coverage']
+b = blok_coz(CONFIG, q, ds)
+sc = b['slot_cap']
 
-print(f"\n  akşam vardiyaları:")
-for k, v in sorted(mi['assignments'].items(), key=lambda z: cov[z[0]]['start']):
-    if v and cov[k]['start'] >= '14:00':
-        print(f"     {k:<16}{cov[k]['start']}-{cov[k]['end']:<8}{v:>5}"
-              f"   {cov[k]['company']}")
+print(f"=== {ds} {q} — gun tipi {b['_gun_tipi']} ===")
+print("  slot    ihtiyac   arz   oran  inh  out   bant            tavan  asim     ceza")
+for h in range(14, 24):
+    for m in (0, 30):
+        t = f"{h:02d}:{m:02d}"
+        ih = mi['erlang_by_slot_ham'].get(t, 0)
+        ar = mi['fiili_by_slot'].get(t, 0)
+        inh = mi['mip_in_by_slot'].get(t, 0)
+        out = mi['mip_out_by_slot'].get(t, 0)
+
+        bn = None
+        for x in sc['bands']:
+            if is_slot_in_shift(t, x['start'], x['end']):
+                bn = x
+                break
+
+        if bn and ih > 0:
+            tavan = max(math.ceil(ih * bn['max_ratio']), 3)
+            asim = max(0, ar - tavan)
+            ceza = asim * bn['penalty']
+            bant_ad = bn['start'] + '-' + bn['end']
+        else:
+            tavan, asim, ceza, bant_ad = 0, 0, 0, '— yok'
+
+        oran = (ar / ih * 100) if ih else 0
+        print(f"  {t}  {ih:7d} {ar:5d} {oran:5.0f}% {inh:4d} {out:4d}   "
+              f"{bant_ad:<14} {tavan:5d} {asim:5d} {ceza:8,.0f}")
+
+print("\n  aksam vardiyalari (baslangic >= 14:00):")
+for k in sorted(cov, key=lambda z: cov[z]['start']):
+    v = mi['assignments'].get(k, 0)
+    if v > 0 and cov[k]['start'] >= '14:00':
+        d1 = cov[k].get('slots_d1') or []
+        print(f"     {k:<16} {cov[k]['start']}-{cov[k]['end']:<8} {v:4d}  "
+              f"{cov[k]['company']:<10} "
+              + (f"ertesi gune {len(d1)} slot" if d1 else "sarkmaz"))
