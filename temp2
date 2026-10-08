@@ -1,161 +1,61 @@
-def h18e_kapasite_kontrol():
+def h18e_kota_kontrol():
     import datetime as dt
     import pandas as pd
-    from ortools.graph.python import max_flow
 
-    gerekli = [
-        "AGENTS", "PLAN_GUNLER", "talep", "x",
-        "_kova_calisabilir", "hs_ciftleri", "hs_tek_normal",
-        "HS_TEK_GUN", "HS_TOL", "MIN_KOVA",
-        "CIFT_HS_OFF", "CIFT_HS_OFF_ESNEK",
-        "mesai_yok", "hafta_sonu_yasak", "TATIL", "ARIFE",
-        "AY_ILK", "ONCEKI_SON", "onceki_calisti",
-    ]
-    eksik = [ad for ad in gerekli if ad not in globals()]
-    if eksik:
-        print("Önce modelin H18E'ye kadar hücrelerini çalıştır.")
-        print("Eksik değişkenler:", eksik)
-        return
-
-    agents = list(dict.fromkeys(AGENTS))
-    hs_gunler = sorted(
-        ds for ds in PLAN_GUNLER
-        if dt.date.fromisoformat(ds).weekday() >= 5
-    )
-    normal = set(hs_tek_normal) if HS_TEK_GUN else set()
-
-    # H10'un gerçek sert alt sınırı:
-    # talep - tolerans; ayrıca aktif kovada MIN_KOVA tabanı.
-    ihtiyac = {}
-    uygun = {(a, ds): [] for a in agents for ds in hs_gunler}
-
-    for (ds, v), kisi in talep.items():
-        if ds not in hs_gunler:
-            continue
-
-        taban = 0
-        if MIN_KOVA and any((a, ds, v) in x for a in agents):
-            taban = min(MIN_KOVA, kisi)
-        ihtiyac[(ds, v)] = max(0, kisi - HS_TOL, taban)
-
-        d = dt.date.fromisoformat(ds)
-        for a in agents:
-            if not _kova_calisabilir(a, ds, v):
-                continue
-            if d in TATIL and a in mesai_yok:
-                continue
-            # Arife yarım vardiyası normal talep kovasına katkı yapmaz.
-            if d in ARIFE and a in (mesai_yok | hafta_sonu_yasak):
-                continue
-            # Ay Pazar başlıyorsa önceki Cumartesi çalışması.
-            if (
-                a in normal and d == AY_ILK
-                and AY_ILK.weekday() == 6
-                and ONCEKI_SON in onceki_calisti.get(a, set())
-            ):
-                continue
-            uygun[(a, ds)].append(v)
-
-    def eslestir(gunler, tek_gun_agents):
-        # Kaynak → agent → agent/gün → vardiya kovası → hedef.
-        # Agent/gün kapasitesi 1; H18E kapsamındaki agentın
-        # bütün hafta sonu kapasitesi en fazla 1.
-        akis = max_flow.SimpleMaxFlow()
-        dugumler = {("kaynak",): 0, ("hedef",): 1}
-
-        def dugum(anahtar):
-            if anahtar not in dugumler:
-                dugumler[anahtar] = len(dugumler)
-            return dugumler[anahtar]
-
-        for a in agents:
-            musait = [ds for ds in gunler if uygun[(a, ds)]]
-            kapasite = (
-                min(1, len(musait))
-                if a in tek_gun_agents else len(musait)
-            )
-            if not kapasite:
-                continue
-
-            agent_dugum = dugum(("agent", a))
-            akis.add_arc_with_capacity(0, agent_dugum, kapasite)
-
-            for ds in musait:
-                gun_dugum = dugum(("gun", a, ds))
-                akis.add_arc_with_capacity(agent_dugum, gun_dugum, 1)
-                for v in uygun[(a, ds)]:
-                    akis.add_arc_with_capacity(
-                        gun_dugum, dugum(("kova", ds, v)), 1
-                    )
-
-        for (ds, v), gereken in ihtiyac.items():
-            if ds in gunler:
-                akis.add_arc_with_capacity(
-                    dugum(("kova", ds, v)), 1, gereken
-                )
-
-        durum = akis.solve(0, 1)
-        if durum != akis.OPTIMAL:
-            raise RuntimeError(f"Eşleştirme hesabı başarısız: {durum}")
-        return akis.optimal_flow()
-
-    # Ay sınırındaki tek Cmt/Pzr günlerini de kontrol et.
-    gruplar = [tuple(cift) for cift in hs_ciftleri]
-    cift_gunleri = {ds for cift in gruplar for ds in cift}
-    gruplar += [(ds,) for ds in hs_gunler if ds not in cift_gunleri]
+    haftalar_k = {}
+    for ds in PLAN_GUNLER:
+        wk = dt.date.fromisoformat(ds).isocalendar()[:2]
+        haftalar_k.setdefault(wk, []).append(ds)
 
     satirlar = []
-    for gunler in gruplar:
-        gereken = sum(
-            n for (ds, v), n in ihtiyac.items() if ds in gunler
-        )
-        once = eslestir(gunler, set())
-        sonra = eslestir(gunler, normal)
+    for a in hs_tek_normal:
+        if a not in kota_map:
+            continue
 
+        kapasite_eski = kapasite_h18e = 0
+
+        for gunler in haftalar_k.values():
+            uygun = [
+                ds for ds in gunler
+                if any(
+                    _kova_calisabilir(a, ds, v)
+                    for v in gun_vardiyalari.get(ds, [])
+                )
+            ]
+            hi = sum(
+                dt.date.fromisoformat(ds).weekday() < 5
+                for ds in uygun
+            )
+            hs = len(uygun) - hi
+
+            # H12: tam haftada en fazla 6 çalışma günü.
+            kapasite_eski += min(6, hi + hs)
+            # H18E: aynı hafta sonunda en fazla 1 çalışma günü.
+            kapasite_h18e += min(6, hi + min(1, hs))
+
+        kota = kota_map[a]
         satirlar.append({
-            "tarihler": " / ".join(gunler),
-            "sert_min": gereken,
-            "H18E_haric_eslesen": once,
-            "H18E_dahil_eslesen": sonra,
-            "H18E_ile_kayip": once - sonra,
-            "kesin_acik": gereken - sonra,
+            "agent": a,
+            "kota": kota,
+            "H18E_oncesi_ust": kapasite_eski,
+            "H18E_sonrasi_ust": kapasite_h18e,
+            "kesin_kota_acigi": max(0, kota - kapasite_h18e),
         })
 
-    print(
-        f"Agent={len(agents)} | H18E kapsamı={len(normal)}"
-        f" | HS_TEK_GUN={HS_TEK_GUN} | HS_TOL={HS_TOL}"
-    )
-    print(pd.DataFrame(satirlar).to_string(index=False))
+    tablo = pd.DataFrame(satirlar)
+    if tablo.empty:
+        print("Kontrol edilecek agent bulunamadı.")
+        return
 
-    # Aylık iyimser kapasite üst sınırı.
-    # H18 esnekse çift-off zorunlu kapasite kaybı sayılmaz.
-    h18_sert = CIFT_HS_OFF and not CIFT_HS_OFF_ESNEK
-    aylik_ust = 0
+    sorun = tablo[tablo["kesin_kota_acigi"] > 0]
+    print(f"Kontrol edilen normal agent: {len(tablo)}")
+    print(f"H18E ile kotasına ulaşamayan agent: {len(sorun)}")
 
-    for a in agents:
-        cift_kapasiteleri = []
-        for cmt, pzr in hs_ciftleri:
-            n = int(bool(uygun[(a, cmt)])) + int(bool(uygun[(a, pzr)]))
-            cift_kapasiteleri.append(min(1, n) if a in normal else n)
+    if not sorun.empty:
+        print(sorun.sort_values(
+            "kesin_kota_acigi", ascending=False
+        ).to_string(index=False))
+    else:
+        print("Bu kontrolde bireysel kota açığı bulunmadı.")
 
-        kapasite = sum(cift_kapasiteleri)
-        if h18_sert and cift_kapasiteleri:
-            # Off için en az kapasite kaybettiren çift seçilebilir.
-            kapasite -= min(cift_kapasiteleri)
-
-        kapasite += sum(
-            bool(uygun[(a, ds)])
-            for ds in hs_gunler if ds not in cift_gunleri
-        )
-        aylik_ust += kapasite
-
-    aylik_min = sum(ihtiyac.values())
-    print(
-        f"\nH18 sert mi? {h18_sert}"
-        f"\nAylık hafta sonu sert minimum: {aylik_min} kişi-gün"
-        f"\nAylık iyimser kapasite üst sınırı: {aylik_ust} kişi-gün"
-        f"\nAylık kesin kapasite açığı: {max(0, aylik_min - aylik_ust)}"
-    )
-
-
-h18e_kapasite_kontrol()
+h18e_kota_kontrol()
