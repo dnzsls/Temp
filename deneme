@@ -1,58 +1,25 @@
 import pandas as pd
-import sys
 
-KONTROL_KUYRUK = "kitle"
+q = "kitle"
+resolve = run_week_all_queues.__globals__["_resolve_kadro"]
+kadro = CONFIG_WEEKDAY["surplus_distribution"]["total_kadro"][q]["inhouse"]
 
-print("Config:", CONFIG_WEEKDAY.get("weekly_staffing"))
-_mod = sys.modules.get(run_week_all_queues.__module__)
-print("Yüklü pipeline:", getattr(_mod, "__file__", "?"))
-
-_ozet, _satirlar, _hafta_gunleri = [], [], {}
-
+rows = []
 for ds, r in sorted(results.items()):
-    d = pd.Timestamp(ds).date()
-    if d.weekday() >= 5:
+    if pd.Timestamp(ds).weekday() >= 5:
         continue
-    qr = (r or {}).get(KONTROL_KUYRUK)
+    qr = (r or {}).get(q)
     if not qr:
         continue
 
     mi = qr["mip_info"]
-    wk = f"{d.isocalendar().year}-W{d.isocalendar().week:02d}"
-    _hafta_gunleri.setdefault(wk, []).append(ds)
-
-    _ozet.append({
+    kullanilan = mi["total_inhouse_kisi"]
+    tavan = resolve(kadro, ds)
+    rows.append({
         "tarih": ds,
-        "inhouse": mi.get("total_inhouse_kisi"),
-        "outsource": mi.get("total_outsource_kisi"),
-        "gunluk_mod": mi.get("daily_counts_enabled", "KAYIT YOK"),
-        "sabit_vardiya": len(mi.get("weekly_stable_assignments", {})),
+        "inhouse": kullanilan,
+        "kadro_tavani": tavan,
+        "bos_kadro": tavan - kullanilan,
     })
 
-    sc = mi.get("shift_coverage", {})
-    for s, n in mi.get("assignments", {}).items():
-        info = sc.get(s, {})
-        if info.get("company") == "inhouse":
-            _satirlar.append({
-                "hafta": wk, "tarih": ds, "kisi": n,
-                "vardiya": f"{info.get('start')}-{info.get('end')} [{s}]",
-            })
-
-print("\nGünlük özet:")
-print(pd.DataFrame(_ozet).to_string(index=False))
-
-_df = pd.DataFrame(_satirlar)
-if not _df.empty:
-    for wk, g in _df.groupby("hafta"):
-        tablo = g.pivot_table(
-            index="vardiya", columns="tarih",
-            values="kisi", aggfunc="sum", fill_value=0,
-        ).reindex(columns=_hafta_gunleri[wk], fill_value=0)
-
-        tablo["durum"] = tablo.nunique(axis=1).map(
-            lambda n: "AYNI" if n == 1 else "DEĞİŞİYOR"
-        )
-        print(f"\n{wk} — INHOUSE")
-        print(tablo.to_string())
-else:
-    print("Inhouse ataması bulunamadı.")
+print(pd.DataFrame(rows).to_string(index=False))
