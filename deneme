@@ -1,29 +1,12 @@
-# S2 ÖZET — S1 ile karşılaştırma için
-import pandas as pd
-q = 'kitle'
-satir = []
-for d in sorted(results):
-    r = (results[d] or {}).get(q)
-    if not r: continue
-    mi = r['mip_info']
-    erl = sum(v for v in (mi.get('erlang_by_slot_ham') or {}).values() if v > 0)
-    sf = mi.get('total_shortfall', 0)
-    satir.append({'tarih': d[5:], 'gun': pd.Timestamp(d).strftime('%a'),
-                  'in': mi.get('total_inhouse_kisi', 0),
-                  'out': mi.get('total_outsource_kisi', 0),
-                  'eksik': sf,
-                  'kapsama%': round(100 * (1 - sf / erl), 2) if erl else None,
-                  'rr_fazla': mi.get('rr_total_excess', 0)})
-df = pd.DataFrame(satir)
-print(df.to_string(index=False))
-print(f"\nTOPLAM eksik {df['eksik'].sum()}  |  RR fazla {df['rr_fazla'].sum()}  |  "
-      f"in {df['in'].sum()}  |  out {df['out'].sum()}")
-
-# bir haftanın inhouse sayıları (gün gün oynuyor mu?)
-gl = ['2026-10-05','2026-10-06','2026-10-07','2026-10-08','2026-10-09']
-print("\ninhouse vardiya × gün (5-9 Ekim):")
-inh = sorted({k for d in gl for k in results[d][q]['mip_info']['assignments'] if 'inhouse' in k})
-for s in inh:
-    v = [results[d][q]['mip_info']['assignments'].get(s, 0) for d in gl]
-    print(f"  {s:<14} {v}   zirve(takım) {max(v)}")
-print(f"  takım kapasitesi toplamı: {sum(max(results[d][q]['mip_info']['assignments'].get(s,0) for d in gl) for s in inh)}")
+import copy
+from weekly_pipeline_unified_v1 import solve_week
+cfg = copy.deepcopy(CONFIG)
+cfg['solver']['gap_rel_by_queue'] = {'kitle': 0.0001}
+cfg['solver']['time_limit'] = 600
+gl = ['2026-10-26','2026-10-27','2026-10-28','2026-10-29','2026-10-30','2026-10-31']
+df30 = prepare_forecast_calls_30(df_forecast, config=cfg)
+ipd, oz = solve_week(df30, df_shifts_dict['kitle'], 'kitle', gl, config=cfg,
+                     inhouse_esitlik=False, verbose=True)
+print_ozet(oz)
+for s in sorted({k for d in gl[:5] for k in ipd[d]['assignments'] if 'inhouse' in k}):
+    print(s, [ipd[d]['assignments'].get(s, 0) for d in gl[:5]])
