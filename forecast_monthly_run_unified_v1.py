@@ -1357,12 +1357,176 @@ def export_monthly_plan_to_excel(results, year, month,
     print(f"  Sheet 'RR Raporu': aylık")
     return output_path
 
+def export_excel_v2(results, year, month, config,
+                    queues=('kitle', 'gold', 'kurumsal'), output_path=None):
+    """Aylık plan → Excel, PANDAS ile (2026-10-12).
+
+    Eski export_monthly_plan_to_excel elle kurulan, çok sayıda BİRLEŞTİRİLMİŞ
+    hücre içeren sayfalar yazıyordu → Excel açılışta "onarım" uyarısı veriyordu.
+    Bu sürüm yalnız düz tablolar yazar (birleştirme YOK), sonra biçim verir:
+    kalın başlık, dondurulmuş başlık, filtre, RR/kapsama renkleri.
+
+    Sayfalar:
+      gun_ozet       tarih × kuyruk: çağrı, in/out/PT, eksik, kapsama %, RR, Kap_RR
+      vardiya_plani  kuyruk × şirket × vardiya × saat  →  kolonlar tarih (kişi)
+      slot_detay     tarih × kuyruk × yarım saat: çağrı, ihtiyaç, MIP1/MIP2, RR1/RR2, Kap_RR, eksik
+      hafta_ozet     kuyruk × hafta: kişi, eksik, kapsama, adam-gün, PT, outsource seti
+      ACIKLAMA       kolon anlamları
+    Ölçüler RR Raporu (_compute_rr_metrics_for_day) ile AYNI.
+    """
+    from openpyxl.styles import Font as _F, PatternFill as _P
+    from openpyxl.utils import get_column_letter as _col
+
+    if output_path is None:
+        ay = ['Ocak', 'Subat', 'Mart', 'Nisan', 'Mayis', 'Haziran', 'Temmuz',
+              'Agustos', 'Eylul', 'Ekim', 'Kasim', 'Aralik'][month - 1]
+        output_path = f"vardiya_plani_forecast_{year}_{month:02d}_{ay}_v2.xlsx"
+    tarihler = sorted(results)
+    if not tarihler:
+        print("⚠ results boş, export atlandı")
+        return None
+    GUN = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+
+    gun_s, slot_s, var_s = [], [], {}
+    for ds in tarihler:
+        d = pd.to_datetime(ds)
+        for q in queues:
+            rq = (results.get(ds) or {}).get(q)
+            if not rq:
+                continue
+            mi = rq.get('mip_info', {}) or {}
+            slot_rows, ozet = _compute_rr_metrics_for_day(
+                rq, q, cfg_weekday=config, cfg_weekend=config,
+                is_weekend=d.weekday() >= 5)
+            t_in = mi.get('total_inhouse_kisi', 0)
+            t_ou = mi.get('total_outsource_kisi', 0)
+            t_pt = mi.get('total_part_time_kisi', 0)
+            E = (ozet or {}).get('erl_top', 0) or 0
+            K = (ozet or {}).get('eksik', 0) or 0
+            gun_s.append({
+                'tarih': d.date(), 'gun': GUN[d.weekday()], 'kuyruk': q,
+                'cagri': int(sum((rq.get('calls_by_slot') or {}).values())),
+                'inhouse': t_in, 'outsource': t_ou, 'part_time': t_pt,
+                'toplam': t_in + t_ou + t_pt,
+                'outsource_%': (t_ou / (t_in + t_ou + t_pt)) if (t_in + t_ou + t_pt) else None,
+                'ihtiyac_kisi_slot': round(E),
+                'eksik_kisi_slot': round(K),
+                'kapsama_%': (1 - K / E) if E else None,
+                'RR': (ozet or {}).get('rr2_avg'),
+                'Kap_RR': (ozet or {}).get('kap_rr_day'),
+                'acik_slot': (ozet or {}).get('rr_alti_slot', 0),
+            })
+            for r in slot_rows:
+                slot_s.append({
+                    'tarih': d.date(), 'gun': GUN[d.weekday()], 'kuyruk': q,
+                    'slot': r['slot'], 'cagri': r['calls'], 'ihtiyac': r['erlang'],
+                    'MIP1': r['mip1'], 'MIP2': r['mip2'],
+                    'RR1': r['rr1'], 'RR2': r['rr2'], 'Kap_RR': r['kap_rr'],
+                    'eksik': max(0, r['erlang'] - r['mip2']),
+                })
+            sc = mi.get('shift_coverage', {}) or {}
+            for s, k in (mi.get('assignments') or {}).items():
+                if k <= 0:
+                    continue
+                c = sc.get(s, {})
+                key = (q, c.get('company', '?'), s, f"{c.get('start', '?')}-{c.get('end', '?')}")
+                var_s.setdefault(key, {})[str(d.date())] = k
+
+    df_gun = pd.DataFrame(gun_s)
+    df_slot = pd.DataFrame(slot_s)
+    df_var = pd.DataFrame([{'kuyruk': k[0], 'sirket': k[1], 'vardiya': k[2], 'saat': k[3], **v}
+                           for k, v in var_s.items()])
+    if len(df_var):
+        _tc = sorted(c for c in df_var.columns if c[:2] == '20')
+        df_var = (df_var[['kuyruk', 'sirket', 'vardiya', 'saat'] + _tc]
+                  .sort_values(['kuyruk', 'sirket', 'saat']).fillna(0))
+        df_var[_tc] = df_var[_tc].astype(int)
+        df_var['toplam_kisi_gun'] = df_var[_tc].sum(axis=1)
+
+    # ---- hafta özeti ----
+    hafta_s = []
+    if len(df_gun):
+        df_gun['_hafta'] = df_gun['tarih'].map(lambda x: _week_of_month(str(x)))
+        for (q, h), g in df_gun.groupby(['kuyruk', '_hafta']):
+            ag = ((config.get('kadro', {}).get('outsource_adam_gun') or {})
+                  .get(q, {}) or {}).get(f"hafta_{h}")
+            hi_g = [str(t) for t in g['tarih'] if pd.Timestamp(t).weekday() < 5]
+            seti = sorted({s for t in hi_g
+                           for s, k in ((results[t][q]['mip_info'].get('assignments') or {}).items())
+                           if k > 0 and (results[t][q]['mip_info'].get('shift_coverage', {})
+                                         .get(s, {}).get('company')) == 'outsource'})
+            E, K = g['ihtiyac_kisi_slot'].sum(), g['eksik_kisi_slot'].sum()
+            hafta_s.append({
+                'kuyruk': q, 'hafta': h, 'ilk_gun': g['tarih'].min(), 'son_gun': g['tarih'].max(),
+                'gun_sayisi': len(g), 'kisi_gun': int(g['toplam'].sum()),
+                'eksik_kisi_slot': int(K), 'kapsama_%': (1 - K / E) if E else None,
+                'outsource_kullanilan': int(g['outsource'].sum()), 'outsource_butce': ag,
+                'part_time_kisi_gun': int(g['part_time'].sum()),
+                'outsource_hafta_ici_set': len(seti), 'outsource_vardiyalari': ', '.join(seti),
+            })
+        df_gun = df_gun.drop(columns='_hafta')
+    df_hafta = pd.DataFrame(hafta_s)
+
+    aciklama = pd.DataFrame([
+        ('gun_ozet', 'RR', 'Σ sahadaki ÷ Σ ihtiyaç (Erlang-ağırlıklı). Fazla olan saat açık saati ÖRTER'),
+        ('gun_ozet', 'kapsama_%', '1 − Σ eksik ÷ Σ ihtiyaç. Örtmez → asıl hizmet ölçüsü (<%99 kırmızı)'),
+        ('gun_ozet', 'eksik_kisi_slot', 'Σ max(0, ihtiyaç − sahadaki) — yarım saat × kişi'),
+        ('gun_ozet', 'acik_slot', 'sahadaki < ihtiyaç olan yarım saat sayısı'),
+        ('gun_ozet', 'Kap_RR', 'iş birimi kapasitesi ÷ gelen çağrı (15 çağrı/saat, mola kayıpları düşülmüş)'),
+        ('slot_detay', 'ihtiyac', 'Erlang ihtiyacı (shrinkage dahil), sarkan düşülmemiş'),
+        ('slot_detay', 'MIP1 / RR1', 'dağıtım (surplus) ÖNCESİ sahadaki kişi / oranı'),
+        ('slot_detay', 'MIP2 / RR2', 'son plan: o gün giren + önceki günden sarkan + PT'),
+        ('vardiya_plani', 'tarih kolonları', 'o gün o vardiyaya yazılan kişi'),
+        ('hafta_ozet', 'outsource_hafta_ici_set', 'hafta içi kullanılan outsource vardiya sayısı (haftalık sabit set)'),
+        ('renk', 'RR / Kap_RR', '<%100 kırmızı · %100-105 yeşil · >%105 mavi'),
+    ], columns=['sayfa', 'kolon', 'anlam'])
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as xl:
+        for ad, df in (('gun_ozet', df_gun), ('vardiya_plani', df_var),
+                       ('slot_detay', df_slot), ('hafta_ozet', df_hafta),
+                       ('ACIKLAMA', aciklama)):
+            (df if len(df) else pd.DataFrame({'bilgi': ['veri yok']})) \
+                .to_excel(xl, sheet_name=ad, index=False)
+
+        KIR, YES, MAV = (_P('solid', fgColor='FFC7CE'), _P('solid', fgColor='C6EFCE'),
+                         _P('solid', fgColor='BDD7EE'))
+        YUZDE = {'outsource_%', 'kapsama_%', 'RR', 'Kap_RR', 'RR1', 'RR2'}
+        DONDUR = {'gun_ozet': 'D2', 'vardiya_plani': 'E2', 'slot_detay': 'E2',
+                  'hafta_ozet': 'C2', 'ACIKLAMA': 'A2'}
+        for ws in xl.book.worksheets:
+            bas = [c.value for c in ws[1]]
+            for c in ws[1]:
+                c.font = _F(bold=True)
+            ws.freeze_panes = DONDUR.get(ws.title, 'A2')
+            if ws.max_row > 1:
+                ws.auto_filter.ref = ws.dimensions
+            for j, h in enumerate(bas, 1):
+                L = _col(j)
+                ws.column_dimensions[L].width = (60 if h in ('anlam', 'outsource_vardiyalari')
+                                                 else max(9, min(18, len(str(h)) + 2)))
+                if h not in YUZDE:
+                    continue
+                for r in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=r, column=j)
+                    v = cell.value
+                    if not isinstance(v, (int, float)):
+                        continue
+                    cell.number_format = '0.0%' if h == 'kapsama_%' else '0%'
+                    if h == 'kapsama_%':
+                        if v < 0.99:
+                            cell.fill = KIR
+                    elif h in ('RR', 'Kap_RR', 'RR1', 'RR2'):
+                        cell.fill = KIR if v < 1.0 else (YES if v <= 1.05 else MAV)
+
+    print(f"✓ Excel (v2, birleştirme yok): {output_path}")
+    print(f"  gun_ozet {len(df_gun)} · vardiya_plani {len(df_var)} · "
+          f"slot_detay {len(df_slot)} · hafta_ozet {len(df_hafta)} satır")
+    return output_path
+
+
 # %% [HÜCRE 12] — Excel'e aktar
-export_monthly_plan_to_excel(
-    results=results,
-    year=YEAR,
-    month=MONTH,
-    cfg_weekday=CONFIG,      # RR/Kap_RR için hourly_report config'i
-    cfg_weekend=CONFIG,      # birleşik config → ikisi de aynı
-    queues=('kitle', 'gold', 'kurumsal'),
-)
+# v2 (pandas, birleştirilmiş hücre YOK) — eski Excel açılışta onarım uyarısı veriyordu.
+# Eski düzen gerekirse: export_monthly_plan_to_excel(results=results, year=YEAR,
+#     month=MONTH, cfg_weekday=CONFIG, cfg_weekend=CONFIG, queues=('kitle','gold','kurumsal'))
+export_excel_v2(results, YEAR, MONTH, CONFIG, queues=('kitle', 'gold', 'kurumsal'))
+
