@@ -552,7 +552,7 @@ print_queue_monthly_plan('kurumsal', results, YEAR, MONTH)
 # %% [HÜCRE 11] — Excel fonksiyonları
 
 def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=None,
-                                  is_weekend=False):
+                                  is_weekend=False, aht_by_slot=None):
     """Bir günün bir kuyruğu için slot-bazlı RR metrikleri.
 
     Returns:
@@ -616,7 +616,13 @@ def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=No
     rr2_values = []
     erl_weights = []
     t_ck = 0.0
+    t_ck_kar = 0.0       # Kap_RR tavanlı: her yarım saatte min(kapasite, çağrı)
     t_cagri = 0
+    # AHT KAPASİTESİ (2026-10-14): 15 çağrı/saat yerine o yarım saatin
+    # alt-kuyruk ağırlıklı AHT'si. Net kişi Kap_RR ile AYNI (rapor etkisi +
+    # kapasite kaybı düşülmüş). Doluluk %100 varsayılır (boşta bekleme yok).
+    _aht = aht_by_slot or {}
+    t_aht_c, t_aht_ck, t_aht_kar, t_aht_kmy = 0.0, 0.0, 0.0, 0.0
 
     for slot in sorted(erl_by_slot.keys()):
         erl = erl_by_slot[slot]
@@ -640,15 +646,26 @@ def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=No
         ck = nmt * (ca / 2)
         kap_rr = (ck / calls) if calls > 0 else None
 
+        aht = _aht.get(slot)
+        aht_ck = (nmt * 1800 / aht) if aht else None          # 30 dk = 1800 sn
+        if aht_ck is not None:
+            t_aht_c += calls * aht
+            t_aht_ck += aht_ck
+            t_aht_kar += min(aht_ck, calls)
+            t_aht_kmy += max(0.0, calls - aht_ck)
+
         slot_rows.append({
             'slot': slot, 'calls': calls, 'erlang': erl,
             'mip1': mip1, 'mip2': mip2,
             'rr1': rr1, 'rr2': rr2,
             'nmt': nmt, 'ck': ck, 'kap_rr': kap_rr,
+            'aht': aht, 'aht_ck': aht_ck,
+            'aht_kap': (aht_ck / calls) if (aht_ck is not None and calls > 0) else None,
         })
         rr2_values.append(rr2)
         erl_weights.append(erl)
         t_ck += ck
+        t_ck_kar += min(ck, calls)
         t_cagri += calls
 
     if not rr2_values:
@@ -664,6 +681,12 @@ def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=No
         'erl_top': total_w,                                   # Σ ihtiyaç (kişi-slot)
         'mip2_top': _mip2_top,                                # Σ sahadaki kişi (aynı slotlar)
         'eksik': sum(max(0, s['erlang'] - s['mip2']) for s in slot_rows),
+        'fazla': sum(max(0, s['mip2'] - s['erlang']) for s in slot_rows),
+        # RR (2026-10-14, tavanlı): her slotta sahadaki en fazla ihtiyaç kadar
+        # sayılır → fazla saat açık saati ÖRTMEZ. = 1 − Σ eksik ÷ Σ ihtiyaç.
+        # rr2_avg (eski, Σ sahadaki ÷ Σ ihtiyaç = doluluk) uyumluluk için duruyor.
+        'rr': (1 - sum(max(0, s['erlang'] - s['mip2']) for s in slot_rows) / total_w
+               if total_w > 0 else 1.0),
         'rr_alti_slot': sum(1 for s in slot_rows if s['mip2'] < s['erlang']),
         'erl_pk': max(erl_weights),
         'mip2_pk': max((s['mip2'] for s in slot_rows), default=0),
@@ -671,7 +694,15 @@ def _compute_rr_metrics_for_day(r_queue, queue, cfg_weekday=None, cfg_weekend=No
         'rr2_min': min(rr2_values),
         'rr2_max': max(rr2_values),
         'rr2_avg': rr2_avg,
-        'kap_rr_day': (t_ck / t_cagri) if t_cagri > 0 else 0,
+        # 2026-10-14: TAVANLI — fazla kapasiteli yarım saat açık olanı örtmez
+        # (eskisi Σ kapasite ÷ Σ çağrı idi). total_ck tavansız toplam kalır.
+        'kap_rr_day': (t_ck_kar / t_cagri) if t_cagri > 0 else 0,
+        # AHT kapasitesi (aht_by_slot verildiyse; yoksa None)
+        'ort_aht': (t_aht_c / t_cagri) if (_aht and t_cagri > 0) else None,
+        'aht_karsilanan': t_aht_kar if _aht else None,       # Σ min(kapasite, çağrı)
+        'aht_karsilanamayan': t_aht_kmy if _aht else None,   # Σ max(0, çağrı − kapasite)
+        'aht_rr': ((t_aht_kar / (t_aht_kar + t_aht_kmy))
+                   if (_aht and (t_aht_kar + t_aht_kmy) > 0) else None),
         'total_calls': t_cagri,
         'total_ck': t_ck,
     }
@@ -842,7 +873,8 @@ def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
             current_row += 1
 
         # ---- D) SLOT BAZLI RR (YENİ) ----
-        # Her aktif slot için: Çağrı, Erlang, MIP1, MIP2, RR1, RR2, Kap_RR
+        # Her aktif slot için: Çağrı, Erlang, MIP1, MIP2, MIP1/Erl, MIP2/Erl, Kap_RR
+        # (2026-10-14: RR1/RR2 başlıkları MIP/Erl oldu — gün RR'siyle karışıyordu)
         # Her günün altında ÖZET satırı: avg/min/max + Kap_RR_Day
         cell = ws.cell(row=current_row, column=1,
                         value=f"SLOT BAZLI RR — {queue}")
@@ -852,7 +884,7 @@ def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
         current_row += 1
 
         rr_headers = ['Gün', 'Tarih', 'Slot', 'Çağrı', 'Erlang',
-                      'MIP1', 'MIP2', 'RR1 %', 'RR2 %', 'Kap_RR %']
+                      'MIP1', 'MIP2', 'MIP1/Erl %', 'MIP2/Erl %', 'Kap_RR %']
         for j, h in enumerate(rr_headers, 1):
             c = ws.cell(row=current_row, column=j, value=h)
             c.fill = header_fill
@@ -894,17 +926,16 @@ def _add_weekly_detail_sheet(wb, week_idx, week_dates, results, queues,
 
             # Günlük ÖZET satırı
             if day_summary is not None:
-                # 2026-10-12: min/max yerine RR + kapsama + eksik (RR Raporu ile aynı ölçü)
+                # 2026-10-14: RR tavanlı (fazla açığı örtmez) + eksik + fazla
                 _E = day_summary['erl_top']
-                _kps = (1 - day_summary['eksik'] / _E) if _E > 0 else 1.0
                 ds_vals = [
                     gun, d.strftime('%d.%m.%Y'), 'ÖZET',
                     day_summary['total_calls'], round(_E),
                     '', round(day_summary['mip2_top']),
                     '',
-                    f"RR {day_summary['rr2_avg']:.0%} | "
-                    f"kapsama {_kps:.1%} | "
-                    f"eksik {round(day_summary['eksik'])}",
+                    f"RR {day_summary['rr']:.1%} | "
+                    f"eksik {round(day_summary['eksik'])} | "
+                    f"fazla {round(day_summary['fazla'])}",
                     f"{day_summary['kap_rr_day']:.0%}",
                 ]
                 for j, v in enumerate(ds_vals, 1):
@@ -944,16 +975,17 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
     # 2026-10-12: Erl_Pk / MIP2_Pk / RR Min / RR Max kaldırıldı (kullanıcı:
     # ağırlıklı RR yeterli). Yerine HAP bilgi: çağrı, RR, kapsama, eksik,
     # açık slot, Kap_RR.
-    #   RR        = Σ sahadaki ÷ Σ ihtiyaç  (Erlang-ağırlıklı; fazla saat açığı ÖRTER)
-    #   Kapsama % = 1 − Σ eksik ÷ Σ ihtiyaç (fazla açığı ÖRTMEZ — asıl hizmet ölçüsü)
+    #   2026-10-14: RR tavanlı — her slotta sahadaki en fazla ihtiyaç kadar sayılır
+    #   RR        = 1 − Σ eksik ÷ Σ ihtiyaç (fazla saat açığı ÖRTMEZ; eski Kapsama %)
     #   Eksik     = Σ max(0, ihtiyaç − sahadaki)  kişi-slot
+    #   Fazla     = Σ max(0, sahadaki − ihtiyaç)  kişi-slot (RR'ye girmez)
     #   Açık slot = sahadaki < ihtiyaç olan yarım saat sayısı
     METRICS_PER_QUEUE = 6
-    SUB_HEADERS = ['Çağrı', 'RR', 'Kapsama %', 'Eksik', 'Açık slot', 'Kap_RR']
+    SUB_HEADERS = ['Çağrı', 'RR', 'Eksik', 'Fazla', 'Açık slot', 'Kap_RR']
 
     # Başlık
     cell = ws.cell(row=1, column=1,
-                    value="AYLIK RR RAPORU — RR · kapsama · eksik · kapasite RR")
+                    value="AYLIK RR RAPORU — RR (tavanlı) · eksik · fazla · kapasite RR")
     cell.fill = date_fill
     cell.font = Font(bold=True, size=12)
     cell.alignment = center
@@ -996,7 +1028,7 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
     # Veri satırları
     current_row = row2 + 1
     # Aylık özet için biriktir
-    monthly = {q: {'cagri': 0, 'erl': 0.0, 'mip2': 0.0, 'eksik': 0.0, 'acik': 0,
+    monthly = {q: {'cagri': 0, 'erl': 0.0, 'mip2': 0.0, 'eksik': 0.0, 'fazla': 0.0, 'acik': 0,
                    'kap_rr_vals': []} for q in queues}
 
     for ds in sorted(all_dates):
@@ -1027,22 +1059,19 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
                         c.alignment = center
                         c.border = border
                 else:
-                    rr2_avg = day_summary['rr2_avg']
+                    rr_t = day_summary['rr']
                     kap_rr = day_summary['kap_rr_day']
                     _E, _K = day_summary['erl_top'], day_summary['eksik']
-                    kapsama = (1 - _K / _E) if _E > 0 else 1.0
-                    vals = [day_summary['total_calls'], f"{rr2_avg:.0%}",
-                            f"{kapsama:.1%}", int(round(_K)),
+                    vals = [day_summary['total_calls'], f"{rr_t:.1%}",
+                            int(round(_K)), int(round(day_summary['fazla'])),
                             day_summary['rr_alti_slot'], f"{kap_rr:.0%}"]
                     for k, v in enumerate(vals):
                         c = ws.cell(row=current_row, column=col_offset + k, value=v)
                         c.alignment = center
                         c.border = border
                         if k == 1:
-                            f = _rr_color(rr2_avg)
-                            if f: c.font = f
-                        elif k == 2 and kapsama < 0.99:
-                            c.font = Font(bold=True, color='C00000')
+                            c.font = (Font(bold=True, color='C00000') if rr_t < 0.99
+                                      else Font(color='006100'))
                         elif k == 5:
                             f = _rr_color(kap_rr)
                             if f: c.font = f
@@ -1051,6 +1080,7 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
                     m['erl'] += _E
                     m['mip2'] += day_summary['mip2_top']
                     m['eksik'] += _K
+                    m['fazla'] += day_summary['fazla']
                     m['acik'] += day_summary['rr_alti_slot']
                     m['kap_rr_vals'].append((kap_rr, day_summary['total_calls']))
             col_offset += METRICS_PER_QUEUE
@@ -1069,11 +1099,9 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
     col_offset = 3
     for queue in queues:
         m = monthly[queue]
-        # AYLIK RR = Σ sahadaki ÷ Σ ihtiyaç (2026-10-12 düzeltmesi). Eskiden
-        # günlük RR'ler o günün ZİRVE ihtiyacıyla ağırlıklanıyordu → sivri
-        # günler fazla ağırlık alıyordu (test: gerçek %133 → raporlanan %150).
-        wavg = (m['mip2'] / m['erl']) if m['erl'] > 0 else 0
-        _kap_ay = (1 - m['eksik'] / m['erl']) if m['erl'] > 0 else 1.0
+        # AYLIK RR (2026-10-14, tavanlı) = 1 − Σ eksik ÷ Σ ihtiyaç — ağırlık
+        # günlerin Σ ihtiyacı; fazla açığı örtmez.
+        _rr_ay = (1 - m['eksik'] / m['erl']) if m['erl'] > 0 else 1.0
         # Çağrı-ağırlıklı aylık Kap_RR
         if m['kap_rr_vals']:
             total_calls = sum(c for _, c in m['kap_rr_vals'])
@@ -1081,8 +1109,8 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
                      if total_calls > 0 else 0)
         else:
             wkap = 0
-        vals = [m['cagri'], f"{wavg:.0%}", f"{_kap_ay:.1%}",
-                int(round(m['eksik'])), m['acik'], f"{wkap:.0%}"]
+        vals = [m['cagri'], f"{_rr_ay:.1%}", int(round(m['eksik'])),
+                int(round(m['fazla'])), m['acik'], f"{wkap:.0%}"]
         for k, v in enumerate(vals):
             c = ws.cell(row=current_row, column=col_offset + k, value=v)
             c.fill = total_fill
@@ -1094,11 +1122,10 @@ def _add_rr_report_sheet(wb, results, queues, all_dates,
     # Açıklama
     current_row += 2
     cell = ws.cell(row=current_row, column=1,
-                    value="RR = Σ sahadaki ÷ Σ ihtiyaç (Erlang-ağırlıklı; fazla saat açığı örter)  |  "
-                          "Kapsama % = 1 − Σ eksik ÷ Σ ihtiyaç (örtmez — asıl hizmet ölçüsü, <%99 kırmızı)  |  "
-                          "Eksik = karşılanamayan kişi-slot  |  Açık slot = ihtiyacın altında kalan yarım saat  |  "
-                          "Kap_RR = çağrı kapasitesi ÷ gelen çağrı (15 çağrı/saat, kayıplar dahil)  |  "
-                          "RR/Kap_RR: <100% kırmızı, >105% mavi")
+                    value="RR = 1 − Σ eksik ÷ Σ ihtiyaç (tavanlı: her yarım saatte sahadaki en fazla ihtiyaç kadar sayılır, fazla açığı örtmez; <%99 kırmızı)  |  "
+                          "Eksik = karşılanamayan kişi-slot  |  Fazla = ihtiyacın üstündeki kişi-slot (RR'ye girmez)  |  "
+                          "Açık slot = ihtiyacın altında kalan yarım saat  |  "
+                          "Kap_RR = karşılanabilen çağrı ÷ gelen çağrı (15 çağrı/saat, kayıplar düşülmüş; her yarım saatte en fazla gelen çağrı kadar sayılır, fazla açığı örtmez)")
     cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
     ws.merge_cells(start_row=current_row, start_column=1,
                    end_row=current_row, end_column=total_cols)
@@ -1358,20 +1385,24 @@ def export_monthly_plan_to_excel(results, year, month,
     return output_path
 
 def export_excel_v2(results, year, month, config,
-                    queues=('kitle', 'gold', 'kurumsal'), output_path=None):
+                    queues=('kitle', 'gold', 'kurumsal'), output_path=None,
+                    df_forecast=None):
     """Aylık plan → Excel, PANDAS ile (2026-10-12).
 
     Eski export_monthly_plan_to_excel elle kurulan, çok sayıda BİRLEŞTİRİLMİŞ
     hücre içeren sayfalar yazıyordu → Excel açılışta "onarım" uyarısı veriyordu.
     Bu sürüm yalnız düz tablolar yazar (birleştirme YOK), sonra biçim verir:
-    kalın başlık, dondurulmuş başlık, filtre, RR/kapsama renkleri.
+    kalın başlık, dondurulmuş başlık, filtre, RR renkleri.
 
     Sayfalar:
-      gun_ozet       tarih × kuyruk: çağrı, in/out/PT, eksik, kapsama %, RR, Kap_RR
+      gun_ozet       tarih × kuyruk: çağrı, in/out/PT, eksik, fazla, RR (tavanlı), Kap_RR
       vardiya_plani  kuyruk × şirket × vardiya × saat  →  kolonlar tarih (kişi)
-      slot_detay     tarih × kuyruk × yarım saat: çağrı, ihtiyaç, MIP1/MIP2, RR1/RR2, Kap_RR, eksik
-      hafta_ozet     kuyruk × hafta: kişi, eksik, kapsama, adam-gün, PT, outsource seti
+      slot_detay     tarih × kuyruk × yarım saat: çağrı, ihtiyaç, MIP1/MIP2, MIP1/Erl, MIP2/Erl, Kap_RR, eksik
+      hafta_ozet     kuyruk × hafta: kişi, eksik, fazla, RR, adam-gün, PT, outsource seti
+      aht_detay      tarih × kuyruk × yarım saat: alt-kuyruk çağrı + AHT → ağırlıklı AHT
       ACIKLAMA       kolon anlamları
+    df_forecast verilirse (HÜCRE 2'deki) AHT kapasitesi hesaplanır: AHT_RR,
+    ort_aht_sn, karsilanan/karsilanamayan_cagri. Verilmezse bu kolonlar boş.
     Ölçüler RR Raporu (_compute_rr_metrics_for_day) ile AYNI.
     """
     from openpyxl.styles import Font as _F, PatternFill as _P
@@ -1387,6 +1418,36 @@ def export_excel_v2(results, year, month, config,
         return None
     GUN = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
 
+    # ---- AHT (2026-10-14): Erlang'ın kullandığı ağırlıklı AHT, yarım saat bazında ----
+    # results'ta saklanmıyor → tahmin verisinden yeniden hesaplanır (model
+    # yeniden çözülmez). Ağırlık = o yarım saatteki alt-kuyruk çağrı payı.
+    aht_map, aht_s = {}, []
+    if df_forecast is not None:
+        from weekly_pipeline_unified_v1 import calculate_weighted_aht, get_sub_queue_aht
+        _d30 = prepare_forecast_calls_30(df_forecast, config=config)
+        _d30 = _d30[_d30['data_date'].isin(pd.to_datetime(tarihler))]
+        for _, row in _d30.iterrows():
+            _ds, _sl = row['data_date'].strftime('%Y-%m-%d'), row['slot_30']
+            for q in queues:
+                _a = calculate_weighted_aht(row, q, _sl, config)
+                aht_map.setdefault((_ds, q), {})[_sl] = _a
+                det = {'tarih': row['data_date'].date(),
+                       'gun': GUN[row['data_date'].weekday()], 'kuyruk': q, 'slot': _sl,
+                       'cagri': row.get(f"{q}_total")}
+                for sq in (config.get('sub_queues', {}).get(q, {}) or {}).get('queues', []):
+                    det[f"{sq}_cagri"] = row.get(f"{sq}_calls")
+                    det[f"{sq}_aht"] = get_sub_queue_aht(q, sq, _sl, config)
+                det['agirlikli_aht_sn'] = _a
+                aht_s.append(det)
+    else:
+        print("  ⚠ df_forecast verilmedi → AHT kapasitesi (AHT_RR) hesaplanmadı")
+    df_aht_det = pd.DataFrame(aht_s)
+    if len(df_aht_det):
+        _bas = ['tarih', 'gun', 'kuyruk', 'slot', 'cagri']
+        df_aht_det = df_aht_det[_bas + [c for c in df_aht_det.columns if c not in _bas
+                                        and c != 'agirlikli_aht_sn'] + ['agirlikli_aht_sn']]
+        df_aht_det = df_aht_det.sort_values(['kuyruk', 'tarih', 'slot'])
+
     gun_s, slot_s, var_s, sur_s = [], [], {}, []
     for ds in tarihler:
         d = pd.to_datetime(ds)
@@ -1397,7 +1458,7 @@ def export_excel_v2(results, year, month, config,
             mi = rq.get('mip_info', {}) or {}
             slot_rows, ozet = _compute_rr_metrics_for_day(
                 rq, q, cfg_weekday=config, cfg_weekend=config,
-                is_weekend=d.weekday() >= 5)
+                is_weekend=d.weekday() >= 5, aht_by_slot=aht_map.get((ds, q)))
             t_in = mi.get('total_inhouse_kisi', 0)
             t_ou = mi.get('total_outsource_kisi', 0)
             t_pt = mi.get('total_part_time_kisi', 0)
@@ -1411,18 +1472,28 @@ def export_excel_v2(results, year, month, config,
                 'outsource_%': (t_ou / (t_in + t_ou + t_pt)) if (t_in + t_ou + t_pt) else None,
                 'ihtiyac_kisi_slot': round(E),
                 'eksik_kisi_slot': round(K),
-                'kapsama_%': (1 - K / E) if E else None,
-                'RR': (ozet or {}).get('rr2_avg'),
+                'fazla_kisi_slot': round((ozet or {}).get('fazla', 0) or 0),
+                'RR': (1 - K / E) if E else None,                 # tavanlı (2026-10-14)
                 'Kap_RR': (ozet or {}).get('kap_rr_day'),
                 'acik_slot': (ozet or {}).get('rr_alti_slot', 0),
+                'ort_aht_sn': (round(ozet['ort_aht'], 1)
+                               if (ozet or {}).get('ort_aht') is not None else None),
+                'karsilanan_cagri': (round(ozet['aht_karsilanan'])
+                                     if (ozet or {}).get('aht_karsilanan') is not None else None),
+                'karsilanamayan_cagri': (round(ozet['aht_karsilanamayan'])
+                                         if (ozet or {}).get('aht_karsilanamayan') is not None else None),
+                'AHT_RR': (ozet or {}).get('aht_rr'),
             })
             for r in slot_rows:
                 slot_s.append({
                     'tarih': d.date(), 'gun': GUN[d.weekday()], 'kuyruk': q,
                     'slot': r['slot'], 'cagri': r['calls'], 'ihtiyac': r['erlang'],
                     'MIP1': r['mip1'], 'MIP2': r['mip2'],
-                    'RR1': r['rr1'], 'RR2': r['rr2'], 'Kap_RR': r['kap_rr'],
+                    'MIP1/Erl': r['rr1'], 'MIP2/Erl': r['rr2'], 'Kap_RR': r['kap_rr'],
                     'eksik': max(0, r['erlang'] - r['mip2']),
+                    'aht_sn': r['aht'], 'net_agent': r['nmt'],
+                    'aht_kapasite_cagri': (round(r['aht_ck'], 1) if r['aht_ck'] is not None else None),
+                    'AHT_kap/Çağrı': r['aht_kap'],
                 })
             sc = mi.get('shift_coverage', {}) or {}
             # SURPLUS: dağıtım sonrası − dağıtım öncesi (mip_info_stage1) vardiya farkı
@@ -1470,10 +1541,17 @@ def export_excel_v2(results, year, month, config,
                            if k > 0 and (results[t][q]['mip_info'].get('shift_coverage', {})
                                          .get(s, {}).get('company')) == 'outsource'})
             E, K = g['ihtiyac_kisi_slot'].sum(), g['eksik_kisi_slot'].sum()
+            F = g['fazla_kisi_slot'].sum()
+            _kar = g['karsilanan_cagri'].sum(min_count=1)
+            _kmy = g['karsilanamayan_cagri'].sum(min_count=1)
             hafta_s.append({
                 'kuyruk': q, 'hafta': h, 'ilk_gun': g['tarih'].min(), 'son_gun': g['tarih'].max(),
                 'gun_sayisi': len(g), 'kisi_gun': int(g['toplam'].sum()),
-                'eksik_kisi_slot': int(K), 'kapsama_%': (1 - K / E) if E else None,
+                'eksik_kisi_slot': int(K), 'fazla_kisi_slot': int(F),
+                'RR': (1 - K / E) if E else None,
+                'karsilanamayan_cagri': (None if pd.isna(_kmy) else int(_kmy)),
+                'AHT_RR': (None if pd.isna(_kar) or (_kar + _kmy) <= 0
+                           else _kar / (_kar + _kmy)),
                 'outsource_kullanilan': int(g['outsource'].sum()), 'outsource_butce': ag,
                 'part_time_kisi_gun': int(g['part_time'].sum()),
                 'outsource_hafta_ici_set': len(seti), 'outsource_vardiyalari': ', '.join(seti),
@@ -1491,27 +1569,78 @@ def export_excel_v2(results, year, month, config,
         df_sur_ozet = pd.DataFrame(columns=['kuyruk', 'sirket', 'saat', 'vardiya',
                                             'eklenen_kisi_gun', 'gun_sayisi'])
 
+    # ACIKLAMA (2026-10-14): planlama dışından okuyan herkes anlasın diye sade dil
     aciklama = pd.DataFrame([
-        ('gun_ozet', 'RR', 'Σ sahadaki ÷ Σ ihtiyaç (Erlang-ağırlıklı). Fazla olan saat açık saati ÖRTER'),
-        ('gun_ozet', 'kapsama_%', '1 − Σ eksik ÷ Σ ihtiyaç. Örtmez → asıl hizmet ölçüsü (<%99 kırmızı)'),
-        ('gun_ozet', 'eksik_kisi_slot', 'Σ max(0, ihtiyaç − sahadaki) — yarım saat × kişi'),
-        ('gun_ozet', 'acik_slot', 'sahadaki < ihtiyaç olan yarım saat sayısı'),
-        ('gun_ozet', 'Kap_RR', 'iş birimi kapasitesi ÷ gelen çağrı (15 çağrı/saat, mola kayıpları düşülmüş)'),
-        ('slot_detay', 'ihtiyac', 'Erlang ihtiyacı (shrinkage dahil), sarkan düşülmemiş'),
-        ('slot_detay', 'MIP1 / RR1', 'dağıtım (surplus) ÖNCESİ sahadaki kişi / oranı'),
-        ('slot_detay', 'MIP2 / RR2', 'son plan: o gün giren + önceki günden sarkan + PT'),
-        ('vardiya_plani', 'tarih kolonları', 'o gün o vardiyaya yazılan kişi'),
-        ('surplus_dagitimi', 'sol tablo', 'gün × vardiya: MIP planı (mip_once) + dağıtıcının eklediği (eklenen) = son plan'),
-        ('surplus_dagitimi', 'sağ tablo', 'vardiya bazında ay toplamı eklenen kişi-gün'),
-        ('surplus_dagitimi', 'not', 'inhouse eki Pzt-Cum her gün AYNI (haftalık tek dağıtım); dağıtıcı slot_cap bilmez'),
-        ('hafta_ozet', 'outsource_hafta_ici_set', 'hafta içi kullanılan outsource vardiya sayısı (haftalık sabit set)'),
-        ('renk', 'RR / Kap_RR', '<%100 kırmızı · %100-105 yeşil · >%105 mavi'),
-    ], columns=['sayfa', 'kolon', 'anlam'])
+        # ---- üç oran: ne soruyor? ----
+        ('ÜÇ ORAN', 'RR', 'Planda yeterli KİŞİ var mı?',
+         'Her yarım saat için Erlang hesabı "çağrılar en geç 30 sn içinde açılsın diye kaç kişi lazım" der (mola/toplantı payı dahil). '
+         'RR = bu ihtiyacın yüzde kaçının sahada olduğu. Bir saatteki fazla kişi başka saatteki eksiği kapatmaz.'),
+        ('ÜÇ ORAN', 'Kap_RR', 'Gelen ÇAĞRININ yüzde kaçını karşılayabiliriz? (iş birimi yöntemi)',
+         'Sahadaki kişiden rapor/mola kayıpları düşülür, kalan her kişi saatte 15 çağrı açar sayılır. '
+         'Bu kapasite gelen çağrıyla karşılaştırılır. Bir saatteki fazla kapasite başka saatteki açığı kapatmaz.'),
+        ('ÜÇ ORAN', 'AHT_RR', 'Kap_RR ile AYNI soru, ama 15 yerine bizim AHT\'miz',
+         'Kişi başı açılan çağrı = 1800 sn (yarım saat) ÷ o yarım saatin ortalama konuşma süresi (AHT). '
+         'Gerisi Kap_RR ile aynı. Kişilerin hiç boşta beklemediği varsayılır → biraz iyimserdir.'),
+        ('ÜÇ ORAN', 'nasıl okunur',
+         'RR düşük, Kap_RR/AHT_RR %100 → çağrılar açılır ama bir kısmı 30 sn\'den uzun bekler. '
+         'Kap_RR/AHT_RR %100\'ün altında → kapasite yetmiyor, çağrı kaçar.', ''),
+        ('ÖRNEK', '10:00 yarım saati',
+         '3.300 çağrı geliyor, ortalama konuşma 230 sn. Sahada 450 kişi var, 22\'si mola/toplantıda → 428 kişi telefonda. Erlang 474 kişi istiyor.', ''),
+        ('ÖRNEK', 'RR', '450 ÷ 474 = %95', '30 sn hedefi için 24 kişi eksik'),
+        ('ÖRNEK', 'Kap_RR', '428 kişi × 7,5 çağrı = 3.210 çağrı → 3.210 ÷ 3.300 = %97', '90 çağrı açıkta kalır'),
+        ('ÖRNEK', 'AHT_RR', '428 kişi × 1800 sn ÷ 230 sn = 3.350 çağrı → 3.300\'ün hepsi → %100', 'konuşma süresi yetiyor'),
+        ('ÖRNEK', 'gün toplamı (neden "kapatmaz")',
+         '10:00\'da 100 çağrı / 120 kapasite, 22:00\'de 100 çağrı / 80 kapasite.',
+         'Doğru: (100 + 80) ÷ 200 = %90. 10:00\'daki 20 boş kapasite 22:00\'deki 20 çağrıyı açamaz; toplayıp %100 demek yanlış olur.'),
+        # ---- gun_ozet ----
+        ('gun_ozet', 'cagri', 'tahmin edilen gelen çağrı', 'günün toplamı'),
+        ('gun_ozet', 'inhouse / outsource / part_time / toplam', 'o gün işe başlayan kişi sayısı', 'önceki günden sarkan gece vardiyası dahil değil'),
+        ('gun_ozet', 'outsource_%', 'outsource\'un toplam kişiye oranı', ''),
+        ('gun_ozet', 'ihtiyac_kisi_slot', 'Erlang\'ın istediği kişi, tüm yarım saatler toplamı', '1 kişi bütün gün çalışırsa 18 yarım saat (9 saat) sayılır'),
+        ('gun_ozet', 'eksik_kisi_slot', 'ihtiyacın altında kalan kişi, yarım saatler toplamı', 'her yarım saatte: ihtiyaç − sahadaki (eksik varsa)'),
+        ('gun_ozet', 'fazla_kisi_slot', 'ihtiyacın üstündeki kişi, yarım saatler toplamı', 'RR\'yi artırmaz'),
+        ('gun_ozet', 'RR', 'yukarıdaki "ÜÇ ORAN"a bak', '1 − eksik ÷ ihtiyaç  ·  %99 altı kırmızı'),
+        ('gun_ozet', 'acik_slot', 'kaç yarım saatte ihtiyacın altındayız', ''),
+        ('gun_ozet', 'Kap_RR', 'yukarıdaki "ÜÇ ORAN"a bak', '%99 altı kırmızı'),
+        ('gun_ozet', 'ort_aht_sn', 'günün ortalama konuşma süresi (sn)', 'yoğun saatler daha çok ağırlık alır'),
+        ('gun_ozet', 'karsilanan_cagri', 'AHT\'ye göre açılabilen çağrı', 'her yarım saatte: gelen ile kapasiteden küçük olanı'),
+        ('gun_ozet', 'karsilanamayan_cagri', 'AHT\'ye göre açılamayan çağrı', 'her yarım saatte: gelen − kapasite (kapasite yetmiyorsa)'),
+        ('gun_ozet', 'AHT_RR', 'yukarıdaki "ÜÇ ORAN"a bak', 'karşılanan ÷ gelen  ·  %99 altı kırmızı'),
+        # ---- slot_detay ----
+        ('slot_detay', 'satır', 'her gün × kuyruk × yarım saat', ''),
+        ('slot_detay', 'ihtiyac', 'Erlang\'ın o yarım saat için istediği kişi', 'mola/toplantı payı dahil'),
+        ('slot_detay', 'MIP1', 'fazla kadro dağıtılmadan ÖNCE sahadaki kişi', 'modelin "en az bu kadar yeter" planı'),
+        ('slot_detay', 'MIP2', 'son planda sahadaki kişi', 'o gün başlayan + önceki günden sarkan gece + part-time'),
+        ('slot_detay', 'MIP1/Erl · MIP2/Erl', 'sahadaki ÷ ihtiyaç, o yarım saat için', '%100 üstü = fazla kişi var (gün RR\'si DEĞİL)'),
+        ('slot_detay', 'Kap_RR', '15 çağrı/saat ile kapasite ÷ gelen çağrı', 'tavansız: %100 üstü = boş kapasite'),
+        ('slot_detay', 'eksik', 'ihtiyacın altında kalan kişi', ''),
+        ('slot_detay', 'aht_sn', 'o yarım saatin ortalama konuşma süresi', 'alt kuyrukların AHT\'si, çağrı paylarına göre ağırlıklı (aht_detay)'),
+        ('slot_detay', 'net_agent', 'telefonda olan kişi', 'MIP2 − rapor etkisi − kapasite kaybı'),
+        ('slot_detay', 'aht_kapasite_cagri', 'o yarım saatte açılabilecek çağrı', 'net_agent × 1800 sn ÷ aht_sn'),
+        ('slot_detay', 'AHT_kap/Çağrı', 'AHT kapasitesi ÷ gelen çağrı', 'tavansız: %100 üstü = boş kapasite'),
+        # ---- aht_detay ----
+        ('aht_detay', 'X_cagri / X_aht', 'alt kuyruk X\'in o yarım saatteki çağrısı ve konuşma süresi', 'AHT saatlik veriden gelir'),
+        ('aht_detay', 'agirlikli_aht_sn', 'kuyruğun o yarım saatteki ortalama konuşma süresi', 'çok çağrı alan alt kuyruk daha çok ağırlık alır. Örn. A: 70 çağrı × 200 sn, B: 30 çağrı × 300 sn → 230 sn'),
+        # ---- hafta_ozet ----
+        ('hafta_ozet', 'kisi_gun', 'haftada çalışan toplam kişi-gün', ''),
+        ('hafta_ozet', 'RR / AHT_RR', 'haftanın oranları', 'günlerin eksik/karşılanamayan toplamından; fazla gün eksik günü kapatmaz'),
+        ('hafta_ozet', 'outsource_kullanilan / outsource_butce', 'kullanılan outsource kişi-gün / haftalık bütçe', ''),
+        ('hafta_ozet', 'outsource_hafta_ici_set', 'hafta içi kullanılan outsource vardiya sayısı', 'outsource her gün aynı vardiya setiyle çalışır, kişi sayısı günlük değişir'),
+        # ---- diğer sayfalar ----
+        ('Vardiya Planı', 'düzen', 'her hafta bir blok, günler yan yana, satırda vardiya saatleri', 'Toplam = inhouse + outsource (part-time hariç) · Toplam kısmi = part-time'),
+        ('vardiya_liste', 'tarih kolonları', 'aynı plan, uzun liste halinde', 'filtre/pivot için'),
+        ('surplus_dagitimi', 'sol tablo', 'model planından sonra kalan kadronun hangi vardiyaya eklendiği', 'mip_once (model) + eklenen = son_plan'),
+        ('surplus_dagitimi', 'sağ tablo', 'vardiya bazında ay boyunca eklenen kişi-gün', ''),
+        ('surplus_dagitimi', 'not', 'inhouse eki Pzt-Cum her gün aynı', 'dağıtım saat tavanlarını (slot_cap) bilmez'),
+        ('renk', 'RR · AHT_RR · gün Kap_RR', '%99 altı kırmızı, diğer yeşil', ''),
+        ('renk', 'slot_detay oranları', '%100 altı kırmızı · %100-105 yeşil · %105 üstü mavi', ''),
+    ], columns=['sayfa', 'kolon', 'ne_gosterir', 'nasil_hesaplanir'])
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as xl:
-        for ad, df in (('gun_ozet', df_gun), ('vardiya_plani', df_var),
-                       ('slot_detay', df_slot), ('hafta_ozet', df_hafta),
-                       ('surplus_dagitimi', df_sur), ('ACIKLAMA', aciklama)):
+        for ad, df in (('gun_ozet', df_gun), ('slot_detay', df_slot),
+                       ('hafta_ozet', df_hafta), ('surplus_dagitimi', df_sur),
+                       ('vardiya_liste', df_var), ('aht_detay', df_aht_det),
+                       ('ACIKLAMA', aciklama)):
             (df if len(df) else pd.DataFrame({'bilgi': ['veri yok']})) \
                 .to_excel(xl, sheet_name=ad, index=False)
 
@@ -1521,9 +1650,9 @@ def export_excel_v2(results, year, month, config,
                                  startcol=len(df_sur.columns) + 2)
         KIR, YES, MAV = (_P('solid', fgColor='FFC7CE'), _P('solid', fgColor='C6EFCE'),
                          _P('solid', fgColor='BDD7EE'))
-        YUZDE = {'outsource_%', 'kapsama_%', 'RR', 'Kap_RR', 'RR1', 'RR2'}
-        DONDUR = {'surplus_dagitimi': 'D2', 'gun_ozet': 'D2', 'vardiya_plani': 'E2', 'slot_detay': 'E2',
-                  'hafta_ozet': 'C2', 'ACIKLAMA': 'A2'}
+        YUZDE = {'outsource_%', 'RR', 'AHT_RR', 'Kap_RR', 'AHT_kap/Çağrı', 'MIP1/Erl', 'MIP2/Erl'}
+        DONDUR = {'surplus_dagitimi': 'D2', 'gun_ozet': 'D2', 'vardiya_liste': 'E2', 'slot_detay': 'E2',
+                  'hafta_ozet': 'C2', 'aht_detay': 'E2', 'ACIKLAMA': 'A2'}
         for ws in xl.book.worksheets:
             bas = [c.value for c in ws[1]]
             for c in ws[1]:
@@ -1533,8 +1662,14 @@ def export_excel_v2(results, year, month, config,
                 ws.auto_filter.ref = ws.dimensions
             for j, h in enumerate(bas, 1):
                 L = _col(j)
-                ws.column_dimensions[L].width = (60 if h in ('anlam', 'outsource_vardiyalari')
+                ws.column_dimensions[L].width = (70 if h in ('ne_gosterir', 'nasil_hesaplanir',
+                                                             'outsource_vardiyalari')
+                                                 else 24 if ws.title == 'ACIKLAMA'
                                                  else max(9, min(18, len(str(h)) + 2)))
+                if ws.title == 'ACIKLAMA':
+                    from openpyxl.styles import Alignment as _Al
+                    for r in range(2, ws.max_row + 1):
+                        ws.cell(row=r, column=j).alignment = _Al(wrap_text=True, vertical='top')
                 if h not in YUZDE:
                     continue
                 for r in range(2, ws.max_row + 1):
@@ -1542,12 +1677,123 @@ def export_excel_v2(results, year, month, config,
                     v = cell.value
                     if not isinstance(v, (int, float)):
                         continue
-                    cell.number_format = '0.0%' if h == 'kapsama_%' else '0%'
-                    if h == 'kapsama_%':
-                        if v < 0.99:
-                            cell.fill = KIR
-                    elif h in ('RR', 'Kap_RR', 'RR1', 'RR2'):
+                    # RR (tavanlı) ≤ %100 → 0.0%, <%99 kırmızı; slot MIP/Erl ve Kap_RR eski renk
+                    # gün/hafta oranları tavanlı (≤%100); slot_detay'dakiler tavansız
+                    _tav = h in ('RR', 'AHT_RR') or (h == 'Kap_RR' and ws.title != 'slot_detay')
+                    cell.number_format = '0.0%' if _tav else '0%'
+                    if _tav:
+                        cell.fill = KIR if v < 0.99 else YES
+                    elif h in ('Kap_RR', 'AHT_kap/Çağrı', 'MIP1/Erl', 'MIP2/Erl'):
                         cell.fill = KIR if v < 1.0 else (YES if v <= 1.05 else MAV)
+
+        # ---- VARDİYA PLANI — eski haftalık düzen, BİRLEŞTİRME YOK ----
+        # Eski export_monthly_plan_to_excel düzeni: her hafta bir blok, günler yan
+        # yana, her gün KOLON SAYISI kadar kolon. Tarih başlığı bloğun ilk
+        # hücresine yazılır, blok aynı renge boyanır (birleşik görünür ama
+        # merge_cells YOK → Excel onarım uyarısı vermez). PT artık hafta içinde
+        # de çalıştığı için ayrı blok yerine her kuyruğun yanında kolon.
+        _wsv = xl.book.create_sheet('Vardiya Planı', 0)
+        _GN = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Pzr']
+        _ALT = ['SHIFT', 'kitle inhouse', 'kitle outsource', 'kitle PT', 'gold', 'gold PT',
+                'kurumsal', 'kurumsal PT', 'Toplam', 'Toplam kısmi']
+        _NK = len(_ALT)
+        _f_tarih = _P('solid', fgColor='D9E1F2')
+        _f_bas = _P('solid', fgColor='1F4E78')
+        _f_top = _P('solid', fgColor='E7E6E6')
+        from openpyxl.styles import Alignment as _A, Border as _B, Side as _S
+        _ince = _S(border_style='thin', color='888888')
+        _brd = _B(left=_ince, right=_ince, top=_ince, bottom=_ince)
+        _ort = _A(horizontal='center', vertical='center')
+
+        def _say(ds):
+            """o günün {başlangıç: {(kuyruk, şirket): kişi}} + başlangıç → bitiş etiketi"""
+            out, bit = {}, {}
+            for q in queues:
+                rq = (results.get(ds) or {}).get(q)
+                if not rq:
+                    continue
+                mi = rq.get('mip_info', {}) or {}
+                sc = mi.get('shift_coverage', {}) or {}
+                for sh, k in (mi.get('assignments') or {}).items():
+                    if k <= 0:
+                        continue
+                    c = sc.get(sh, {})
+                    st, co = c.get('start', '?'), c.get('company', 'inhouse')
+                    out.setdefault(st, {})
+                    out[st][(q, co)] = out[st].get((q, co), 0) + k
+                    bit.setdefault(st, {}).setdefault(co, set()).add(c.get('end', '?'))
+            return out, bit
+
+        def _satir(cnt):
+            g = lambda q, co: cnt.get((q, co), 0)
+            k_in, k_out, k_pt = g('kitle', 'inhouse'), g('kitle', 'outsource'), g('kitle', 'part_time')
+            g_in = g('gold', 'inhouse') + g('gold', 'outsource')
+            u_in = g('kurumsal', 'inhouse') + g('kurumsal', 'outsource')
+            g_pt, u_pt = g('gold', 'part_time'), g('kurumsal', 'part_time')
+            return [k_in, k_out, k_pt, g_in, g_pt, u_in, u_pt,
+                    k_in + k_out + g_in + u_in, k_pt + g_pt + u_pt]
+
+        _ilk = pd.to_datetime(tarihler[0])
+        _son = pd.to_datetime(tarihler[-1])
+        _pzt = _ilk - pd.Timedelta(days=_ilk.weekday())
+        _row = 1
+        while _pzt <= _son:
+            hafta = [(_pzt + pd.Timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
+            _pzt += pd.Timedelta(days=7)
+            gun_v = {ds: _say(ds) for ds in hafta}
+            baslar = sorted({st for ds in hafta for st in gun_v[ds][0]})
+            if not baslar:
+                continue
+            # vardiya etiketi: başlangıç-bitiş (inhouse bitişi öncelikli)
+            etiket = {}
+            for st in baslar:
+                bits = {}
+                for ds in hafta:
+                    for co, ss in gun_v[ds][1].get(st, {}).items():
+                        bits.setdefault(co, set()).update(ss)
+                for co in ('inhouse', 'outsource', 'part_time'):
+                    if bits.get(co):
+                        etiket[st] = f"{st}-{sorted(bits[co])[0]}"
+                        break
+                else:
+                    etiket[st] = st
+            # tarih başlığı + alt başlık
+            for i, ds in enumerate(hafta):
+                c0 = i * _NK + 1
+                for j in range(_NK):
+                    cc = _wsv.cell(row=_row, column=c0 + j)
+                    cc.fill = _f_tarih
+                    hc = _wsv.cell(row=_row + 1, column=c0 + j, value=_ALT[j])
+                    hc.fill, hc.font, hc.alignment, hc.border = (
+                        _f_bas, _F(color='FFFFFF', bold=True, size=9), _A(horizontal='center',
+                        vertical='center', wrap_text=True), _brd)
+                tc = _wsv.cell(row=_row, column=c0,
+                               value=f"{_GN[i]} {pd.to_datetime(ds).strftime('%d.%m.%Y')}")
+                tc.font = _F(bold=True, size=11)
+            _row += 2
+            # vardiya satırları
+            toplam = {ds: [0] * (_NK - 1) for ds in hafta}
+            for st in baslar:
+                for i, ds in enumerate(hafta):
+                    c0 = i * _NK + 1
+                    v = _satir(gun_v[ds][0].get(st, {}))
+                    toplam[ds] = [a + b for a, b in zip(toplam[ds], v)]
+                    for j, val in enumerate([etiket[st]] + v):
+                        cc = _wsv.cell(row=_row, column=c0 + j, value=val)
+                        cc.alignment, cc.border = _ort, _brd
+                _row += 1
+            # toplam satırı
+            for i, ds in enumerate(hafta):
+                c0 = i * _NK + 1
+                for j, val in enumerate(['Toplam'] + toplam[ds]):
+                    cc = _wsv.cell(row=_row, column=c0 + j, value=val)
+                    cc.fill, cc.font, cc.alignment, cc.border = _f_top, _F(bold=True), _ort, _brd
+            _row += 3
+        for i in range(7):
+            _wsv.column_dimensions[_col(i * _NK + 1)].width = 12
+            for j in range(1, _NK):
+                _wsv.column_dimensions[_col(i * _NK + 1 + j)].width = 9
+        _wsv.freeze_panes = 'B1'
 
     print(f"✓ Excel (v2, birleştirme yok): {output_path}")
     print(f"  gun_ozet {len(df_gun)} · vardiya_plani {len(df_var)} · "
@@ -1564,5 +1810,5 @@ def export_excel_v2(results, year, month, config,
 # koşudan bellidir. Ör. vardiya_plani_2026_10_sabit_sur1_esit0_rrg1_k50000-50000_gap0.03.xlsx
 _XLSX = CACHE_FILE.replace("monthly_unified", "vardiya_plani").replace(".pkl", ".xlsx")
 export_excel_v2(results, YEAR, MONTH, CONFIG, queues=('kitle', 'gold', 'kurumsal'),
-                output_path=_XLSX)
+                output_path=_XLSX, df_forecast=df_forecast)   # df_forecast → AHT_RR
 
