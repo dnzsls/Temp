@@ -1,5 +1,4 @@
-import os
-print("çalışma klasörü:", os.getcwd())
-print("dosya var mı:", os.path.exists(PKL_PATH), "→", PKL_PATH)
-with open(PKL_PATH, "rb") as f:
-    results = pickle.load(f)
+sabah = len(sabah_agents)
+print("agent:", len(AGENTS), "| sabahçı:", sabah, "| 15:00'a uygun:", len(AGENTS) - sabah)
+_t = df_tam.assign(sabah=pd.to_numeric(df_tam.get("sabah_calisir_flg", 0), errors="coerce").fillna(0))
+print(_t.groupby("takim_ad")["sabah"].agg(["count", "sum"]).sort_values("sum", ascending=False).head(15))
