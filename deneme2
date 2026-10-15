@@ -158,20 +158,51 @@ def _sarkan_disaridan(gun_result, queue):
             out[t] = out.get(t, 0) + n
     return out
 
+def _onceki_oku(df_onceki, kaynak, config, queues):
+    """df_onceki → kaynak günün satırları + _q (kuyruk) · _v (baş, bitiş) · _n (kişi) · _pt.
+
+    df_onceki: working_date · line_based_main_group · vardiya · kismi_flg · kisi_sayisi
+    Saat olmayan vardiya değerleri (off/izin) ve başka günler atılır.
+    """
+    import re
+    d = df_onceki.copy()
+    _kol = {c.strip().lower(): c for c in d.columns}
+    for gerek in ('working_date', 'line_based_main_group', 'vardiya', 'kismi_flg', 'kisi_sayisi'):
+        if gerek not in _kol:
+            raise ValueError(f"df_onceki'de '{gerek}' kolonu yok (var: {list(d.columns)})")
+    d = d.rename(columns={v: k for k, v in _kol.items()})
+    d['working_date'] = pd.to_datetime(d['working_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    d = d[d['working_date'] == kaynak].copy()
+    _qmap = {}
+    for q in queues:
+        _qmap[str(config['queues'][q].get('actual_name', q)).lower()] = q
+        _qmap[q.lower()] = q
+    d['_q'] = d['line_based_main_group'].astype(str).str.strip().str.lower().map(_qmap)
+
+    def _saat(x):
+        m = re.fullmatch(r'\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*', str(x))
+        if not m:
+            return None                       # off / izin → çalışmıyor
+        h1, m1, h2, m2 = (int(v) for v in m.groups())
+        return (f"{h1 % 24:02d}:{m1:02d}", f"{h2 % 24:02d}:{m2:02d}")
+
+    d['_v'] = d['vardiya'].map(_saat)
+    d['_n'] = pd.to_numeric(d['kisi_sayisi'], errors='coerce').fillna(0).astype(int)
+    d['_pt'] = pd.to_numeric(d['kismi_flg'], errors='coerce').fillna(0) == 1
+    return d[d['_q'].notna() & d['_v'].notna() & (d['_n'] > 0)]
+
 def devrik_dagilim(df_onceki, year, month, config=CONFIG_UNIFIED,
                    queues=('kitle', 'kurumsal', 'gold'), verbose=True):
     """Devrik hafta girdisi: önceki ayın SON günü çalışan inhouse agentların
     vardiya dağılımı (2026-10-14).
 
-    df_onceki: working_date · line_based_main_group · vardiya · kismi_flg · kisi_sayisi
     Yalnız ayın 1'i Salı-Cuma ise üretilir (Pzt → devralınacak hafta yok,
     Cmt/Pzr → hafta sonu takım sürekliliği sorunu değil). Devrik günler =
     ayın 1'i .. ilk Cuma. Kaynak = önceki ayın son günü (ör. 30 Eylül).
-    PT (KISMI_FLG=1) ve saat olmayan vardiya değerleri (off/izin) sayılmaz.
+    PT (KISMI_FLG=1) sayılmaz.
 
     Returns: {kuyruk: {'gunler', 'kaynak_gun', 'vardiya': {(baş, bitiş): kişi}}} | None
     """
-    import re
     ilk = dt.date(year, month, 1)
     if ilk.weekday() not in (1, 2, 3, 4):
         if verbose:
@@ -183,45 +214,42 @@ def devrik_dagilim(df_onceki, year, month, config=CONFIG_UNIFIED,
         print(f"⚠ Devrik hafta ({gunler[0]}..{gunler[-1]}) ama df_onceki YOK → tahmine göre planlanır")
         return None
 
-    d = df_onceki.copy()
-    _kol = {c.strip().lower(): c for c in d.columns}
-    for gerek in ('working_date', 'line_based_main_group', 'vardiya', 'kismi_flg', 'kisi_sayisi'):
-        if gerek not in _kol:
-            raise ValueError(f"df_onceki'de '{gerek}' kolonu yok (var: {list(d.columns)})")
-    d = d.rename(columns={v: k for k, v in _kol.items()})
-    d['working_date'] = pd.to_datetime(d['working_date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    d = d[d['working_date'] == kaynak]
-    d = d[pd.to_numeric(d['kismi_flg'], errors='coerce').fillna(0) != 1]     # PT sayılmaz
-    _qmap = {}
-    for q in queues:
-        _qmap[str(config['queues'][q].get('actual_name', q)).lower()] = q
-        _qmap[q.lower()] = q
-    d['_q'] = d['line_based_main_group'].astype(str).str.strip().str.lower().map(_qmap)
-
-    def _saat(x):
-        m = re.fullmatch(r'\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*', str(x))
-        if not m:
-            return None                       # off / izin / off_t → çalışmıyor
-        h1, m1, h2, m2 = (int(v) for v in m.groups())
-        return (f"{h1 % 24:02d}:{m1:02d}", f"{h2 % 24:02d}:{m2:02d}")
-
-    d['_v'] = d['vardiya'].map(_saat)
+    d = _onceki_oku(df_onceki, kaynak, config, queues)
+    d = d[~d['_pt']]                          # PT sayılmaz
     out = {}
     for q in queues:
-        g = d[(d['_q'] == q) & d['_v'].notna()]
+        g = d[d['_q'] == q]
         if len(g) == 0:
             if verbose:
                 print(f"  ⚠ devrik {q}: {kaynak} için çalışan agent yok → {q} tahmine göre")
             continue
-        vard = (g.assign(_n=pd.to_numeric(g['kisi_sayisi'], errors='coerce').fillna(0))
-                .groupby('_v')['_n'].sum().astype(int).to_dict())
-        vard = {k: v for k, v in vard.items() if v > 0}
+        vard = g.groupby('_v')['_n'].sum().astype(int).to_dict()
         out[q] = {'gunler': gunler, 'kaynak_gun': kaynak, 'vardiya': vard}
         if verbose:
             print(f"▶ Devrik {q}: {gunler[0]}..{gunler[-1]} ← {kaynak} planı, "
                   f"{sum(vard.values())} inhouse / {len(vard)} vardiya: "
                   + ', '.join(f"{a}-{b} {k}" for (a, b), k in sorted(vard.items())))
     return out or None
+
+def onceki_gece_df(df_onceki, year, month, config=CONFIG_UNIFIED,
+                   queues=('kitle', 'kurumsal', 'gold')):
+    """Önceki ayın son günü GECE YARISINI AŞAN inhouse/PT vardiyaları (2026-10-14).
+
+    df_onceki'den (ör. 30 Eylül 17:00-01:00) → gece_sarkan_gun() girdisi:
+    {kuyruk: [(baş, bitiş, 'inhouse'|'part_time', kişi), ...]}. Ayın günü ne
+    olursa olsun gerekir (1 Ekim 00:00-02:00 bu kişilerle dolu). Outsource
+    df_onceki'de YOK → HÜCRE 6 ONCEKI_AY_GECE'den elle.
+    """
+    out = {q: [] for q in queues}
+    if df_onceki is None or len(df_onceki) == 0:
+        return out
+    kaynak = (dt.date(year, month, 1) - dt.timedelta(days=1)).isoformat()
+    d = _onceki_oku(df_onceki, kaynak, config, queues)
+    # bitiş < başlangıç ve bitiş 00:00 değil → ertesi güne sarkıyor
+    d = d[d['_v'].map(lambda v: v[1] < v[0] and v[1] != '00:00')]
+    for (q, v, pt), g in d.groupby(['_q', '_v', '_pt']):
+        out[q].append((v[0], v[1], 'part_time' if pt else 'inhouse', int(g['_n'].sum())))
+    return out
 
 def gece_sarkan_gun(vardiyalar):
     """ELLE GİRİŞ → `onceki_ay_son_gun` şekli (önceki ayın SON günü).
@@ -420,14 +448,10 @@ _gap = (CONFIG.get('solver', {}).get('gap_rel_by_queue', {}) or {}).get(
 DEVRIK = devrik_dagilim(globals().get('df_onceki'), YEAR, MONTH, config=CONFIG,
                         queues=('kitle', 'kurumsal', 'gold'))
 
-# PT vardiyaları da ada girer (2026-10-14): '09:00-13:00' → '0913',
-# '09:30-13:30' → '09301330'. Saat değişince yeni pickle oluşur, eski plan
-# sessizce yüklenmez.
+# PT vardiya SAYISI da ada girer (2026-10-14): 3 vardiya → _pt3, PT kapalı → _pt0.
+# Vardiya eklenince/çıkınca yeni pickle oluşur. Saatlerin kendisi CONFIG sayfasında.
 _ptc = CONFIG.get('part_time', {}) or {}
-_sa = lambda t: t.strip()[:2] + ('' if t.strip()[3:5] == '00' else t.strip()[3:5])
-_pt_etiket = ('.'.join(''.join(_sa(t) for t in v.split('-'))
-                       for v in sorted(_ptc.get('shifts', [])))
-              if _ptc.get('enabled', False) else 'yok')
+_pt_etiket = len(_ptc.get('shifts', [])) if _ptc.get('enabled', False) else 0
 CACHE_FILE = (f"monthly_unified_{YEAR}_{MONTH:02d}"
               f"_{_hv.get('inhouse_mod', 'sabit')}"
               f"_sur{int(bool(_hv.get('inhouse_surplus', True)))}"
@@ -439,35 +463,32 @@ CACHE_FILE = (f"monthly_unified_{YEAR}_{MONTH:02d}"
               f"{'_dv1' if DEVRIK else ''}.pkl")     # devrik hafta uygulandıysa ayrı pickle
 print(f"cache dosyası: {CACHE_FILE}")
 
-# ---- ÖNCEKİ AYIN SON GÜNÜ ----
+# ---- ÖNCEKİ AYIN SON GÜNÜ — gece sarkanı (2026-10-14) ----
 # Ayın 1'inin gece slotlarında sahada olan kişi ÖNCEKİ ayın son akşamının
-# vardiyasıdır. Verilmezse ayın 1'i gece EKSİK kadro görünür.
-#   1) önceki ayın pickle'ı varsa ORADAN okunur (tercih edilen)
-#   2) yoksa aşağıdaki tablodan elle kurulur
-# SADECE gece yarısını aşan vardiyalar yazılır; satır: (baş, bitiş, şirket, kişi)
+# vardiyasıdır (ör. 30 Eylül 17:00-01:00). Verilmezse 1'i gece EKSİK görünür.
+#   inhouse / PT : df_onceki'den OTOMATİK (HÜCRE 2)
+#   outsource    : df_onceki'de yok → aşağıya ELLE. Inhouse YAZMA (çift sayılır).
+# SADECE gece yarısını aşan vardiyalar; satır: (baş, bitiş, 'outsource', kişi)
 ONCEKI_AY_GECE = {
     'kitle':    [],      # örn: ('19:00', '03:30', 'outsource', 14),
     'kurumsal': [],
     'gold':     [],
 }
 
-_oy, _oa = (YEAR - 1, 12) if MONTH == 1 else (YEAR, MONTH - 1)
-_onc_cache = f"monthly_unified_{_oy}_{_oa:02d}.pkl"
 _onc_son = (dt.date(YEAR, MONTH, 1) - dt.timedelta(days=1)).isoformat()
-
-ONCEKI_AY_SON_GUN = None
-if os.path.exists(_onc_cache):
-    with open(_onc_cache, 'rb') as f:
-        ONCEKI_AY_SON_GUN = pickle.load(f).get(_onc_son)
-    print(f"▶ Önceki ay son günü PICKLE'dan: {_onc_son}"
-          if ONCEKI_AY_SON_GUN else
-          f"⚠ {_onc_cache} var ama {_onc_son} içinde yok")
-if ONCEKI_AY_SON_GUN is None and any(ONCEKI_AY_GECE.values()):
-    ONCEKI_AY_SON_GUN = gece_sarkan_gun(ONCEKI_AY_GECE)
-    print(f"▶ Önceki ay son günü ELLE: {_onc_son}")
-if ONCEKI_AY_SON_GUN is None:
-    print(f"⚠ Önceki ay son günü YOK ({_onc_son}) → ayın 1'i gece "
-          f"slotlarında sarkan kadro sayılmaz")
+_gece = onceki_gece_df(globals().get('df_onceki'), YEAR, MONTH, config=CONFIG,
+                       queues=('kitle', 'kurumsal', 'gold'))
+for _q, _l in ONCEKI_AY_GECE.items():
+    _gece.setdefault(_q, []).extend(_l)
+ONCEKI_AY_SON_GUN = gece_sarkan_gun(_gece) if any(_gece.values()) else None
+if ONCEKI_AY_SON_GUN:
+    for _q, _l in _gece.items():
+        if _l:
+            print(f"▶ {_onc_son} gece sarkanı {_q}: "
+                  + ', '.join(f"{a}-{b} {c} {k}" for a, b, c, k in _l))
+else:
+    print(f"⚠ {_onc_son} gece sarkanı YOK (df_onceki'de gece yarısını aşan vardiya yok, "
+          f"ONCEKI_AY_GECE boş) → ayın 1'i gece slotlarında sarkan kadro sayılmaz")
 
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, 'rb') as f:
@@ -2046,7 +2067,7 @@ def export_excel_v2(results, year, month, config,
 # Eski düzen gerekirse: export_monthly_plan_to_excel(results=results, year=YEAR,
 #     month=MONTH, cfg_weekday=CONFIG, cfg_weekend=CONFIG, queues=('kitle','gold','kurumsal'))
 # Excel adı pickle (CACHE_FILE) ile AYNI ayar etiketlerini taşır → hangi Excel hangi
-# koşudan bellidir. Ör. vardiya_plani_2026_10_sabit_sur1_esit0_rrg1_k50000-50000_gap0.03_pt0913.1014.1923.xlsx
+# koşudan bellidir. Ör. vardiya_plani_2026_10_sabit_sur1_esit0_rrg1_k50000-50000_gap0.03_pt5.xlsx
 _XLSX = CACHE_FILE.replace("monthly_unified", "vardiya_plani").replace(".pkl", ".xlsx")
 export_excel_v2(results, YEAR, MONTH, CONFIG, queues=('kitle', 'gold', 'kurumsal'),
                 output_path=_XLSX, df_forecast=df_forecast,   # df_forecast → AHT_RR
