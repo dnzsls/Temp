@@ -1,2 +1,5 @@
-CONFIG['haftalik_vardiya']['inhouse_mod'] = 'gunluk'      # 'sabit' = Pzt–Cum her gün aynı kişi
-CONFIG['haftalik_vardiya']['inhouse_surplus'] = True      # sadece gunluk modda anlamlı
+import os
+print("çalışma klasörü:", os.getcwd())
+print("dosya var mı:", os.path.exists(PKL_PATH), "→", PKL_PATH)
+with open(PKL_PATH, "rb") as f:
+    results = pickle.load(f)
