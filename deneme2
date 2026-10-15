@@ -360,6 +360,23 @@ def calculate_erlang_all(df_calls_30, config=CONFIG):
             })
     return pd.DataFrame(results)
 
+def outsource_kadro(config, queue, dates):
+    """(kişi, adam-gün) — outsource firmalarının kişi sayısından (2026-10-15).
+
+    kişi     = kadro['outsource_kisi'][kuyruk]['hafta_N']  → GÜNLÜK tavan
+    adam-gün = kişi × gün sayısı × (1 − outsource_off_orani)  → HAFTALIK bütçe
+    Kuyrukta outsource yoksa (None, None).
+    """
+    kc = config.get('kadro', {}) or {}
+    tbl = (kc.get('outsource_kisi') or {}).get(queue)
+    if not tbl or not dates:
+        return None, None
+    kisi = tbl.get(f"hafta_{_week_of_month(dates[0])}", tbl.get('default'))
+    if kisi is None:
+        return None, None
+    off = float(kc.get('outsource_off_orani', 0.2) or 0)
+    return int(kisi), int(round(int(kisi) * len(dates) * (1 - off)))
+
 def _resolve_kadro(kadro_value, date_str=None):
     """Kadro tavanını 3 katmanlı çözer: tarih > hafta_N > default
 
@@ -1126,38 +1143,20 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
     # dersen tavan gibi davranır, model yalnız gerektiği kadar kullanır.
     adam_gun = None
     ag_sl = None
-    ag_cfg = (config['kadro'].get('outsource_adam_gun') or {}).get(queue)
-    if ag_cfg and out:
-        hafta = _week_of_month(dates[0])
-        adam_gun = ag_cfg.get(f"hafta_{hafta}")
-        if adam_gun is not None:              # 0 = gerçek sıfır bütçe (eskiden atlanıyordu)
-            # BÜTÇE OLDUĞU GİBİ ALINIR — ÖLÇEKLEME YOK (2026-10-08 düzeltmesi).
-            #
-            # Eskiden `× len(dates)/7` uygulanıyordu ve kısmi haftada bütçe İKİ
-            # KEZ bölünüyordu: kullanıcı değerleri ZATEN gün sayısına göre
-            # giriyor. Ekim 2026 verisinde günlük oran kanıtı:
-            #   hafta_1 1104/4 = 276.0   hafta_2 1932/7 = 276.0
-            #   hafta_3 1904/7 = 272.0   hafta_4 1904/7 = 272.0
-            #   hafta_5 1632/6 = 272.0
-            # Beşi de aynı günlük orana oturuyor. Ölçekleme hafta_1'i 631'e,
-            # hafta_5'i 1399'a indiriyordu → 473 + 193 kişi-günlük outsource
-            # bütçesi kayboluyordu ve model yanlış hedefi aşıp adam_gun_sapma
-            # cezası ödüyordu (hafta_1: 828 > 631, ceza 98.500).
+    # 2026-10-15: bütçe elle girilmiyor — outsource KİŞİ sayısından türetiliyor
+    # (kişi × gün × 0,8). Kişi sayısı aynı zamanda GÜNLÜK tavan (aşağıda).
+    out_kisi, _ag = outsource_kadro(config, queue, dates)
+    if out_kisi is not None and out:
+        adam_gun = _ag
+        if adam_gun is not None:
             hedef_ag = int(adam_gun)
-            # EMNİYET: kısmi haftanın günlük oranı tam haftaların
-            # ortalamasından sapıyorsa bütçe girişi değişmiş olabilir → sessiz
-            # kalmasın. Yalnız uyarı, kısıt değiştirmez.
-            if len(dates) < 7:
-                _tam = [int(v) / 7.0 for k, v in ag_cfg.items()
-                        if isinstance(v, (int, float)) and k.startswith('hafta_')]
-                _ort = (sum(_tam) / len(_tam)) if _tam else 0
-                _bu = hedef_ag / len(dates)
-                if _ort and abs(_bu - _ort) > 0.15 * _ort:
-                    print(f"  ⚠ hafta_{hafta} ({len(dates)} gün) günlük adam-gün "
-                          f"{_bu:.1f}, tam haftaların ortalaması {_ort:.1f} "
-                          f"(%{100 * (_bu - _ort) / _ort:+.0f}). Bütçeyi TAM HAFTA "
-                          f"olarak mı giriyorsun? O durumda × gün/7 ölçeklemesi "
-                          f"geri gelmeli.")
+            # ---- GÜNLÜK KİŞİ TAVANI ----
+            # Haftalık bütçe tek başına bir güne kadrodan fazla outsource
+            # yazdırabiliyordu (ölçüldü: 26 Ekim 426 kişi, kadro 340).
+            for ds in dates:
+                _x = [xd[(s, ds)] for s in out if (s, ds) in xd]
+                if _x:
+                    prob += lpSum(_x) <= out_kisi
             tr = [xd[(s, ds)] for ds in dates for s in out if (s, ds) in xd]
 
             # ---- GÜNLÜK TAVAN (surplus dağıtımı açıkken) ----
@@ -1612,6 +1611,8 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
                 print(f"  ⚠ hafta sonu outsource ({hs_out}) adam-günü "
                       f"({adam_gun}) AŞIYOR → hafta içi kadro 0")
             out_kadro_gun = max(0, int(round(kalan_ag / len(h_ici))))
+            if out_kisi is not None:
+                out_kadro_gun = min(out_kadro_gun, out_kisi)   # günlük kişi tavanı
 
         # ---- günlük PT kadrosu (AYNI FORMÜL) ----
         #   kadro/gün = (haftalık PT hedefi − hafta sonu PT) ÷ hafta içi gün
@@ -1843,6 +1844,9 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
                        for ds, (a, b) in oran_sl.items()},
         'adam_gun_butce': adam_gun,
         'adam_gun_hedef': (ag_sl[2] if ag_sl else None),
+        'outsource_kisi': out_kisi,
+        'outsource_gun_max': (max(info_per_day[ds]['total_outsource_kisi'] for ds in dates)
+                              if out_kisi is not None else None),
         # sapmalar SON atamalardan (dağıtım sonrası) — MIP slack'i bayat kalır
         'adam_gun_sapma': (abs(sum(info_per_day[ds]['total_outsource_kisi'] for ds in dates)
                                - ag_sl[2]) if ag_sl else 0),
@@ -1959,7 +1963,9 @@ def print_ozet(ozet):
         t = ozet.get('adam_gun_hedef') or ozet['adam_gun_butce']
         sp = ozet.get('adam_gun_sapma', 0)
         print('  ' + f"{'adam-gün kullanımı':<28}{k} / {t}"
-              + (f"  sapma {sp}" if sp else '  ✓'))
+              + (f"  sapma {sp}" if sp else '  ✓')
+              + (f"  | günlük en çok {ozet['outsource_gun_max']} / kadro {ozet['outsource_kisi']}"
+                 if ozet.get('outsource_kisi') else ''))
     if ozet['pt_hedef']:
         print('  ' + f"{'PT kişi-gün':<28}{ozet['pt_gerceklesen']} / {ozet['pt_hedef']}"
               + (f"  sapma {ozet['pt_sapma']}" if ozet['pt_sapma'] else ''))
