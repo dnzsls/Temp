@@ -416,6 +416,15 @@ CONFIG_UNIFIED = {
         # Kapsama cezasının (Erlang, 50000) ALTINDA → Erlang önceliği korunur;
         # slot_cap cezalarının (50–500) ÜSTÜNDE → taban fazlalıktan önemli.
         'kap_rr_taban': 2000.0,
+        # GECE KAPSAMA (2026-10-16): gece saatlerinde açık kişi-slot cezası.
+        # Gündüzün 50000'i gece birkaç kişilik açığı aşırı pahalı yapıyordu →
+        # tek bir yoğun gece slotu (ör. 02:00) için 00:00-08:00'e 8 saat boyunca
+        # boşta kalan outsource yazılıyordu. Değer gece slot_cap cezasıyla
+        # tartılır: bir kişi gecenin çoğunda tavan üstündeyse (≈9 slot × 500)
+        # bu cezadan pahalıya gelir → model o kişiyi yazmaz, kısa açığı kabul eder.
+        # None → kapalı (gündüz cezası geçerli). Hafta içi + hafta sonu, tüm kuyruklar.
+        'kapsama_gece': 3000.0,
+        'kapsama_gece_saat': ('00:00', '07:00'),   # [başlangıç, bitiş) — 07:00 gündüz
         # 50000 → 5000 (2026-10-12, kullanıcı kararı): hafta içi ile EŞİT.
         # Birleşik modelde outsource bütçesi 7 güne ORTAK; 10× fark bütçeyi
         # hafta sonuna çekip açığı hafta içine itiyordu. Hedef "her gün RR
@@ -486,6 +495,12 @@ CONFIG_UNIFIED = {
                         {'start': '10:00', 'end': '10:59', 'max_ratio': 1.1, 'penalty': 80.0},
                         {'start': '22:00', 'end': '02:30', 'max_ratio': 1.25, 'penalty': 100.0},
                         {'start': '02:30', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 500.0},
+                        # KAP_RR TABANI ÖRNEĞİ (pasif — açmak için baştaki # sil):
+                        # 11:00–22:00 arasında Kap_RR %93'ün altına düşmesin. max_ratio YOK →
+                        # bu bantta tavan uygulanmaz, sadece taban. min_penalty yoksa
+                        # ceza['kap_rr_taban'] (2000) kullanılır. Mevcut bir banda da
+                        # 'min_kap_rr' alanı eklenebilir (tavan + taban birlikte).
+                        # {'start': '11:00', 'end': '22:00', 'min_kap_rr': 0.93, 'min_penalty': 2000.0},
                         # KİTLE HAFTA İÇİ — önerilen bantlar (pasif).
                         # Önce 18:00–22:00 dene; 11:00–18:00 bantlarını gerekirse ekle.
                         # Sabah/gece bantları korunur; cap inhouse + outsource + PT toplamına uygulanır.
