@@ -377,6 +377,18 @@ def outsource_kadro(config, queue, dates):
     off = float(kc.get('outsource_off_orani', 0.2) or 0)
     return int(kisi), int(round(int(kisi) * len(dates) * (1 - off)))
 
+def kapsama_cezasi(config, gun_tipi_, slot):
+    """O slotun açık cezası: gece penceresinde ceza['kapsama_gece'] (gündüzden
+    küçükse), değilse gün tipinin kapsama cezası. (2026-10-16)"""
+    cz = config['ceza']
+    taban = cz['kapsama_hafta_ici'] if gun_tipi_ == 'hafta_ici' else cz['kapsama_hafta_sonu']
+    gc = cz.get('kapsama_gece')
+    if gc is not None:
+        b, e = cz.get('kapsama_gece_saat', ('00:00', '07:00'))
+        if b <= slot < e:
+            return min(taban, float(gc))
+    return taban
+
 def kap_ihtiyac(cagri, saat, hr_cfg):
     """İş birimi kapasite ölçüsüyle o yarım saatin gerektirdiği KİŞİ.
 
@@ -930,7 +942,7 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
                 v = LpVariable(f"sf_{ds}_{t}", lowBound=0, cat='Continuous')
                 sf[(ds, t)] = v
                 prob += ifade + v >= ihtiyac
-                cost.append(v * sf_pen)
+                cost.append(v * kapsama_cezasi(config, tip[ds], t))   # gece düşük (2026-10-16)
 
             if rr_on and (ihtiyac > 0 or gelen > 0):
                 e = LpVariable(f"ex_{ds}_{t}", lowBound=0, cat='Continuous')
@@ -1033,7 +1045,7 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
             if hd > 0:
                 v = LpVariable(f"eg_{t}", lowBound=0, cat='Continuous')
                 prob += lpSum(tr) + v >= hd
-                cost.append(v * _pen)
+                cost.append(v * kapsama_cezasi(config, gun_tipi(ertesi_gun['tarih']), t))
                 eg_ozet['hedef'][t] = hd
                 eg_ozet['sf'][t] = v
             if _sc2.get('enabled', False):
