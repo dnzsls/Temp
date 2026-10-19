@@ -1,3 +1,29 @@
+# A — slot_cap Erlang'a göre
+CONFIG['slot_cap_olcu'] = 'erlang'
+CONFIG['kap_denge']['kitle']['enabled'] = False
+CONFIG['ceza']['yayma'] = 0.0
+
+# B — slot_cap Kap_RR'a göre
+CONFIG['slot_cap_olcu'] = 'kap_rr'
+CONFIG['kap_denge']['kitle']['enabled'] = False
+CONFIG['ceza']['yayma'] = 0.0
+
+# C — Kap dengesi
+CONFIG['slot_cap_olcu'] = 'kap_rr'
+CONFIG['kap_denge']['kitle']['enabled'] = True
+CONFIG['ceza']['yayma'] = 0.0
+
+# D — Kap dengesi + yayma 50
+CONFIG['slot_cap_olcu'] = 'kap_rr'
+CONFIG['kap_denge']['kitle']['enabled'] = True
+CONFIG['ceza']['yayma'] = 50.0
+
+# E — Kap dengesi + yayma 500
+CONFIG['slot_cap_olcu'] = 'kap_rr'
+CONFIG['kap_denge']['kitle']['enabled'] = True
+CONFIG['ceza']['yayma'] = 500.0
+
+
 # =============================================================================
 # SENARYO KARŞILAŞTIRMASI — Model-1 pickle'ları yan yana (2026-10-19)
 # =============================================================================
