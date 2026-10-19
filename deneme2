@@ -9,3 +9,11 @@ CONFIG['kap_denge']['kitle']['enabled'] = False
 # C — Kap dengesi
 CONFIG['slot_cap_olcu'] = 'kap_rr'
 CONFIG['kap_denge']['kitle']['enabled'] = True
+
+
+
+import hashlib
+_kd_acik = {q: v for q, v in (CONFIG.get('kap_denge') or {}).items() if (v or {}).get('enabled')}
+_kd_etiket = (f"_kd{hashlib.md5(repr(sorted(_kd_acik.items())).encode()).hexdigest()[:5]}" if _kd_acik else '')
+# CACHE_FILE satırlarında .pkl'den hemen önce:
+f"{_kd_etiket}"
