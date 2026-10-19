@@ -1159,6 +1159,32 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
                 prob += v <= M[ds]
 
     # =====================================================================
+    # K2B — VARDİYA AÇMA CEZASI (2026-10-19)
+    # =====================================================================
+    # Açık vardiya-gün başına sabit ceza (ceza['vardiya_acma'][kuyruk][şirket]).
+    # Kap dengesi küçük sapmaları da cezalandırdığı için model ince ayar için
+    # yeni outsource vardiyası açıyordu (19 Ekim: 16 vardiya). Açma göstergesi
+    # (yd/yw) kişiye bağlanır; min_per_shift=0 olan vardiyalarda K2 bağlamıyordu.
+    vac = (((config.get('ceza') or {}).get('vardiya_acma') or {}).get(queue) or {})
+    vac_gun = {}                                 # (şirket, gün) → açık vardiya göstergeleri
+    if any(vac.values()):
+        _sirk = lambda s: 'part_time' if s in pts else ('inhouse' if s in inh else 'outsource')
+        for (s, ds) in gun_shift:
+            c = float(vac.get(_sirk(s), 0) or 0)
+            if c <= 0 or (s, ds) not in yd:
+                continue
+            prob += xd[(s, ds)] <= M[ds] * yd[(s, ds)]
+            cost.append(yd[(s, ds)] * c)
+            vac_gun.setdefault((_sirk(s), ds), []).append(yd[(s, ds)])
+        _ci = float(vac.get('inhouse', 0) or 0)
+        if _ci > 0 and xw and h_ici:             # sabit mod: tek değişken 5 günü temsil eder
+            for s in xw:
+                prob += xw[s] <= M[h_ici[0]] * yw[s]
+                cost.append(yw[s] * _ci * len(h_ici))
+                for ds in h_ici:
+                    vac_gun.setdefault(('inhouse', ds), []).append(yw[s])
+
+    # =====================================================================
     # K3 — İNHOUSE GÜNLÜK KADRO  (PT GİRMEZ: company='part_time')
     # =====================================================================
     # YALNIZ HAFTA İÇİ. Kadro sayıları (412-428) hafta içi kadrosudur; hafta
@@ -2001,6 +2027,8 @@ def solve_week(df_calls_30, df_shifts, queue, dates, config=CONFIG_UNIFIED,
                         if any(v > 0 for v in erl[ds].values()) else None)
                    for ds in dates},
         'pt_kadro_gun': (pt_kadro_gun if sd.get('enabled', False) and h_ici else None),
+        'vardiya_acma': ({f"{sk}|{ds}": int(round(sum(value(v) or 0 for v in vs)))
+                          for (sk, ds), vs in vac_gun.items()} if vac_gun else None),
         'slot_cap_olcu': sc_olcu,
         'kap_taban_acik': {ds: round(sum(value(v) or 0 for (d2, _t), (v, _tb) in kap_taban.items()
                                          if d2 == ds), 1) for ds in dates},
@@ -2068,6 +2096,11 @@ def print_ozet(ozet):
               + f"{sum(_sd.values()):>8}")
         if ozet.get('out_kadro_gun'):
             print(f"  {'':28}(hafta içi outsource kadro/gün = {ozet['out_kadro_gun']})")
+    _va = ozet.get('vardiya_acma')
+    if _va:
+        for _sk in sorted({k.split('|')[0] for k in _va}):
+            print('  ' + f"{'açık vardiya (' + _sk + ', cezalı)':<28}"
+                  + ''.join(f"{_va.get(f'{_sk}|{g}', 0):>7}" for g in gunler))
     _kd = ozet.get('kap_denge')
     if _kd:
         print('  ' + f"{'Kap dengesi eksik (kişi-slot)':<28}"
