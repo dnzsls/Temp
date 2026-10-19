@@ -12,8 +12,31 @@ CONFIG['kap_denge']['kitle']['enabled'] = True
 
 
 
+_ptc = CONFIG.get('part_time', {}) or {}
+_pt_etiket = len(_ptc.get('shifts', [])) if _ptc.get('enabled', False) else 0
+
+# Kap_RR dengesi: açıksa '_kd' + ayarların 5 haneli izi (kademe/ceza değişince yeni pickle)
 import hashlib
 _kd_acik = {q: v for q, v in (CONFIG.get('kap_denge') or {}).items() if (v or {}).get('enabled')}
-_kd_etiket = (f"_kd{hashlib.md5(repr(sorted(_kd_acik.items())).encode()).hexdigest()[:5]}" if _kd_acik else '')
-# CACHE_FILE satırlarında .pkl'den hemen önce:
-f"{_kd_etiket}"
+_kd_etiket = (f"_kd{hashlib.md5(repr(sorted(_kd_acik.items())).encode()).hexdigest()[:5]}"
+              if _kd_acik else '')
+# yayma cezası: 0 → etiket yok, 50 → _ya50 (C ile D senaryosu ayrı pickle olsun)
+_ya = int(_cz.get('yayma', 0) or 0)
+_ya_etiket = f"_ya{_ya}" if _ya else ''
+
+CACHE_FILE = (f"monthly_unified_v2_{YEAR}_{MONTH:02d}"
+              f"_{_hv.get('inhouse_mod', 'sabit')}"
+              f"_sur{int(bool(_hv.get('inhouse_surplus', True)))}"
+              #f"_esit{int(bool(_hv.get('outsource_gunluk_esit', True)))}"
+              #f"_rrg{int(bool((CONFIG.get('rr_gun_dengesi') or {}).get('enabled', False)))}"
+              #f"_k{int(_cz.get('kapsama_hafta_ici', 0))}-{int(_cz.get('kapsama_hafta_sonu', 0))}"
+              f"_gap{_gap}"
+              f"_pt{_pt_etiket}"
+              f"{_kd_etiket}"                    # Kap_RR dengesi
+              f"{_ya_etiket}"                    # yayma
+              #f"{'_eg1' if _hv.get('ertesi_gun_bakis', False) else ''}"
+              f"_sc{'kap' if CONFIG.get('slot_cap_olcu', 'erlang') == 'kap_rr' else 'erl'}"
+              #f"{'_dv1' if DEVRIK else ''}"
+              ".pkl"                             # uzantı hep en sonda, kendi satırında
+              )
+print(f"cache dosyası: {CACHE_FILE}")
