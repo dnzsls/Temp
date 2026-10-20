@@ -1,27 +1,19 @@
-'kap_denge': {
-    'kitle': {
-        'enabled': True,
-        'slot_cap_kapat': True,
-        'mip_inhouse_tam': False,
-        'alt': [(0.02, 10.0), (0.10, 200.0), (None, 1500.0)],
-        'ust': [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)],   # son denemedeki %120
-        'gece_ust': 1500.0,
-        'gece_saat': ('00:00', '07:00'),
-    },
-    'kurumsal': {
-        'enabled': True,
-        'slot_cap_kapat': True,
-        'alt': [(0.02, 10.0), (0.10, 200.0), (None, 1500.0)],
-        'ust': [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)],
-        'gece_ust': 1500.0,
-        'gece_saat': ('00:00', '07:00'),
-    },
-    'gold': {
-        'enabled': True,
-        'slot_cap_kapat': True,
-        'alt': [(0.02, 10.0), (0.10, 200.0), (None, 1500.0)],
-        'ust': [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)],
-        'gece_ust': 1500.0,
-        'gece_saat': ('00:00', '07:00'),
-    },
-},
+SENARYO = 'S1'      # her koşuda değiştir: S1, S2, S3, S4
+CONFIG['ceza']['kapsama_hafta_ici'] = 50000.0
+CONFIG['ceza']['kapsama_hafta_sonu'] = 50000.0
+CONFIG['kap_denge']['kitle']['ust'] = [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)]
+CONFIG['time_cost_multipliers']['hafta_ici']['kitle']['inhouse'] = {'07:00': 100.0, '07:30': 50.0}
+CONFIG['outsource_ratio']['kitle'] = {'min': 0.60, 'max': 0.70}
+CONFIG['ceza']['yayma'] = {'kitle': 0.0, 'kurumsal': 0.0, 'gold': 0.0}
+CONFIG['ceza']['vardiya_acma'] = {'kitle': {'outsource': 1500.0}}
+
+
+
+Koşu	Temelin üstüne
+S1	— (karşılaştırma tabanı)
+S2	CONFIG['ceza']['yayma']['kitle'] = 1500.0
+S3	CONFIG['ceza']['vardiya_acma'] = {'kitle': {'outsource': 3000.0}}
+S4	S2 ve S3'ün ikisi birden
+
+
+CACHE_FILE = CACHE_FILE.replace('.pkl', f'_{SENARYO}.pkl')
