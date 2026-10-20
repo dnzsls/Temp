@@ -1,9 +1,2 @@
-_t = pd.DataFrame([{'tarih': ds, 'slot': s, 'tahmin': c}
-                   for ds, r in results.items() for s, c in (r[QUEUE].get('calls_by_slot') or {}).items()])
-_t['tarih'] = pd.to_datetime(_t['tarih']).dt.date
-_k = df_slot.merge(_t, on=['tarih', 'slot'])
-_k['gun_tipi'] = _k['gun'].map(lambda g: g if g in ('Cmt', 'Pzr') else 'hafta içi')
-_k['saat'] = _k['slot'].str[:2]
-print(_k.groupby('gun_tipi')[['tahmin', 'cagri']].sum().assign(sapma=lambda d: d.cagri / d.tahmin - 1))
-print(_k[_k['gun'] == 'Cmt'].groupby('saat')[['tahmin', 'cagri']].sum()
-      .assign(sapma=lambda d: d.cagri / d.tahmin - 1).loc['08':'16'])
+print(_k.groupby(['tarih', 'gun'])[['tahmin', 'cagri']].sum()
+        .assign(sapma=lambda d: d.cagri / d.tahmin - 1).round(3).to_string())
