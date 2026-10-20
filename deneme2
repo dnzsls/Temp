@@ -1,1 +1,1 @@
-CONFIG['outsource_ratio']['kitle'] = {'min': 0.60, 'max': 0.70}
+CONFIG['kap_denge']['kitle']['ust'] = [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)]
