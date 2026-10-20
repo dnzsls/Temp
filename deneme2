@@ -1,1 +1,1 @@
-print(CONFIG['kap_denge']['kitle'].get('mip_inhouse_tam'))   # False yazmalı
+CONFIG['outsource_ratio']['kitle'] = {'min': 0.60, 'max': 0.70}
