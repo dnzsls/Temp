@@ -1,2 +1,8 @@
-print(_k.groupby(['tarih', 'gun'])[['tahmin', 'cagri']].sum()
-        .assign(sapma=lambda d: d.cagri / d.tahmin - 1).round(3).to_string())
+_shr = CONFIG['queue_configs']['kitle']['cumartesi']['erlang']['shrinkage']
+for h in range(10, 17):
+    _shr[h] = round(_shr.get(h, _shr.get('default', 0)) + 0.08, 3)
+print({h: _shr[h] for h in range(10, 17)})
+
+
+CONFIG['kap_denge']['kitle']['alt'] = [(0.02, 10.0), (0.10, 500.0), (None, 1500.0)]
+
