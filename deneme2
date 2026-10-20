@@ -5,7 +5,7 @@
 #   "Gerçekleşen çağrıya göre bizim planımız mı, ekibin planı mı daha iyi?"
 #
 # SAHADAKİ KİŞİ (yarım saat bazında, gece yarısını aşan kısım ertesi güne):
-#   BİZ  : inhouse  → Model-2 roster'ı (agent × gün: '09:00-18:00' / OFF / İZİN …)
+#   BİZ  : inhouse  → Model-2 pickle'ı (agent_cov_*.pkl → 'agent_plan': agent × gün × vardiya)
 #          outsource + PT → Model-1 pickle'ı (Model-2 bunları planlamıyor)
 #   EKİP : df_ekip (SQL: WORKING_DATE · VARDIYA · KISI_SAYISI · OUTSOURCE_FLG · KISMI_FLG)
 #          outsource vardiyası tabloda 30 dk kısa yazılıyor → bitişe +30 dk
@@ -37,7 +37,7 @@ YEAR, MONTH = 2026, 10
 QUEUE = "kitle"
 
 PKL_PATH = ""        # Model-1 pickle (outsource + PT + config)
-ROSTER_XLSX = ""     # Model-2 Excel'i (sayfa 'roster'). Boşsa kernel'deki `roster` kullanılır
+M2_PKL_PATH = ""     # Model-2 pickle'ı (agent_cov_kitle_2026_10.pkl) — inhouse buradan
 CIKTI = f"genel_bakis_model2_{QUEUE}_{YEAR}_{MONTH:02d}.xlsx"
 GRAFIK_KLASOR = "."  # PNG'ler buraya
 
@@ -112,40 +112,29 @@ def ekip_sahadaki(df_ekip, kismi=KISMI_DAHIL, ek_dk=OUTSOURCE_EK_DK):
     return saha, bas
 
 
-def roster_oku(yol=ROSTER_XLSX, year=YEAR, month=MONTH):
-    """Model-2 roster'ı → {tarih: [vardiya metni, …]} (çalışılan hücreler).
+def model2_oku(yol=None):
+    """Model-2 pickle'ı → {tarih: [vardiya, …]} (yalnız ÇALIŞILAN agent-gün).
 
-    Excel ('roster' sayfası): kolon '5 Pzt' = bu ay, '30 Eyl Çar' = önceki ay.
-    Kernel'deki `roster` (kolon 'YYYY-MM-DD') de kabul edilir.
+    Pickle (H31): {'meta', 'interval', 'gun', 'agent_plan', 'atama'}.
+    'agent_plan' kolonları: agent_user_code · date ('YYYY-MM-DD') · vardiya ('09:00-18:00') …
+    Arife yarım vardiyası da satır olarak var → sahadaki kişiye girer.
     """
-    if yol:
-        r = pd.read_excel(yol, sheet_name="roster", index_col=0)
-    elif "roster" in globals():
-        r = globals()["roster"]
-    else:
-        raise SystemExit("ROSTER_XLSX boş ve kernel'de `roster` yok")
-    ay_kisa = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
-    onc = (dt.date(year, month, 1) - dt.timedelta(days=1))
+    yol = yol or M2_PKL_PATH
+    with open(yol, "rb") as f:
+        p = pickle.load(f)
+    ap = p["agent_plan"] if isinstance(p, dict) else p
     out = {}
-    for c in r.columns:
-        cs = str(c).strip()
-        tarih = None
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", cs):
-            tarih = dt.date.fromisoformat(cs[:10])
-        else:
-            p = cs.split()
-            if len(p) == 2 and p[0].isdigit() and p[1] in GUN_TR:
-                tarih = dt.date(year, month, int(p[0]))
-            elif len(p) == 3 and p[0].isdigit() and p[1] in ay_kisa:
-                tarih = dt.date(onc.year, ay_kisa.index(p[1]) + 1, int(p[0]))
-        if tarih is None:
-            continue
-        out[tarih] = [v for v in r[c].dropna().astype(str) if _SAAT_RE.search(v)]
+    for t, v in zip(pd.to_datetime(ap["date"]).dt.date, ap["vardiya"].astype(str)):
+        if _SAAT_RE.search(v):
+            out.setdefault(t, []).append(v)
+    meta = p.get("meta", {}) if isinstance(p, dict) else {}
+    print(f"Model-2 pickle: {sum(len(v) for v in out.values()):,} agent-gün · {len(out)} gün"
+          + (f" · durum {meta.get('durum')}" if meta.get("durum") else ""))
     return out
 
 
 def biz_sahadaki(results, roster_gun, queue=QUEUE):
-    """BİZ: inhouse roster'dan, outsource + PT Model-1 pickle'ından."""
+    """BİZ: inhouse Model-2 pickle'ından, outsource + PT Model-1 pickle'ından."""
     saha, bas = {}, {}
     for t, vardiyalar in roster_gun.items():
         if (t.year, t.month) != (YEAR, MONTH):
@@ -373,7 +362,7 @@ results = {ds: r for ds, r in results.items()
            if dt.date.fromisoformat(ds).year == YEAR and dt.date.fromisoformat(ds).month == MONTH}
 print(f"Model-1 pickle: {len(results)} gün")
 
-roster_gun = roster_oku()
+roster_gun = model2_oku()
 saha_biz, bas_biz = biz_sahadaki(results, roster_gun)
 saha_ekip, bas_ekip = ekip_sahadaki(df_ekip)
 onc = (dt.date(YEAR, MONTH, 1) - dt.timedelta(days=1)).isoformat()
@@ -426,7 +415,7 @@ grafik_kaprr(df_saat, df_gun, os.path.join(GRAFIK_KLASOR, f"kap_rr_{QUEUE}.png")
 # %% [HÜCRE 5] — Excel
 ACIKLAMA = pd.DataFrame([
     ("SORU", "Gerçekleşen çağrıya göre BİZİM plan (Model-2 inhouse + Model-1 outsource/PT) mi, EKİBİN planı mı daha iyi?"),
-    ("biz_sahadaki", "inhouse: Model-2 roster'ında o yarım saatte çalışan agent · outsource+PT: Model-1 pickle'ı"),
+    ("biz_sahadaki", "inhouse: Model-2 pickle'ındaki agent_plan (o yarım saatte çalışan agent) · outsource+PT: Model-1 pickle'ı"),
     ("ekip_sahadaki", f"df_ekip vardiyaları; outsource bitişi +{OUTSOURCE_EK_DK} dk; PT {'dahil' if KISMI_DAHIL else 'hariç'}"),
     ("gece", "gece yarısını aşan vardiyanın kalanı ERTESİ güne; ayın 1'i gecesi iki tarafa da ekip tablosundan"),
     ("erlang_ihtiyac", "GERÇEK çağrı + alt-kuyruk ağırlıklı AHT → Erlang-C (ASA hedefi) ÷ (1 − shrinkage). Ayarlar Model-1 config'i"),
