@@ -499,26 +499,25 @@ with pd.ExcelWriter(CIKTI, engine="openpyxl") as xl:
 print(f"✓ {CIKTI}  (ay · gun_tipi · gun · saat · slot · ACIKLAMA) + PNG'ler: {GRAFIK_KLASOR}")
 
 
-# %% [HÜCRE 6] — Saatlik GİRİŞ (vardiya başlangıcı): BİZ ↔ EKİP + gerçek çağrıya göre ihtiyaç
-# Üst: GERÇEK çağrıya göre ihtiyaç (Erlang + Kap, saat ortalaması)
-# Alt: o saatte işe BAŞLAYAN kişi (gün ortalaması) — BİZ mavi, EKİP turuncu
-# Günler: slot tablosundaki günler (ekip planı + gerçek çağrı olan, SON_GUN'e kadar)
-# PT: KISMI_DAHIL iki tarafa da aynı uygulanır
-def _bas_saat(metin):
-    m = _SAAT_RE.search(str(metin))
-    return int(m.group(1)) % 24 if m else None
+# %% [HÜCRE 6] — Grafikler (eski genel bakış biçimi): ihtiyaç ↔ BİZ ↔ EKİP + kırılım + giriş
+# A) GERÇEK çağrıdan gereken kişi (Erlang, tek çizgi) · BİZ ve EKİP sahadaki üst üste
+# B) Kırılım: sahadaki inhouse / outsource / PT (yığılı alan) + vardiya başlangıcı (kaç kişi başlıyor)
+#    üst satır BİZ, alt satır EKİP — aynı ölçek, yan yana okunur
+# Günler: slot tablosundaki günler (ekip planı + gerçek çağrı olan, SON_GUN'e kadar). PT: KISMI_DAHIL
+def _bas_slot(metin):
+    sl = _vardiya_slotlari(metin)
+    return sl[0][1] if sl else None
 
 
 def giris_tablosu(results, roster_gun, df_ekip, gunler, queue=QUEUE, kismi=KISMI_DAHIL):
-    """→ taraf · tarih · hafta_sonu · saat (başlangıç) · sirket · kisi"""
+    """→ taraf · tarih · slot (başlangıç) · sirket · kisi"""
     sat = []
     for t, vardiyalar in roster_gun.items():                 # BİZ inhouse: Model-2
-        if t.isoformat() not in gunler:
-            continue
-        for v in vardiyalar:
-            h = _bas_saat(v)
-            if h is not None:
-                sat.append(("BİZ", t, h, "inhouse", 1))
+        if t.isoformat() in gunler:
+            for v in vardiyalar:
+                b = _bas_slot(v)
+                if b:
+                    sat.append(("BİZ", t, b, "inhouse", 1))
     for ds, r in results.items():                            # BİZ outsource + PT: Model-1
         if ds not in gunler:
             continue
@@ -529,11 +528,9 @@ def giris_tablosu(results, roster_gun, df_ekip, gunler, queue=QUEUE, kismi=KISMI
             sk = c.get("company")
             if k <= 0 or sk not in ("outsource", "part_time") or (sk == "part_time" and not kismi):
                 continue
-            h = _bas_saat(f"{c.get('start', '')}-00:00") if c.get("start") else None
-            if h is None and c.get("slots"):
-                h = int(c["slots"][0][:2])
-            if h is not None:
-                sat.append(("BİZ", dt.date.fromisoformat(ds), h, sk, int(k)))
+            b = (c.get("slots") or [None])[0]
+            if b:
+                sat.append(("BİZ", dt.date.fromisoformat(ds), b, sk, int(k)))
     d = df_ekip                                               # EKİP: df_ekip
     kt = _kol(d, "working_date", "tarih", "date", "data_date")
     kv, kn = _kol(d, "vardiya"), _kol(d, "kisi_sayisi", "count(*)", "count")
@@ -542,58 +539,113 @@ def giris_tablosu(results, roster_gun, df_ekip, gunler, queue=QUEUE, kismi=KISMI
                              d[ko] if ko else [0] * len(d), d[kp] if kp else [0] * len(d)):
         if t.isoformat() not in gunler:
             continue
-        sk = "part_time" if pd.to_numeric(p, errors="coerce") == 1 else \
-             ("outsource" if pd.to_numeric(o, errors="coerce") == 1 else "inhouse")
-        if sk == "part_time" and not kismi:
-            continue
-        h = _bas_saat(v)
-        if h is not None:
-            sat.append(("EKİP", t, h, sk, int(pd.to_numeric(n, errors="coerce") or 0)))
-    df = pd.DataFrame(sat, columns=["taraf", "tarih", "saat", "sirket", "kisi"])
+        sk = ("part_time" if pd.to_numeric(p, errors="coerce") == 1 else
+              "outsource" if pd.to_numeric(o, errors="coerce") == 1 else "inhouse")
+        b = _bas_slot(v)
+        if b and not (sk == "part_time" and not kismi):
+            sat.append(("EKİP", t, b, sk, int(pd.to_numeric(n, errors="coerce") or 0)))
+    df = pd.DataFrame(sat, columns=["taraf", "tarih", "slot", "sirket", "kisi"])
     df["hafta_sonu"] = [int(t.weekday() >= 5) for t in df["tarih"]]
     return df
 
 
-def grafik_giris(df_giris, df_slot, dosya=None):
-    gunler = df_slot[["tarih", "hafta_sonu"]].drop_duplicates()
-    fig, eks = plt.subplots(2, 2, figsize=(16, 8), sharex=True,
-                            gridspec_kw={"height_ratios": [1, 1.6]})
-    saatler = list(range(24))
-    tablo = {}
+def _kutu(ax, metin):
+    ax.text(0.98, 0.97, metin, transform=ax.transAxes, ha="right", va="top", fontsize=8,
+            bbox=dict(boxstyle="round", fc="#fff7d6", ec="#d9c98a"))
+
+
+def _xeksen(ax):
+    ax.set_xticks(range(0, 48, 4))
+    ax.set_xticklabels([SLOTS[i] for i in range(0, 48, 4)], fontsize=8)
+    ax.set_xlim(-0.5, 47.5)
+    ax.grid(alpha=.3)
+
+
+PT_ETIKET = "kısmiler dahil" if KISMI_DAHIL else "kısmisiz"
+
+
+def grafik_ihtiyac_ust_uste(df_slot, df_tip, dosya=None):
+    """A) gerçek çağrıdan gereken kişi (Erlang) · BİZ ve EKİP sahadaki."""
+    fig, eks = plt.subplots(1, 2, figsize=(17, 6))
+    fig.suptitle(f"{QUEUE.upper()} — GERÇEK çağrıdan gereken kişi · BİZ ve EKİP sahadaki ({PT_ETIKET})",
+                 fontweight="bold")
     for j, (hs, ad) in enumerate(((0, "HAFTA İÇİ"), (1, "HAFTA SONU"))):
-        ust, alt = eks[0][j], eks[1][j]
-        n_gun = int((gunler["hafta_sonu"] == hs).sum())
-        if not n_gun:
-            ust.set_visible(False); alt.set_visible(False)
+        ax = eks[j]
+        d = df_slot[df_slot["hafta_sonu"] == hs]
+        if d.empty:
+            ax.set_visible(False)
             continue
-        ih = (df_slot[df_slot["hafta_sonu"] == hs].assign(h=lambda x: x["slot"].str[:2].astype(int))
-              .groupby("h")[["erlang_ihtiyac", "kap_ihtiyac"]].mean().reindex(saatler))
-        ust.plot(saatler, ih["erlang_ihtiyac"], color="#7b3294", ls="--", lw=2, label="Erlang ihtiyacı — GERÇEK çağrı")
-        ust.plot(saatler, ih["kap_ihtiyac"], color="#c2a5cf", ls=":", lw=2.2, label="Kap ihtiyacı — GERÇEK çağrı")
-        ust.set_title(f"{QUEUE.upper()} · {ad} · {n_gun} gün ortalaması")
-        ust.set_ylabel("kişi (sahada gereken)")
-        ust.legend(loc="upper left", fontsize=8)
-        g = df_giris[df_giris["hafta_sonu"] == hs]
-        for i, (taraf, renk) in enumerate((("BİZ", "#1f77b4"), ("EKİP", "#ff7f0e"))):
-            y = (g[g["taraf"] == taraf].groupby("saat")["kisi"].sum() / n_gun).reindex(saatler, fill_value=0)
-            tablo[(ad, taraf)] = y.round(1)
-            alt.bar([s + (i - 0.5) * 0.4 for s in saatler], y, width=0.4, color=renk,
-                    label=f"{taraf} — günde {y.sum():.0f} kişi başlıyor")
-        alt.set_ylabel("işe başlayan kişi (gün ort.)")
-        alt.set_xticks(saatler)
-        alt.set_xticklabels([f"{s:02d}:00" for s in saatler], rotation=90)
-        alt.legend(loc="upper right", fontsize=8)
-    for a in eks.ravel():
-        a.grid(alpha=.3)
+        g = d.groupby("slot")[["erlang_ihtiyac", "biz_sahadaki", "ekip_sahadaki"]].mean().reindex(SLOTS)
+        x = range(len(g))
+        ax.fill_between(x, g["erlang_ihtiyac"], color="#f3edc8", alpha=.8)
+        ax.plot(x, g["erlang_ihtiyac"], color="k", ls="--", lw=2,
+                label="Gereken kişi (GERÇEK çağrı · Erlang-C)")
+        ax.plot(x, g["biz_sahadaki"], color="#1f4e9c", lw=2.2, label="BİZ — sahadaki kişi")
+        ax.plot(x, g["ekip_sahadaki"], color="#d9541e", lw=2.2, label="EKİP — sahadaki kişi")
+        n_gun = d["tarih"].nunique()
+        o = df_tip[df_tip["gun_tipi"] == ("hafta içi" if hs == 0 else "hafta sonu")].iloc[0]
+        _kutu(ax, "\n".join(
+            f"{k.upper()}: Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f} · açıkta "
+            f"{o[f'{k}_karsilanamayan_cagri'] / n_gun:,.0f} çağrı/gün · eksik "
+            f"{o[f'{k}_eksik_kisi_slot'] / 2 / n_gun:,.0f} kişi-saat/gün"
+            for k in ("biz", "ekip")) + f"\n{n_gun} gün ortalaması")
+        ax.set_title(ad, loc="left", fontweight="bold")
+        ax.set_ylabel("kişi")
+        ax.set_ylim(0, np.nanmax(g.values) * 1.2)             # kutu tepeyi örtmesin
+        ax.legend(loc="upper left", fontsize=8)
+        _xeksen(ax)
     plt.tight_layout()
     if dosya:
         plt.savefig(dosya, dpi=120)
     plt.show()
-    t = pd.DataFrame(tablo)
-    return t[(t != 0).any(axis=1)]
+
+
+def grafik_kirilim(df_slot, df_giris, dosya=None):
+    """B) sahadaki inhouse/outsource/PT yığılı + vardiya başlangıcı. Üst BİZ, alt EKİP."""
+    fig, eks = plt.subplots(2, 2, figsize=(17, 10), sharex=True)
+    fig.suptitle(f"{QUEUE.upper()} — sahadaki kırılım + vardiya başlangıcı ({PT_ETIKET})",
+                 fontweight="bold")
+    for j, (hs, ad) in enumerate(((0, "HAFTA İÇİ"), (1, "HAFTA SONU"))):
+        d = df_slot[df_slot["hafta_sonu"] == hs]
+        if d.empty:
+            eks[0][j].set_visible(False)
+            eks[1][j].set_visible(False)
+            continue
+        n_gun = d["tarih"].nunique()
+        for i, (taraf, k) in enumerate((("BİZ", "biz"), ("EKİP", "ekip"))):
+            ax = eks[i][j]
+            g = d.groupby("slot")[[f"{k}_in", f"{k}_out", f"{k}_pt", "erlang_ihtiyac"]].mean().reindex(SLOTS)
+            x = range(len(g))
+            a1 = g[f"{k}_in"]
+            a2 = a1 + g[f"{k}_out"]
+            a3 = a2 + g[f"{k}_pt"]
+            ax.fill_between(x, a1, color="#7fa6d9", label="inhouse")
+            ax.fill_between(x, a1, a2, color="#f2c94c", label="outsource")
+            if g[f"{k}_pt"].sum() > 0:
+                ax.fill_between(x, a2, a3, color="#4caf7d", label="kısmi (PT)")
+            ax.plot(x, a3, color="#1f4e9c", lw=1.8)
+            ax.plot(x, g["erlang_ihtiyac"], color="k", ls="--", lw=1.6,
+                    label="gereken kişi (GERÇEK çağrı)")
+            gb = df_giris[(df_giris["taraf"] == taraf) & (df_giris["hafta_sonu"] == hs)]
+            bas = (gb.groupby("slot")["kisi"].sum() / n_gun).reindex(SLOTS, fill_value=0)
+            ax.plot(x, bas, color="#d62728", lw=1.8, marker="o", ms=3,
+                    label=f"vardiya başlangıcı (günde {bas.sum():.0f} kişi başlıyor)")
+            _kutu(ax, f"tepe sahadaki {a3.max():.0f} kişi @ {SLOTS[int(np.nanargmax(a3.values))]}"
+                      f"\n{n_gun} gün ortalaması")
+            ax.set_title(f"{taraf} · {ad}", loc="left", fontweight="bold")
+            ax.set_ylabel("kişi")
+            ax.legend(loc="upper left", fontsize=8)
+            _xeksen(ax)
+    for j in (0, 1):                                          # BİZ ve EKİP aynı ölçek
+        ust = max(eks[0][j].get_ylim()[1], eks[1][j].get_ylim()[1])
+        for i in (0, 1):
+            eks[i][j].set_ylim(0, ust)
+    plt.tight_layout()
+    if dosya:
+        plt.savefig(dosya, dpi=120)
+    plt.show()
 
 
 df_giris = giris_tablosu(results, roster_gun, df_ekip, set(df_slot["tarih"].astype(str)))
-tablo_giris = grafik_giris(df_giris, df_slot, os.path.join(GRAFIK_KLASOR, f"giris_{QUEUE}.png"))
-print(f"Saatlik giriş — gün ortalaması kişi (PT {'dahil' if KISMI_DAHIL else 'hariç'})")
-print(tablo_giris.to_string())
+grafik_ihtiyac_ust_uste(df_slot, df_tip, os.path.join(GRAFIK_KLASOR, f"ihtiyac_ust_uste_{QUEUE}.png"))
+grafik_kirilim(df_slot, df_giris, os.path.join(GRAFIK_KLASOR, f"kirilim_giris_{QUEUE}.png"))
