@@ -1,16 +1,10 @@
-_h = df_slot.assign(saat=df_slot["slot"].str[:2])
-rows = []
-for (hs, s), g in _h.groupby(["hafta_sonu", "saat"]):
-    r = {"hs": hs, "saat": s, "ihtiyac": g["kap_ihtiyac"].mean()}
-    for k in ("biz", "ekip"):
-        r[k] = g[f"{k}_sahadaki"].mean()
-        r[f"{k}_RR"] = (np.minimum(g[f"{k}_kap"], g["cagri"]).sum() / g["cagri"].sum()
-                        if g["cagri"].sum() else np.nan)
-    r["biz−ekip"] = r["biz"] - r["ekip"]
-    rows.append(r)
-t = pd.DataFrame(rows)
-for hs, ad in ((0, "HAFTA İÇİ"), (1, "HAFTA SONU")):
-    print(f"\n=== {ad} (gerçek çağrıya göre Kap) ===")
-    print(t[(t["hs"] == hs) & (t["saat"] >= "07")].drop(columns="hs")
-          .round({"ihtiyac": 0, "biz": 0, "ekip": 0, "biz−ekip": 0, "biz_RR": 3, "ekip_RR": 3})
-          .to_string(index=False))
+CONFIG['kap_denge']['kitle']['kurallar'] = [
+    # HAFTA İÇİ — ekip dağılımı: öğlen ve 17-19 önemli, sabah erken ve akşam ucuz
+    {'gunler': ('hafta_ici',), 'start': '11:00', 'end': '14:00', 'alt_carpan': 3.0},
+    {'gunler': ('hafta_ici',), 'start': '17:00', 'end': '19:00', 'alt_carpan': 2.0},
+    {'gunler': ('hafta_ici',), 'start': '19:00', 'end': '23:00', 'alt_carpan': 0.5},
+    {'gunler': ('hafta_ici',), 'start': '07:00', 'end': '09:00', 'ust_carpan': 3.0},   # 08:00 fazlası pahalı
+    # HAFTA SONU — mevcut
+    {'gunler': ('cumartesi', 'pazar'), 'start': '09:00', 'end': '16:00', 'alt_carpan': 3.0},
+    {'gunler': ('cumartesi', 'pazar'), 'start': '19:00', 'end': '23:00', 'alt_carpan': 0.5},
+]
