@@ -1,5 +1,67 @@
-# sabah 07:00 / 07:30 inhouse yerine outsource seçilsin
-CONFIG['time_cost_multipliers']['hafta_ici']['kitle']['inhouse'] = {'07:00': 1000.0, '07:30': 700.0}
-
-# vardiya açma cezası (config'te zaten 400; farklı değer denemek için)
-# CONFIG['ceza']['vardiya_acma'] = {'kitle': {'outsource': 1500.0}}
+# %% [KONTROL] NOTEBOOK ↔ v7_gpt DOSYASI — EKSİK TANIM TESPİTİ (salt okunur)
+_REPO = {
+    "0": ['QUEUE', 'PKL_PATH', 'RESMI_TATILLER', 'ARIFE_GUNLERI', 'ARIFE_SON_BASLANGIC', 'DAY_TR', 'TAKIM_ANAHTAR', 'TAKIM_KOD_ADAYLARI', 'takim_kod_kolonu', 'GECE_BASLANGIC', 'GECE_BUFFER', 'HS_TOL', 'HS_COVERAGE_SERT', 'GECE_COVERAGE_SERT', 'W_HS_BAND', 'W_GECE_BAND', 'MIN_KOVA', 'GECE_ROTASYON', 'GECE_ROTASYON_SERT', 'GECE_LOKASYON_KOL', 'GECE_TAKIM_TOL', 'GECE_TEK_TIP_SERT', 'MIN_KIDEM_AY', 'BILINMEYEN_KIDEMSIZ', 'CIFT_HS_OFF', 'CIFT_HS_OFF_ESNEK', 'HS_TEK_GUN', 'MESAI_HS_CIFT_CALIS', 'W_MESAI_HS', 'W_CIFT_OFF_MUAF', 'HAFTA_OFF_SERT', 'MAX_HAFTA_OFF', 'MAX_MESAI', 'YILLIK_MESAI', 'SERBEST_COVERAGE', 'AGIR_ESIK', 'W_COVERAGE', 'W_COVERAGE2', 'W_EKSIK_HS', 'W_EKSIK_HI', 'W_OFF_T', 'OFF_T_ONCELIK', 'W_OFF_T_MAX', 'W_OFF_T_MIN', 'KIDEM_TABAN_AY', 'W_HAFTA_OFF', 'W_HI_OFF', 'W_HACIM_OFF', 'YOGUN_AY_GUNLERI', 'YOGUN_HAFTA_GUNLERI', 'W_ARDISIK_OFF', 'W_YOGUN_GUN_OFF', 'W_ADALET_HS', 'W_ADALET_HS2', 'FAIR_HS', 'MESAI_TOL', 'W_HAFTA_YIGILMA', 'FAIR_MESAI', 'W_ADALET_AKSAM', 'AKSAM_BASLANGIC', 'FAIR_AKSAM_HAFTA', 'MAX_AKSAM_HAFTA', 'GEC_BASLANGIC', 'W_GECMIS', 'W_TAKIM', 'SINIR_TIP_KILIT', 'W_SINIR_MOD', 'TIP_MIN_KAPASITE_ORANI', 'W_TIP_ACIK2', 'TIP_ACIK_SERBEST', 'TIP_FAZLA_BUFFER', 'TIP_MIN_TAKIM', 'TIP_MIN_TAKIM_ESIK', 'COZUM_SURE_SN', 'FIZIBILITE_MODU', 'TESHIS_MODU', 'TESHIS_ELEME', 'TESHIS_ELEME_SN', 'ONCEKI_GOSTER', 'RR_CAGRI_SAAT', 'KAP_KAYBI', 'RAPOR_ETKISI'],
+    "1": ['plani_olan'],
+    "2": ['satirlar', 'df_talep', 'GUNLER', 'AY_YIL', 'AY_AY', 'GUN_SET'],
+    "3": ['df_agents', 'df_off', 'df_izin', 'df_onceki', 'df_gecmis', 'df_mesai_saat', 'df_kidem', 'df_off_gecmis'],
+    "4": ['hedef', 'df_kuyruk'],
+    "5": ['pt_mask', 'egitim_mask', 'df_tam'],
+    "6": ['takim_ad_map', 'takim_kod_map', 'takim_gor', 'takim_lider'],
+    "7": ['tip_map', 'HAFTAICI_IZIN_FLG', 'gunluk_izin', 'tatil_haftalari', 'izin_map', 'off_block_map', 'off_soft_map', 'off_tip_map', 'tam_ay'],
+    "7B": ['w_offt', 'off_gecmis_talep', 'off_gecmis_oran'],
+    "8": ['AGENTS', 'gun_vardiyalari', 'talep', 'saat', 'ARIFE', 'ARIFE_YARIM', 'ARIFE_YARIM_SAAT', 'PLAN_GUNLER'],
+    "8B": ['gun_hacim', 'gun_hacim_k'],
+    "8C": ['AY_ILK', 'SINIR_HAFTA', 'ONCEKI_SON', 'PENCERE_GUNLER', 'TASIMA_GUNLER', 'ONCEKI_GUNLER', 'SINIR_AY_GUN', 'onceki_gun', 'onceki_izin', 'onceki_off', 'onceki_offt', 'OFF_T_DEGERLERI', 'onceki_calisti', 'onceki_izin_hi', 'onceki_musait_hi', 'onceki_tip', 'onceki_son_vardiya', 'onceki_off_hi', 'onceki_eksik', 'onceki_gunluk', 'df_onceki'],
+    "8D": ['df_gunluk_aktif', 'df_8d_yazilamaz'],
+    "9": ['model', 'x', 'ust_sinir'],
+    "10": ['UB', 'amac', 'cov', 'coverage_band_sapma', 'n_eksik', 'n_min'],
+    "12": ['haftalar', 'gunler_d', 'n_tas'],
+    "13": ['dakika', 'LIMIT', 'sabah_agents'],
+    "14": ['hafta_sonu_yasak'],
+    "14B": ['GECE_TIPLERI', 'junior_agents', 'tip_yasak'],
+    "14C": ['GECE_TAKIM_DISI', 'gece_nobet_hafta', 'gece_hafta', 'gece_havuz'],
+    "15": ['DINLENME', 'bas_dakika', 'bitis_abs', 'ardisik', 'n_agent_tas'],
+    "16": ['TATIL', 'AYLIK_IS_GUNU', 'mesai_yok', 'yasak'],
+    "16B": ['arife_kisitli', 'arife_gercek_yasak', 'arife_pseudo_yasak', 'arife_mesai_hs_yasak'],
+    "16C": ['nm', '_ay_ici_haftalik_norm_tavan'],
+    "16E": ['ardisik_off'],
+    "16D": ['gece_gv_set', 'ng'],
+    "17": ['ozel_agents', 'tatil_gun', 'kota_map', 'ust_map', 'kredi_map'],
+    "17B": ['ntk'],
+    "18": ['gset', 'hs_ciftleri', 'cift_off_muaf', 'cift_off_gostergeleri'],
+    "18M": ['mesai_hs_agents', 'mesai_hs_zorunlu', 'mesai_hs_talep_off', 'mesai_hs_gun_istisna', 'mesai_sinir_zorunlu', 'mesai_sinir_muaf', 'mesai_hs_eksik'],
+    "18E": ['hs_tek_normal', 'hs_kapasite', 'n18e', 'n18e_sinir'],
+    "19": ['KILIT_HAFTA', 'takimlar', 'TIP_SET', 'agent_tip', 'hafta_tipler', 'TAKIM_TIP_MIN_ORAN', 'takim_tip', 'takim_sapan', 'n_y'],
+    "19B": ['gecmis_katsayi'],
+    "19C": ['TAKIM_HINT', 'takim_etkin', 'takim_etkin_tip', 'takim_etkin_tip_max'],
+    "19D": ['TIP_KAPASITE_SERT', 'TIP_FAZLA_SERT', 'TIP_FAZLA_KALABALIK_GUN', 'tip_acik', 'tip_kapasite_taban'],
+    "20B": ['n1', 'n1_tas', 'n1_sert', 'n2', 'yogun_gunler', 'yogun_gun_off_katsayi', 'yogun_gun_off', 'n3'],
+    "20C": ['hs_gunler', 'nh'],
+    "20D": ['AKSAM_DK', 'aksam_gv_set', 'na'],
+    "20E": ['nmes', 'nmes_tas', 'mesai_ay', 'N_mesai'],
+    "21": ['solver', 'SIMETRI_SEVIYE', 'status', 'sapan', 'toplam_sapma'],
+    "22": ['sonuc', 'df_sonuc', 'agent_takim', 'agent_takim_ad', 'hucreler', 'offt_karsilanmadi', 'offt_karsilandi', 'roster', 'sut_set', 'hamile_set', 'roster_2'],
+    "23": ['gun_kolon', 'df_ozet', 'df_ozet_fark'],
+    "24": ['df_takim', 'takim_roster', 'df_takim_hi', 'bolunme'],
+    "25": ['df_cov', 'toplam_fazla', 'toplam_eksik', 'tam'],
+    "26": ['df_gercek', 'df_takim_detay', 'takim_boyut', 'sut_hamile_boyut', 'df_vardiya'],
+    "27": ['hs_gv', 'hs_tarih', 'hafta_say', 'dag', 'ust'],
+    "28": ['agent_wmg', 'pivot3', 'ozet_saat'],
+}
+_G = globals()
+print("=" * 90)
+print("NOTEBOOK ↔ v7_gpt — hücre hücre EKSİK tanımlar")
+print("=" * 90)
+_hic = []
+for _h, _adlar in _REPO.items():
+    _yok = [n for n in _adlar if n not in _G]
+    if not _yok:
+        continue
+    if len(_yok) == len(_adlar):
+        _hic.append(_h)                       # hücre hiç çalışmamış ya da sende yok
+        continue
+    print(f"  HÜCRE {_h:<4} eksik: {_yok}")
+if _hic:
+    print(f"\n  hiçbir tanımı olmayan hücreler (çalışmamış ya da notebook'ta YOK): {_hic}")
+print("\n  NOT: sadece TANIM eksiklerini bulur; aynı adlı hücrenin İÇ mantık farkını görmez.")
+print("=" * 90)
