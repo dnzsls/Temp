@@ -1,22 +1,2 @@
-p = pickle.load(open(M2_PKL_PATH, "rb"))
-iv = p["interval"]; iv = iv[iv["plani_var"] == 1]
-q = f"_{QUEUE}"
-g = (iv.assign(saat=iv["interval"].str[:2])
-       .groupby(["hafta_sonu", "saat"])[[f"talep{q}", f"atanan{q}"]].mean())
-g["fark"] = g[f"atanan{q}"] - g[f"talep{q}"]
-print(g.round(1).unstack(0).to_string())
-
-
-
-_d = df_slot.assign(tip=df_slot["hafta_sonu"].map({0: "hafta içi", 1: "hafta sonu"}))
-rows = []
-for tip, g in _d.groupby("tip"):
-    n = g["tarih"].nunique()
-    for k in ("biz", "ekip"):
-        f = g[f"{k}_sahadaki"] - g["kap_ihtiyac"]
-        rows.append({"tip": tip, "taraf": k,
-                     "kisi_saat/gün": g[f"{k}_sahadaki"].sum() / 2 / n,
-                     "eksik_kisi_saat/gün": (-f).clip(lower=0).sum() / 2 / n,
-                     "fazla_kisi_saat/gün": f.clip(lower=0).sum() / 2 / n,
-                     "Kap_RR": np.minimum(g[f"{k}_kap"], g["cagri"]).sum() / g["cagri"].sum()})
-print(pd.DataFrame(rows).round(3).to_string(index=False))
+CONFIG['kadro']['inhouse']['kitle'].update(
+    {'hafta_1': 394, 'hafta_2': 398, 'hafta_3': 396, 'hafta_4': 402, 'hafta_5': 408})
