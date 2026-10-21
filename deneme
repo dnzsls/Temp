@@ -318,6 +318,8 @@ def tahmin_buffer_uygula(df30, config, queues, verbose=True):
         kol = [f"{q}_total"] + [f"{sq}_calls" for sq in
                                 ((config.get('sub_queues', {}) or {}).get(q, {}) or {}).get('queues', [])]
         kol = [c for c in kol if c in d.columns]
+        if kol:
+            d[kol] = d[kol].astype(float)        # tahmin kolonları int64 gelebilir → ondalık sığmaz
         for k in (kurallar.get(q) or []):
             m = (tip.isin(k['gunler']) & (d['slot_30'] >= k['start']) & (d['slot_30'] < k['end']))
             if not m.any() or not kol:
