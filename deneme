@@ -1,5 +1,1009 @@
-_g = df_giris[df_giris["hafta_sonu"] == 1]
-_n = df_slot[df_slot["hafta_sonu"] == 1]["tarih"].nunique()
-_t = (_g.assign(saat=_g["slot"].str[:2])
-        .pivot_table(index="saat", columns=["taraf", "sirket"], values="kisi", aggfunc="sum", fill_value=0) / _n)
-print(_t.round(1).loc[lambda d: (d != 0).any(axis=1)].to_string())
+# =============================================================================
+# BİRLEŞİK CONFIG — HAFTALIK MODEL (7 GÜN)
+# =============================================================================
+# Hafta içi ve hafta sonu artık AYRI config değil: gün tipi yalnız bir ANAHTAR.
+#   queue_configs[kuyruk][gün_tipi] → erlang · mip · slot_cap · rr_penalty ·
+#                                      hourly_report · balance_penalty
+#   gün tipi: 'hafta_ici' | 'cumartesi' | 'pazar'
+#
+# DEĞERLERİN KAYNAĞI
+#   hafta_ici : kullanıcının canlı CONFIG_WEEKDAY V2'si (2026-10-07'de birebir
+#               aktarıldı — notebook'taki değerler esas alındı)
+#   h.sonu    : CONFIG_WEEKEND
+#
+# NOTEBOOK'TA DEĞİŞTİRME: import et, istediğin dalı ez:
+#   CONFIG_UNIFIED['part_time']['count']['kitle'] = 19
+#   CONFIG_UNIFIED['queue_configs']['kitle']['hafta_ici']['mip']['min_per_shift'] = 13
+#   CONFIG_UNIFIED['ceza']['kapsama_hafta_ici'] = 5000
+# =============================================================================
+
+import copy
+
+GUN_TIPLERI = ('hafta_ici', 'cumartesi', 'pazar')
+
+_BLOK = ('erlang', 'mip', 'slot_cap', 'rr_penalty', 'hourly_report',
+         'balance_penalty')
+
+
+CONFIG_UNIFIED = {
+
+    # ---- KUYRUKLAR ----
+    'queues': {
+        'kitle': {
+            'label': 'kitle',
+            'actual_name': 'kitle_cagrilar',
+            'companies': ['inhouse', 'outsource'],
+        },
+        'kurumsal': {'label': 'kurumsal', 'actual_name': 'kurumsal_cagrilar', 'companies': ['inhouse']},
+        'gold': {'label': 'gold', 'actual_name': 'gold_cagrilar', 'companies': ['inhouse']},
+    },
+
+    # ---- FORECAST KOLON İSİMLERİ ----
+    'forecast_cols': {
+        'datetime': 'model_data_date',
+        'date': 'truncddate',
+        'kitle_total': 'kitle_nof_call',
+        'kurumsal_total': 'kurumsal_nof_call',
+        'gold_total': 'gold_nof_call',
+    },
+
+    # ---- ŞİRKET / VARDİYA KOLONLARI ----
+    'company': {
+        'inhouse': {'shift_value': 'inhouse'},
+        'outsource': {'shift_value': 'outsource'},
+    },
+
+    'shift_columns': {'shift': 'shift', 'start': 'start', 'end': 'end', 'company': 'company'},
+
+    # ---- AHT ----
+    'sub_queues': {},
+
+    'aht_overrides': {'kitle': {}, 'kurumsal': {}, 'gold': {}},
+
+    'default_aht': 150,
+
+    # ---- SAAT BAZLI MALİYET ÇARPANLARI (GÜN TİPİ ANAHTARLI) ----
+    # 2026-10-08: gün tipi anahtarı EKLENDİ. Eskiden tek kopya vardı ve hafta
+    # içi değerleri yazılıydı → hafta sonu 07:00 vardiyası 1.8 yerine 15.0 ile
+    # fiyatlanıyordu (8-10 kat). Model Cmt/Paz sabahını gereksiz kısıp yükü geç
+    # vardiyalara atıyordu; kitle hafta sonu outsource sabah çarpanları da
+    # tamamen kayıptı.
+    #
+    # İKİ GÜN TİPİ ARASINDAKİ FARK KASITLI (kaynak: CONFIG_WEEKDAY V2 ve
+    # CONFIG_WEEKEND). Hafta içi 07:00 çok pahalı (15.0) çünkü orada erken
+    # vardiya açmak istenmiyor; hafta sonunda sabah talebi gerçek, çarpan
+    # 1.8'e iniyor ve 08:00/08:30 de fiyatlanıyor.
+    #
+    # ÜST SEVİYEDE kalıyor (queue_configs bloğuna GİRMİYOR): bu bir operasyon
+    # girişi, çözücü ayarı değil — part_time / outsource_ratio / kadro ile aynı
+    # katmanda. Blok içine koymak tabloyu 9 yere kopyalamak demekti.
+    # 'default' = queues'ta olmayan bir kuyruk gelirse yedek.
+    'time_cost_multipliers': {
+        'hafta_ici': {
+            'kitle': {
+                'inhouse': {'07:00': 100.0, '07:30': 50.0},   # S4 (2026-10-20): sabah outsource seçilsin
+                'outsource': {},
+            },
+            'kurumsal': {
+                'inhouse': {'07:00': 15.0, '07:30': 10.0},
+                'outsource': {},
+            },
+            'gold': {
+                'inhouse': {'07:00': 15.0, '07:30': 10.0},
+                'outsource': {},
+            },
+            'default': {
+                'inhouse': {'07:00': 3.0, '07:30': 2.0},
+                'outsource': {},
+            },
+        },
+        'cumartesi': {
+            'kitle': {
+                'inhouse': {'07:00': 1.8, '07:30': 1.5, '08:00': 1.3, '08:30': 1.3},
+                'outsource': {'07:00': 1.4, '07:30': 1.4, '08:00': 1.3, '08:30': 1.3},
+            },
+            'kurumsal': {
+                'inhouse': {'07:00': 1.8, '07:30': 1.5},
+                'outsource': {},
+            },
+            'gold': {
+                'inhouse': {'07:00': 2.0, '07:30': 1.7},
+                'outsource': {},
+            },
+            'default': {
+                'inhouse': {'07:00': 1.5, '07:30': 1.3},
+                'outsource': {},
+            },
+        },
+        'pazar': {
+            'kitle': {
+                'inhouse': {'07:00': 1.8, '07:30': 1.5, '08:00': 1.3, '08:30': 1.3},
+                'outsource': {'07:00': 1.4, '07:30': 1.4, '08:00': 1.3, '08:30': 1.3},
+            },
+            'kurumsal': {
+                'inhouse': {'07:00': 1.8, '07:30': 1.5},
+                'outsource': {},
+            },
+            'gold': {
+                'inhouse': {'07:00': 2.0, '07:30': 1.7},
+                'outsource': {},
+            },
+            'default': {
+                'inhouse': {'07:00': 1.5, '07:30': 1.3},
+                'outsource': {},
+            },
+        },
+    },
+
+    # ---- ALT-KUYRUK MİN (K5) ----
+    'inhouse_only_subqueues': {
+        'kitle': [
+            {'sub_queue': 'retention_line', 'min_ratio': 1.0},
+            {
+                'sub_queue': 'karttemelbankaclik',
+                'min_ratio': 0.2,
+                'hours': {'start': '08:00', 'end': '00:00'},
+            },
+        ],
+        'kurumsal': [],
+        'gold': [],
+    },
+
+    'outsource_only_subqueues': {
+        'kitle': [
+            {'sub_queue': 'kayipcalintisupheli', 'min_ratio': 1.0},
+        ],
+        'kurumsal': [],
+        'gold': [],
+    },
+
+    # ---- PART-TIME ----
+    # KURAL (operasyon, 2026-10-07):
+    #   · her PT kişisi haftada TAM 5 gün çalışır
+    #   · hafta sonu günlerinde HEPSİ yazılır (eski davranış korunur)
+    #     → kişi başı 2 gün hafta sonu, kalan 3 gün hafta içi
+    #   · hafta içi saatleri hafta sonuyla AYNI
+    #   · PT inhouse SAYILIR (outsource oran bandının inhouse tarafında)
+    #   · PT inhouse kadro tavanına GİRMEZ (company='part_time')
+    #   · min_per_shift: PT tam zamanlının eşiğini MİRAS ALMAZ — sayılar küçük
+    #     (19/4/9), 13 eşiği kurumsal'da (4 kişi) çözümsüz bırakırdı
+    'part_time': {
+        'enabled': True,
+        'shifts': ['09:00-13:00', '10:00-14:00', '19:00-23:00'],
+        'count': {'kitle': 19, 'kurumsal': 4, 'gold': 9},
+        'hafta_gun': 5,
+        'hafta_sonu_tam': True,
+        'min_per_shift': 0,
+    },
+
+    # ---- OUTSOURCE ORAN BANDI (yalnız hafta sonu) ----
+    'outsource_ratio': {
+        'kitle': {'min': 0.60, 'max': 0.7},     # S4 (2026-10-20): 0.65 → 0.60
+        'kurumsal': None,
+        'gold': None,
+    },
+
+    # ---- KADRO ----
+    # inhouse            : GÜNLÜK tavan, yalnız HAFTA İÇİ (tarih > hafta_N >
+    #                      default). Hafta sonunda kadro tavanı YOK.
+    # outsource_kisi     : (2026-10-15) outsource firmalarının verdiği KİŞİ sayısı
+    #                      (iki firma toplamı), hafta bazında. İki iş görür:
+    #                        · GÜNLÜK TAVAN: bir günde yazılan outsource ≤ kişi
+    #                        · HAFTALIK ADAM-GÜN otomatik: kişi × gün × (1 − off oranı)
+    #                          (ayda 6 gün kesin off → %20; 340 × 7 × 0,8 = 1904)
+    #                      Kısmi hafta: gün = o haftanın bu aydaki gün sayısı.
+    # outsource_off_orani: adam-gün hesabındaki off payı (0.2 = ayda 6 off)
+    # outsource_esitlik  : True  → bütçe HEDEF, tamamı kullanılır (eski surplus
+    #                              doldurmasının karşılığı — varsayılan)
+    #                      False → bütçe TAVAN, yalnız gerektiği kadar
+    'kadro': {
+        'inhouse': {
+            'kitle': {
+                'hafta_1': 407,
+                'hafta_2': 404,
+                'hafta_3': 402,
+                'hafta_4': 409,
+                'hafta_5': 409,
+                'default': 410,
+            },
+            'kurumsal': {
+                'hafta_1': 49,
+                'hafta_2': 51,
+                'hafta_3': 51,
+                'hafta_4': 53,
+                'hafta_5': 52,
+                'default': 52,
+            },
+            'gold': {
+                'hafta_1': 140,
+                'hafta_2': 134,
+                'hafta_3': 133,
+                'hafta_4': 137,
+                'hafta_5': 139,
+                'default': 130,
+            },
+        },
+        'outsource_esitlik': True,
+        'outsource_kisi': {
+            'kitle': {
+                'hafta_1': 345,
+                'hafta_2': 345,
+                'hafta_3': 340,
+                'hafta_4': 340,
+                'hafta_5': 340,
+            },
+        },
+        'outsource_off_orani': 0.2,
+    },
+
+    # ---- CEZA HİYERARŞİSİ ----
+    # KALDIRILANLAR (2026-10-07): mip bloklarındaki 'weekly_shrinkage_fallback'
+    # ve 'coverage_shortfall' anahtarları SİLİNDİ.
+    #   · shrinkage gevşetme (eski STAGE 2) modele hiç girmedi — talebi sahte
+    #     şekilde azaltıyordu ve raporda görünmüyordu. Erlang artık hiçbir
+    #     aşamada kurcalanmaz.
+    #   · coverage_shortfall ayrı bir AŞAMA değil artık: eksik kapsama slack'i
+    #     baştan modelde. Cezası aşağıdaki kapsama_hafta_ici / _hafta_sonu
+    #     (hafta içi değeri eski coverage_shortfall.penalty = 5000 ile aynı).
+    # Config'de ölü anahtar bırakmıyoruz — değiştirip etki beklenmesin.
+    #
+    # EKLENEN (2026-10-08) 'yayma': K8. Eski modelde fazlalığı MIP değil,
+    # MIP sonrası `_distribute_surplus_per_day` bölüştürücüsü `kalan // n` ile
+    # eşit bölüyordu. Birleşik modelde fazlalığı MIP yerleştiriyor ve bantsız
+    # saatlerde fazlalığın bedeli sıfır olduğu için tek vardiyaya yığıyordu.
+    # 'yayma' grup başına bir üst zarf z'ye yazılan cezadır — model z'yi
+    # küçültmek için yükü dağıtmak zorunda kalır.
+    # DEĞER SEÇİMİ (tam ay ölçümü, sentetik veri, 15 MIP):
+    #    2 → 158 sn, kitle hafta 3'te bir gün 71'e çöküyor (gap artefaktı:
+    #        zarf yalnız TEPEYİ bastırır, tabanı kaldırmaz)
+    #   20 → 537 sn, dağılım düzgün
+    #   50 → 79 sn, dağılım düzgün   ← SEÇİLEN
+    # Güçlü ceza dal-sınırı daha iyi buduyor: hem düzgün hem hızlı.
+    # kapsama (5000) ve slot_cap (100-500) HER ZAMAN yaymadan önce gelir —
+    # yayma eşit maliyetli seçenekler arasındaki beraberliği bozar, kapsamayı
+    # ya da gece tavanını satmaz.
+    #
+    # 'oran_sapma' 200 → 200.000 (2026-10-08). HAFTA SONU OUTSOURCE ORAN BANDI.
+    # Eski ayrı hafta sonu modelinde (weekend_forecast_v12.py:466-471) bu bant
+    # SERT'ti, slack YOKTU. Birleşik modele slack + 200 ceza ile taşımak bandı
+    # fiilen DEVRE DIŞI bıraktı: model cezayı ödeyip hafta sonunu inhouse'la
+    # doldurdu. Ölçüm (Ekim 2026 gerçek veri, 4 Ekim Pazar):
+    #   inhouse 285 · outsource 77 → oran %20, band %65-70 istiyor
+    #   ödenen ceza: 171 kişi × 200 = 34.200/gün, dokuz hafta sonu ~300 bin
+    # Neden ödüyordu: alternatif outsource adam-gününü hafta içinden çekmek ve
+    # orada kapsama_hafta_ici (5000/kişi-slot) yemek — daha pahalı.
+    #
+    # ZİNCİR: bant yumuşak → hafta sonu inhouse sınırsız (K3 yalnız hafta içi,
+    # hafta sonunda kadro tavanı YOK) → inhouse'un 15:00 sonrası tek vardiyası
+    # V18, 106 kişiyle düz blok → 15:00-17:30 %138 → sarkan vardiyalar (V20/V21)
+    # 5-7'de kalıyor → Pazartesi 00:00'a kadro sarkmıyor → gece V01 şişiyor.
+    #
+    # NEDEN SERT DEĞİL, ÇOK YÜKSEK CEZA: davranış sert bantla aynı olur
+    # (oran_sapma 200.000 kapsamanın üstünde), ama slack durduğu için model
+    # hiçbir koşulda çözümsüz kalmaz. Eski model gerçekten sertti; birleşik
+    # modelde adam-gün eşitliğiyle çakışma riski var, onun slack'i (500) yol verir.
+    # Sert bantla hafta sonu şekli: B ≥ 1.857·A → arz ~400'de A≈140, B≈260
+    # (sahadaki gerçek: Cmt'de ~146 inhouse).
+    #
+    # ÖNEMLİ OLAN SIRA: üsttekini bozmak her zaman alttakinden pahalı olmalı.
+    # RR ve slot_cap cezaları gün tipi bloğundan gelir, burada DEĞİL.
+    # ---- SURPLUS DAĞITIMI (MIP SONRASI, ARİTMETİK) ----
+    # 2026-10-09: eski model_1_new v10/v11 davranışı GERİ GETİRİLDİ.
+    # MIP kadro kısıtlarını TAVAN olarak kurar ("en az kaç kişi yeter"),
+    # kalan kadro/bütçe burada aritmetikle dağıtılır. Eşitlikle çözmenin
+    # sorunu: 07:00 inhouse çarpanı (x15) gibi küçük sinyaller gap_rel %3
+    # toleransının (~15.300) içinde kayboluyordu (karar değeri ~910).
+    #
+    # YALNIZ HAFTA İÇİ. Hafta sonunda eski modelde de kadro kısıtı yoktu.
+    #
+    # method 'rr_first': önce AÇIK slotları en çok kapatan vardiyaya 1'er
+    # kişi ekle; açık kalmayınca kalanı eşit böl (en az kişiliden başlayarak).
+    # windows: vardiyanın BAŞLANGIÇ saatine göre havuz. 07:00 bilerek HİÇBİR
+    # pencerede değil — oraya kimi koyacağına MIP karar versin diye.
+    # Oranlar v10 weekday_config'den birebir alındı.
+    #
+    # BİLİNEN BEDEL: dağıtıcı MIP'ten sonra koştuğu için slot_cap bantlarını
+    # delebilir. Bilinçli kabul (kullanıcı kararı 2026-10-09) — eski davranış.
+    'surplus_distribution': {
+        'enabled': True,
+        'method': 'rr_first',
+        # False (2026-10-09): True iken MIP'in AÇMADIĞI inhouse vardiyalar
+        # aday olmuyordu. v2'nin tavan MIP'i az vardiya açtığı için tek
+        # aday kalıp fazlalığın tamamı oraya yığılıyordu (ölçüldü: 404
+        # inhouse'un hepsi V18_inhouse'a). False ile pencere içindeki tüm
+        # vardiyalar aday: 404 -> 161 (122/121/161'e yayıldı).
+        # min_per_shift onarımı dağıtım sonrası koşar, eşik altı vardiya kalmaz.
+        # KUYRUK BAZLI (2026-10-19). True → kalan kadro yalnız MIP'in AÇTIĞI
+        # vardiyalara eklenir (kompakt). False → penceredeki tüm vardiyalara.
+        # kurumsal/gold False iken 1-2 kişilik çok sayıda vardiya açılıyordu
+        # (min_per_shift 0 → onarım yok). Tek değer (True/False) de kabul edilir.
+        'only_assigned_shifts': {'kitle': False, 'kurumsal': True, 'gold': True},
+        'outsource_enabled': True,
+        # PT de AYRI bir havuz (2026-10-09, kullanıcı kararı). Haftalık PT
+        # toplamı zaten doğruydu ama günlere dalgalı dağılıyordu
+        # (19,19,0,19,0) — yayma kapatılınca düzleştiren kalmamıştı.
+        # Hedef outsource ile AYNI formül: (haftalık hedef − hafta sonu PT)
+        # ÷ hafta içi gün. K6'ya da günlük tavan eklendi, yoksa dağıtıcı
+        # sadece ekleyeceği için haftalık hedef aşılırdı.
+        'part_time_enabled': True,
+        # pt_gun_tol: günlük PT tavanına gün başına esneklik.
+        # ÖLÇÜLDÜ (hafta 4, 19-25 Ekim, tek hafta):
+        #   tavan YOK  PT [0,0,19,19,19]  haftalık 95/95  açık 0   20 sn
+        #   tol=0      PT [11,11,11,11,11] haftalık 93/95 açık 0   15 sn  ← SEÇİLEN
+        #   tol=1      PT [12,12,12,12,11] haftalık 97/95 açık 0  933 sn  ✗
+        #   tol=2      PT [13,13,11,11,13] haftalık 99/95 açık 0  228 sn  ✗
+        # Tolerans hem süreyi uçuruyor hem haftalık hedefi AŞIYOR
+        # (dağıtıcı sadece ekler, tavan gevşeyince fazlayı da ekler).
+        # 0 = sert tavan: en düz, en hızlı, haftalık hedefin 2 altında
+        # (pt_hedef_sapma cezası 2×2000 = 4000 ödeniyor, kabul).
+        'pt_gun_tol': 0,
+        'fallback_all': True,
+        'windows': [
+            {'name': 'sabah', 'start': '09:00', 'end': '11:00', 'ratio': 2 / 3},
+            {'name': 'aksam', 'start': '11:00', 'end': '20:00', 'ratio': 1 / 3},
+        ],
+    },
+
+    # ---- HAFTALIK VARDİYA MODLARI (2026-10-12) — karşılaştırma için ----
+    # inhouse_mod:
+    #   'sabit'  → hafta içi her inhouse vardiya Pzt-Cum AYNI kişi (v2'nin eski hali).
+    #              Fazla kadro haftada BİR KEZ dağıtılır, 5 güne aynı eklenir.
+    #   'gunluk' → vardiya SETİ haftalık sabit, kişi sayısı ihtiyaca göre günlük.
+    #              POOL CAP: Σ vardiya haftalık zirvesi ≤ kadro (bir kişi hafta
+    #              boyu tek vardiyada — Model-2 takım kuralıyla uyumlu).
+    # inhouse_surplus (yalnız 'gunluk'):
+    #   True  → her vardiya her gün takım kapasitesine doldurulur + kalan kadro
+    #           haftalık dağıtılır → plan 'sabit'e yaklaşır
+    #   False → inhouse'a ekleme YOK; günlük fark Model-2'de off/fazla olur
+    # outsource_ortak_set: outsource HAFTA İÇİ vardiya seti haftalık sabit, kişi
+    #   günlük (outsource planlama ekibi talebi). Hafta sonu kapsam DIŞI.
+    'haftalik_vardiya': {
+        'inhouse_mod': 'sabit',
+        'inhouse_surplus': True,
+        'outsource_ortak_set': True,
+        # outsource_gunluk_esit: True → hafta içi outsource her gün ~eşit
+        #   (2026-10-09 günlük tavanı + dağıtıcı doldurması; eski davranış).
+        #   False → bütçeyi MIP günlere İHTİYACA göre böler (Pzt daha çok).
+        #   Ölçüldü (sentetik, sıkışık): True'da Pzt %90 / Cum %97 kapsama.
+        'outsource_gunluk_esit': False,
+        # sarkan_devret (2026-10-14, HÜCRE 6'dan taşındı): True → bir haftanın
+        #   Pazar'ından ertesi Pazartesi'ye sarkan gece kadrosu aktarılır (haftalar
+        #   SIRAYLA çözülür). False → her hafta sıfırdan; Pazartesi gece eksiği
+        #   şişer (ölçüldü: 5 Ekim 70→120). Config'te olduğu için pickle'a ve
+        #   Excel CONFIG sayfasına koşudaki değer yazılır.
+        'sarkan_devret': True,
+        # ertesi_gun_bakis (2026-10-15): haftanın SON günü (Pazar) ertesi günün
+        #   (Pazartesi) gece ilk saatlerini görür. Pazartesi'nin kendi gece
+        #   vardiyasının zaten karşılayacağı kısım (Erlang, sarkanın bitişi ..
+        #   sabah vardiyası) düşülür; kalanı yalnız Pazar akşamından sarkan
+        #   vardiyalar kapatabilir. Amaç: Pzt 00:00-08:00'e gece yarısı tepesi
+        #   için kişi yazılıp sabaha kadar boşta kalmasın. Ay içi geçişler,
+        #   sarkan_devret=True iken.
+        'ertesi_gun_bakis': True,
+    },
+
+    # ---- GÜNLÜK RR DENGESİ (2026-10-12) ----
+    # Amaç: her gün RR %100'e en yakın. Bütçe yetmezse eksik tek güne yığılmasın.
+    # Günün eksik ORANI (Σ eksik ÷ Σ ihtiyaç) esikler'i aştıkça, aşan kısma o
+    # günün kapsama cezasının carpanlar katı EK ceza (kümülatif: %1 üstü ×2,
+    # %2 üstü ×4 toplam). Yoğun gün ağırlığı YOK — o Model-2'nin off işi.
+    # ---- SLOT_CAP ÖLÇÜSÜ (2026-10-16) ----
+    # 'kap_rr' : slot_cap tavanı İŞ BİRİMİ kapasitesine göre. Bir yarım saatte
+    #            gelen çağrıyı karşılamak için gereken kişi (Kap ihtiyacı) =
+    #            çağrı ÷ (cagri_adedi/2 × (1 − rapor_etkisi − kapasite_kaybi))
+    #            [hourly_report bloğundan]. Bant tavanı = Kap ihtiyacı × max_ratio
+    #            → "Kap_RR bu bantta max_ratio'yu geçmesin".
+    # 'erlang' : eski v2 davranışı (tavan = Erlang ihtiyacı × max_ratio).
+    # Kapsama (K1) HER İKİ durumda da ERLANG'a göre — Erlang kaldırılmadı.
+    #
+    # BANT ALANLARI (queue_configs[kuyruk][gün]['slot_cap']['bands'] içinde):
+    #   max_ratio   : Kap_RR tavanı (aşım × penalty). None/yok → tavan yok
+    #   penalty     : tavan aşımı cezası (kişi-slot başına)
+    #   min_kap_rr  : Kap_RR TABANI (ör. 0.95) — bantta kapasite gelen çağrının
+    #                 %95'inin altına düşmesin. Yok → taban yok. Ölçüden bağımsız
+    #                 her zaman Kap_RR ile hesaplanır.
+    #   min_penalty : taban açığı cezası (kişi-slot). Yok → ceza['kap_rr_taban']
+    # DİKKAT: bant eşleşmesi İLK EŞLEŞEN — sadece taban koymak için yeni bant
+    #   eklerken mevcut bantlarla çakışmasın (çakışırsa listede önce gelen geçerli).
+    #   Ör. kitle hafta içi 11:00–22:00 arasında bant YOK → orada taban için
+    #   {'start': '11:00', 'end': '22:00', 'min_kap_rr': 0.95} eklenmeli.
+    'slot_cap_olcu': 'kap_rr',
+
+    # ---- Kap_RR DENGESİ (2026-10-16) — slot_cap bantlarının OTOMATİK karşılığı ----
+    # Her yarım saatte hedef Kap_RR = %100. Hedeften sapma KADEMELİ cezalanır
+    # (konveks) → model fazlayı/eksiği saatlere oranla, dengeli dağıtır; elle
+    # bant / max_ratio ayarı gerekmez. Erlang kapsaması (K1) ÖNCE gelir — tüm
+    # kademe cezaları Erlang açık cezasının ALTINDA kalmalı.
+    #   alt / ust : [(sapma_oranı_üst_sınırı, kişi-slot cezası), ...] — sonuncu None = sınırsız
+    #               (0.02, 10) → Kap_RR %98–100 (alt) / %100–102 (üst) arası 10
+    #   gece_ust  : gece penceresinde FAZLA ilk kişiden itibaren bu ceza (gece şişmesin)
+    #   slot_cap_kapat : True → bu kuyrukta slot_cap bantları (tavan + min_kap_rr) devre dışı
+    # TAHMİN BUFFER (2026-10-21, kullanıcı kararı): tahmin çağrısına AÇIK tampon.
+    # Ölçülen: Cumartesi gerçek çağrı tahminin +%12,6 üstünde (12-16 arası
+    # +%19-25), Eylül ve Ekim'de aynı yön. Tampon MIP'e girmeden çağrıya
+    # uygulanır → Erlang ihtiyacı, Kap ihtiyacı, alt-kuyruk minimumları hepsi
+    # tamponlu çağrıyla hesaplanır. Ham tahmin pickle'da 'calls_by_slot_ham'
+    # olarak saklanır; pickle adına _tb etiketi, Excel CONFIG kartına satır düşer.
+    # kuyruk → kural listesi; gunler: 'hafta_ici' | 'cumartesi' | 'pazar';
+    # [start, end) slot aralığı; oran 0.10 → çağrı × 1.10. Boş → kapalı.
+    'tahmin_buffer': {
+        'kitle': [
+            {'gunler': ('cumartesi',), 'start': '10:00', 'end': '17:00', 'oran': 0.10},
+        ],
+    },
+
+    'kap_denge': {
+        'kitle': {
+            'enabled': True,
+            'slot_cap_kapat': True,
+            # mip_inhouse_tam (2026-10-20): hafta içi inhouse kadrosunun TAMAMINI
+            # MIP yerleştirir (Σ inhouse = kadro); dağıtıcı bu kuyruğun inhouse'una
+            # EKLEMEZ. MIP inhouse fazlasını görür → hafta içi outsource'u azaltıp
+            # bütçeyi Kap'ı düşük güne (Cumartesi) kaydırabilir; 09:00'a dağıtıcı
+            # yığılması kalkar. False → eski davranış (MIP ≤ kadro + dağıtıcı).
+            'mip_inhouse_tam': False,   # deneme: sentetikte hafta içi Kap'ı düşürdü (2026-10-20)
+            'alt': [(0.02, 10.0), (0.10, 200.0), (None, 1500.0)],
+            'ust': [(0.02, 10.0), (0.20, 200.0), (None, 1500.0)],   # S4: orta kademe %102–120
+            'gece_ust': 1500.0,
+            'gece_saat': ('00:00', '07:00'),
+        },
+        'kurumsal': {'enabled': False},
+        'gold': {'enabled': False},
+    },
+
+    'rr_gun_dengesi': {
+        'enabled': True,
+        'esikler': [0.01, 0.02],
+        'carpanlar': [1.0, 2.0],
+    },
+
+    'ceza': {
+        # Kap_RR TABANI açığı (kişi-slot başına), bant min_penalty yoksa.
+        # Kapsama cezasının (Erlang, 50000) ALTINDA → Erlang önceliği korunur;
+        # slot_cap cezalarının (50–500) ÜSTÜNDE → taban fazlalıktan önemli.
+        'kap_rr_taban': 2000.0,
+        # VARDİYA AÇMA CEZASI (2026-10-19): açık vardiya-GÜN başına sabit ceza,
+        # kuyruk × şirket ('inhouse' / 'outsource' / 'part_time'). Yumuşak — sınır
+        # değil: Kap/kapsama kazancı cezadan büyükse model yine açar. Amaç: Kap
+        # dengesi küçük ince ayarlar için 13'erlik yeni outsource vardiyası açmasın.
+        # Ortak sette (outsource hafta içi) açık vardiya her hafta içi günü sayılır
+        # → 400 × 5 gün = haftada 2000. Boş sözlük / 0 → kapalı.
+        'vardiya_acma': {'kitle': {'outsource': 3000.0}},   # S4 (2026-10-20)
+        # GECE KAPSAMA (2026-10-16): gece saatlerinde açık kişi-slot cezası.
+        # Gündüzün 50000'i gece birkaç kişilik açığı aşırı pahalı yapıyordu →
+        # tek bir yoğun gece slotu (ör. 02:00) için 00:00-08:00'e 8 saat boyunca
+        # boşta kalan outsource yazılıyordu. Değer gece slot_cap cezasıyla
+        # tartılır: bir kişi gecenin çoğunda tavan üstündeyse (≈9 slot × 500)
+        # bu cezadan pahalıya gelir → model o kişiyi yazmaz, kısa açığı kabul eder.
+        # None → kapalı (gündüz cezası geçerli). Hafta içi + hafta sonu, tüm kuyruklar.
+        'kapsama_gece': 3000.0,
+        'kapsama_gece_saat': ('00:00', '07:00'),   # [başlangıç, bitiş) — 07:00 gündüz
+        # 50000 → 5000 (2026-10-12, kullanıcı kararı): hafta içi ile EŞİT.
+        # Birleşik modelde outsource bütçesi 7 güne ORTAK; 10× fark bütçeyi
+        # hafta sonuna çekip açığı hafta içine itiyordu. Hedef "her gün RR
+        # %100'e en yakın". Hafta sonu şeklini zaten oran bandı (oran_sapma
+        # 200000) koruyor — sıra korunur: oran > kapsama.
+        'kapsama_hafta_sonu': 50000.0,   # S4 (2026-10-20)
+        'kapsama_hafta_ici': 50000.0,
+        'oran_sapma': 200000.0,
+        'pt_hedef_sapma': 2000.0,
+        'adam_gun_sapma': 500.0,
+        # 'yayma' 50 -> 0 (2026-10-09): K8'in işini artık MIP SONRASI
+        # surplus dağıtıcısı yapıyor. İkisi açık kalırsa çakışır — MIP
+        # minimumu ararken yayma daha çok vardiya açtırır, her biri
+        # min_per_shift=13 taban ister, yani minimumdan uzaklaşır.
+        # Geri açmak için: 50.0 yaz + surplus_distribution.enabled=False.
+        # yayma (2026-10-19): KUYRUK BAZLI → {'kitle': 0, 'kurumsal': 0, 'gold': 0}.
+        # Tek sayı da kabul edilir (tüm kuyruklara aynı). Ölçüm (Ekim, C senaryosu):
+        # kitle 500 → 09:00 inhouse 164→152, Kap_RR değişmedi; 50 etkisiz.
+        # kurumsal 500 → dağılım KÖTÜLEŞTİ (Kap dengesi kapalı, kişiyi Kap'a bakmadan kaydırır).
+        'yayma': {'kitle': 1500.0, 'kurumsal': 0.0, 'gold': 0.0},   # S4: 09:00 156→128
+        # yayma_gruplari (2026-10-16): yayma hangi şirket gruplarına uygulanır.
+        # 'inhouse'   → inhouse aynı başlangıca yığılmasın (ör. 09:00'da 170 kişi)
+        # 'outsource' → outsource vardiyalara + günlere yayılır. KAPALI: outsource'u
+        #               13'erlik onlarca vardiyaya bölüyordu (ekip az vardiya istiyor)
+        # 'pt'        → PT günlere eşit
+        'yayma_gruplari': ('inhouse',),
+    },
+
+    # ---- ÇÖZÜCÜ ----
+    # gap_rel: kadro planında %3 optimallik boşluğu anlamsız, süreyi çok kısaltır.
+    # ÖLÇÜM (kitle hafta 2, K8 yayma açık): 0.02 → 300 sn (limit), 0.03 → 13 sn,
+    # ikisi de AYNI dağılımı veriyor. 0.05'te gün dengesi bozuluyor (bir güne
+    # 83, diğerlerine 396) → 0.03 alt ve üst arasındaki doğru nokta.
+    # time_limit'e takılırsa çözüm KABUL EDİLİR (kanıtlanmamış ama geçerli)
+    'solver': {
+        'time_limit': 300,
+        'gap_rel': 0.03,
+        'gap_rel_by_queue': {'gold': 0.001, 'kurumsal': 0.001},
+        'msg': 0,
+    },
+
+    # =========================================================================
+    # GÜN TİPİ BAZLI BLOKLAR
+    # =========================================================================
+    'queue_configs': {
+        'kitle': {
+            'hafta_ici': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.18, 10: 0.05, 11: 0.08, 12: 0.21, 13: 0.19, 14: 0.07, 15: 0.18,
+                        16: 0.22, 17: 0.18, 18: 0.1, 19: 0.08, 20: 0.05, 21: 0.15, 22: 0.17,
+                        23: 0.08, 'default': 0.0,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 13,
+                    'min_per_shift_overrides': {'00:00': 0},
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 2.0,
+                    'peak_penalty': 4.0,
+                    'peak_threshold': 0.85,
+                },
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '08:00', 'max_ratio': 1.15, 'penalty': 120.0},
+                        {'start': '08:00', 'end': '09:00', 'max_ratio': 1.3, 'penalty': 100.0},
+                        {'start': '09:00', 'end': '09:59', 'max_ratio': 1.1, 'penalty': 80.0},
+                        {'start': '10:00', 'end': '10:59', 'max_ratio': 1.1, 'penalty': 80.0},
+                        {'start': '22:00', 'end': '02:30', 'max_ratio': 1.25, 'penalty': 100.0},
+                        {'start': '02:30', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 500.0},
+                        # KAP_RR TABANI ÖRNEĞİ (pasif — açmak için baştaki # sil):
+                        # 11:00–22:00 arasında Kap_RR %93'ün altına düşmesin. max_ratio YOK →
+                        # bu bantta tavan uygulanmaz, sadece taban. min_penalty yoksa
+                        # ceza['kap_rr_taban'] (2000) kullanılır. Mevcut bir banda da
+                        # 'min_kap_rr' alanı eklenebilir (tavan + taban birlikte).
+                        # {'start': '11:00', 'end': '22:00', 'min_kap_rr': 0.93, 'min_penalty': 2000.0},
+                        # KİTLE HAFTA İÇİ — önerilen bantlar (pasif).
+                        # Önce 18:00–22:00 dene; 11:00–18:00 bantlarını gerekirse ekle.
+                        # Sabah/gece bantları korunur; cap inhouse + outsource + PT toplamına uygulanır.
+                        # {'start': '11:00', 'end': '15:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'balance_penalty': {
+                    'enabled': True,
+                    'penalty_per_diff': 2.0,
+                    'windows': [
+                        {'name': 'sabah', 'start': '07:00', 'end': '08:59', 'penalty': 3.0},
+                        {'name': 'sabah_gec', 'start': '09:00', 'end': '10:59', 'penalty': 5.0},
+                    ],
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.18, 10: 0.05, 11: 0.08, 12: 0.21, 13: 0.19, 14: 0.07, 15: 0.18,
+                        16: 0.22, 17: 0.18, 18: 0.1, 19: 0.08, 20: 0.05, 21: 0.15, 22: 0.17,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.06, 1: 0.06, 2: 0.06, 3: 0.06, 4: 0.06, 5: 0.06, 6: 0.06, 7: 0.06,
+                        8: 0.06, 9: 0.21, 10: 0.14, 11: 0.13, 12: 0.15, 13: 0.22, 14: 0.19,
+                        15: 0.24, 16: 0.27, 17: 0.24, 18: 0.18, 19: 0.14, 20: 0.17, 21: 0.13,
+                        22: 0.16, 23: 0.13, 'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 5},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '09:00', 'max_ratio': 1.1, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '10:00', 'end': '11:00', 'max_ratio': 1.3, 'penalty': 50.0},
+                        {'start': '18:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # KİTLE CUMARTESİ — önerilen bantlar (pasif).
+                        # Yeni deneme seçeneği: önce akşam; 15:00–18:00 yalnız fazlalık sürerse.
+                        # 18:00–22:00 ve 22:00–00:00 mevcut 18:00–00:00 bandının YERİNE geçer.
+                        # Aktifleştirirken mevcut 18:00–00:00 satırını yorumla; ilk eşleşen bant kullanılır.
+                        # Mevcut sabah ve 00:00–07:00 bantlarını koru; eksik kişi-slot ile birlikte değerlendir.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09, 13: 0.16, 14: 0.13, 15: 0.19,
+                        16: 0.21, 17: 0.18, 18: 0.12, 19: 0.09, 20: 0.12, 21: 0.07, 22: 0.1,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07, 7: 0.07,
+                        8: 0.07, 9: 0.25, 10: 0.18, 11: 0.2, 12: 0.17, 13: 0.16, 14: 0.22,
+                        15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17, 19: 0.18, 20: 0.17, 21: 0.15,
+                        22: 0.1, 23: 0.24, 'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 5},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '09:00', 'max_ratio': 1.1, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '10:00', 'end': '11:00', 'max_ratio': 1.3, 'penalty': 50.0},
+                        {'start': '18:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # KİTLE PAZAR — önerilen bantlar (pasif).
+                        # Yeni deneme seçeneği: önce akşam; 15:00–18:00 yalnız fazlalık sürerse.
+                        # 18:00–22:00 ve 22:00–00:00 mevcut 18:00–00:00 bandının YERİNE geçer.
+                        # Aktifleştirirken mevcut 18:00–00:00 satırını yorumla; ilk eşleşen bant kullanılır.
+                        # Mevcut sabah ve 00:00–07:00 bantlarını koru; eksik kişi-slot ile birlikte değerlendir.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.19, 10: 0.1, 11: 0.13, 12: 0.1, 13: 0.09, 14: 0.15, 15: 0.17,
+                        16: 0.18, 17: 0.26, 18: 0.1, 19: 0.11, 20: 0.1, 21: 0.08, 22: 0.03,
+                        23: 0.17, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+        },
+        'kurumsal': {
+            'hafta_ici': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03, 7: 0.03,
+                        8: 0.03, 9: 0.21, 10: 0.08, 11: 0.11, 12: 0.24, 13: 0.22, 14: 0.1,
+                        15: 0.21, 16: 0.25, 17: 0.21, 18: 0.13, 19: 0.11, 20: 0.08, 21: 0.18,
+                        22: 0.2, 23: 0.11, 'default': 0.0,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                    'min_per_shift_overrides': {},
+                },
+                'rr_penalty': {
+                    'enabled': False,
+                    'peak_exempt': False,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '08:59', 'max_ratio': 1.1, 'penalty': 50.0},
+                        {'start': '18:00', 'end': '19:59', 'max_ratio': 1.25, 'penalty': 80.0},
+                        {'start': '20:00', 'end': '00:00', 'max_ratio': 1.15, 'penalty': 80.0},
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 100.0},
+                        # KURUMSAL HAFTA İÇİ — önerilen bantlar (pasif).
+                        # İlk tercih mevcut bantları korumak; aşağıdaki ek yalnız 15:00–18:00 RR fazla ise.
+                        # Bu değer başlangıç denemesidir; küçük ihtiyaçta yuvarlama ve PT etkisini kontrol et.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                    ],
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.18, 10: 0.05, 11: 0.08, 12: 0.21, 13: 0.19, 14: 0.07, 15: 0.18,
+                        16: 0.22, 17: 0.18, 18: 0.1, 19: 0.08, 20: 0.05, 21: 0.15, 22: 0.17,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.02, 1: 0.02, 2: 0.02, 3: 0.02, 4: 0.02, 5: 0.02, 6: 0.02, 7: 0.02,  # 2026-10-14 eski sürümle eşitlendi
+                        8: 0.05, 9: 0.21, 10: 0.13, 11: 0.12, 12: 0.14, 13: 0.21, 14: 0.18,
+                        15: 0.24, 16: 0.26, 17: 0.24, 18: 0.17, 19: 0.14, 20: 0.17, 21: 0.12,
+                        22: 0.15, 23: 0.13, 'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # KURUMSAL CUMARTESİ — önerilen bantlar (pasif).
+                        # Yeni, gevşek deneme seçeneği; fotoğraflar tek başına slot fazlalığını doğrulamaz.
+                        # Önce 18:00–24:00; 15:00–18:00 yalnız fazlalık sürerse. Gece bandını koru.
+                        # Küçük ihtiyaçta en az 3 kişi tavanı ve PT etkisi vardır; eksik kişi-slot artmamalı.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.35, 'penalty': 30.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09, 13: 0.16, 14: 0.13, 15: 0.19,
+                        16: 0.21, 17: 0.18, 18: 0.12, 19: 0.09, 20: 0.12, 21: 0.07, 22: 0.1,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.02, 1: 0.02, 2: 0.02, 3: 0.02, 4: 0.02, 5: 0.02, 6: 0.02, 7: 0.02,  # 2026-10-14 eski sürümle eşitlendi
+                        8: 0.02, 9: 0.25, 10: 0.18, 11: 0.2, 12: 0.17, 13: 0.16, 14: 0.22,
+                        15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17, 19: 0.18, 20: 0.17, 21: 0.15,
+                        22: 0.1, 23: 0.24, 'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # KURUMSAL PAZAR — önerilen bantlar (pasif).
+                        # Yeni, gevşek deneme seçeneği; fotoğraflar tek başına slot fazlalığını doğrulamaz.
+                        # Önce 18:00–24:00; 15:00–18:00 yalnız fazlalık sürerse. Gece bandını koru.
+                        # Küçük ihtiyaçta en az 3 kişi tavanı ve PT etkisi vardır; eksik kişi-slot artmamalı.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.35, 'penalty': 30.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.30, 'penalty': 50.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.19, 10: 0.1, 11: 0.13, 12: 0.1, 13: 0.09, 14: 0.15, 15: 0.17,
+                        16: 0.18, 17: 0.26, 18: 0.1, 19: 0.11, 20: 0.1, 21: 0.08, 22: 0.03,
+                        23: 0.17, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+        },
+        'gold': {
+            'hafta_ici': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03, 7: 0.03,
+                        8: 0.03, 9: 0.21, 10: 0.08, 11: 0.11, 12: 0.24, 13: 0.22, 14: 0.1,
+                        15: 0.21, 16: 0.25, 17: 0.21, 18: 0.13, 19: 0.11, 20: 0.08, 21: 0.18,
+                        22: 0.2, 23: 0.11, 'default': 0.0,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 13,
+                    'min_per_shift_overrides': {'18:00': 0, '19:00': 0, '00:00': 0},
+                },
+                'rr_penalty': {
+                    'enabled': False,
+                    'peak_exempt': False,
+                    'penalty_per_person': 2.0,
+                    'peak_penalty': 4.0,
+                    'peak_threshold': 0.7,
+                },
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '08:00', 'max_ratio': 1.15, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.3, 'penalty': 50.0},
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 100.0},
+                        # GOLD HAFTA İÇİ — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.15, 'penalty': 100.0},
+                    ],
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.18, 10: 0.05, 11: 0.08, 12: 0.21, 13: 0.19, 14: 0.07, 15: 0.18,
+                        16: 0.22, 17: 0.18, 18: 0.1, 19: 0.08, 20: 0.05, 21: 0.15, 22: 0.17,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 5: 0.05, 6: 0.05, 7: 0.05,
+                        8: 0.05, 9: 0.21, 10: 0.13, 11: 0.12, 12: 0.14, 13: 0.21, 14: 0.18,
+                        15: 0.24, 16: 0.26, 17: 0.24, 18: 0.17, 19: 0.14, 20: 0.17, 21: 0.12,
+                        22: 0.15, 23: 0.13, 'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # GOLD CUMARTESİ — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09, 13: 0.16, 14: 0.13, 15: 0.19,
+                        16: 0.21, 17: 0.18, 18: 0.12, 19: 0.09, 20: 0.12, 21: 0.07, 22: 0.1,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07, 7: 0.07,
+                        8: 0.07, 9: 0.25, 10: 0.18, 11: 0.2, 12: 0.17, 13: 0.16, 14: 0.22,
+                        15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17, 19: 0.18, 20: 0.17, 21: 0.15,
+                        22: 0.1, 23: 0.24, 'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # GOLD PAZAR — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.19, 10: 0.1, 11: 0.13, 12: 0.1, 13: 0.09, 14: 0.15, 15: 0.17,
+                        16: 0.18, 17: 0.26, 18: 0.1, 19: 0.11, 20: 0.1, 21: 0.08, 22: 0.03,
+                        23: 0.17, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+        },
+    },
+}
+
+
+def gun_tipi(date_like):
+    """tarih → 'hafta_ici' | 'cumartesi' | 'pazar'"""
+    import pandas as pd
+    wd = pd.to_datetime(date_like).weekday()
+    return 'cumartesi' if wd == 5 else 'pazar' if wd == 6 else 'hafta_ici'
+
+
+def blok_coz(config, queue, date_like):
+    """queue_configs[queue][gün_tipi] bloğunu config'in ÜSTÜNE çıkarır.
+
+    Dönen config düz yapıdadır: config['erlang'], ['mip'], ['slot_cap'],
+    ['rr_penalty'], ['hourly_report'], ['balance_penalty'] — hepsi o
+    (kuyruk, gün tipi) bloğundan. Yardımcı fonksiyonlar bu anahtarları
+    doğrudan okur, hangi bloktan geldiğini bilmez.
+
+    Sığ kopya döner → çağıranın config'i değişmez.
+    """
+    tip = gun_tipi(date_like)
+    qc = config.get('queue_configs') or {}
+    if queue not in qc:
+        raise ValueError(f"queue_configs['{queue}'] YOK — tanımlı: {sorted(qc)}")
+    blok = qc[queue].get(tip)
+    if not blok:
+        raise ValueError(f"queue_configs['{queue}']['{tip}'] YOK")
+    eksik = [k for k in _BLOK if k not in blok]
+    if eksik:
+        raise ValueError(f"queue_configs['{queue}']['{tip}'] EKSİK: {eksik}")
+    yeni = copy.copy(config)
+    yeni.update({k: blok[k] for k in _BLOK})
+    yeni['_gun_tipi'] = tip
+    return yeni
