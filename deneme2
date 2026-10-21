@@ -1,117 +1,80 @@
-# =============================================================================
-# MODEL-1 SENARYO KARŞILAŞTIRMA — TAHMİNE GÖRE Kap / Erlang (2026-10-21)
-# =============================================================================
-# Tek hücre, tek seferde çalışır. Yalnız Model-1 pickle'larını okur
-# (inhouse dahil — Model-2 yok). Başka hücreye bağımlı değil.
-#
-#   GENEL        : gün tipi bazında kişi-saat · Kap_RR_tahmin · Erlang açığı
-#   SAATLİK      : sahadaki − Kap ihtiyacı (eksi = eksik, artı = fazla)
-#                  Cmt / Pzr / hafta içi ayrı
-#   Kap_RR saat  : hafta sonu saat bazında Kap_RR_tahmin
-#   09–11        : hafta içi inhouse yığılması
-# =============================================================================
-import pickle
-import datetime as dt
-import numpy as np
-import pandas as pd
-
-YEAR, MONTH = 2026, 10
-QUEUE = "kitle"
-SENARYOLAR = {                       # istediğin kadar senaryo ekleyebilirsin
-    "S4": "…S4 Model-1 pickle yolu…",
-    "S7": "…S7 Model-1 pickle yolu…",
-}
-SAAT = [f"{h:02d}" for h in range(8, 21)]   # saatlik tablolarda gösterilen saatler
-
-_SLOTS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
-_GUN = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
+# %% [HÜCRE 18M-D] — MESAİYE KALAMAZ AY BAŞI DENETİMİ (SALT OKUNUR) ─
+from collections import Counter as _C18d
 
 
-def _oran(tbl, h, vars_):
-    tbl = tbl or {}
-    return tbl.get(h, tbl.get("default", vars_))
+def _calisabilir18d(a, ds):
+    """o gün en az bir vardiyada fiilen çalışabilir mi (H9/H13/H14B/H16/H16B/H15-ay başı)."""
+    d = dt.date.fromisoformat(ds)
+    if d in TATIL:
+        return False
+    if (a, ds) in mesai_hs_talep_off:               # H18M: hafta sonu off_t → kesin off
+        return False
+    for v in gun_vardiyalari.get(ds, []):
+        if (a, ds, v) not in x or not _kova_calisabilir(a, ds, v):
+            continue
+        if d in ARIFE and v != ARIFE_YARIM:
+            continue
+        if d in ARIFE and d.weekday() >= 5:
+            continue
+        if d == AY_ILK and not _h18m_h15_uygun(a, ds, v):
+            continue
+        return True
+    return False
 
 
-def _m1_tablo(yol):
-    """Model-1 pickle → slot tablosu (sahadaki, tahmin çağrı, Erlang ve Kap ihtiyacı, Kap kapasitesi)."""
-    with open(yol, "rb") as f:
-        res = pickle.load(f)
-    res = {ds: r for ds, r in res.items()
-           if dt.date.fromisoformat(ds).year == YEAR and dt.date.fromisoformat(ds).month == MONTH}
-    saha = {}
-    for ds, r in res.items():
-        mi = ((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}
-        cov = mi.get("shift_coverage", {}) or {}
-        ert = (dt.date.fromisoformat(ds) + dt.timedelta(days=1)).isoformat()
-        for s, k in (mi.get("assignments") or {}).items():
-            c = cov.get(s, {})
-            if k <= 0:
-                continue
-            sk = c.get("company", "inhouse")
-            sk = sk if sk in ("outsource", "part_time") else "inhouse"
-            for g, sl_list in ((ds, c.get("slots", [])), (ert, c.get("slots_d1", []))):
-                for sl in sl_list:
-                    saha.setdefault((g, sl), {"inhouse": 0, "outsource": 0, "part_time": 0})[sk] += k
-    sat = []
-    for ds, r in res.items():
-        rq = (r or {}).get(QUEUE) or {}
-        hr = (rq.get("_config") or {}).get("hourly_report") or {}
-        tcs = rq.get("calls_by_slot") or {}
-        te = (rq.get("mip_info", {}) or {}).get("erlang_by_slot_ham") or rq.get("erlang_by_slot") or {}
-        d = dt.date.fromisoformat(ds)
-        for s in _SLOTS:
-            x = saha.get((ds, s), {"inhouse": 0, "outsource": 0, "part_time": 0})
-            n = x["inhouse"] + x["outsource"] + x["part_time"]
-            tc = float(tcs.get(s, 0) or 0)
-            h = int(s[:2])
-            ca = _oran(hr.get("cagri_adedi"), h, 15)
-            rp, ky = _oran(hr.get("rapor_etkisi"), h, 0), _oran(hr.get("kapasite_kaybi"), h, 0)
-            pay = ca / 2 * (1 - rp - ky)
-            net = n - round(n * rp) - round(n * ky)
-            sat.append({"tarih": ds, "gun": _GUN[d.weekday()], "hs": int(d.weekday() >= 5),
-                        "saat": s[:2], "n": n, "n_in": x["inhouse"], "tc": tc,
-                        "te": float(te.get(s, 0) or 0),
-                        "kap_ih": tc / pay if pay > 0 else 0.0,
-                        "kap": net * ca / 2})
-    t = pd.DataFrame(sat)
-    t["erl_acik"] = (t["te"] - t["n"]).clip(lower=0)
-    t["kar"] = np.minimum(t["kap"], t["tc"])          # karşılanan çağrı (fazla saat açığı örtmez)
-    t["kap_alti"] = ((t["kap"] < t["tc"]) & (t["tc"] > 0)).astype(int)
-    return t
+_sorun18d, _ozet18d = [], _C18d()
+_sz18d = set(mesai_sinir_zorunlu)
+for a in sorted(set(mesai_yok) & set(kota_map)):
+    _cal_onc = onceki_calisti.get(a, set())
+    _zor = {dt.date.fromisoformat(ds) for (b, ds) in mesai_sinir_zorunlu if b == a}
+    for (b, cmt), (_uyg, _ger) in mesai_hs_zorunlu.items():
+        if b == a:
+            _zor |= {dt.date.fromisoformat(ds) for ds in _uyg}
+    _satir, _top_tavan, _top_mus = [], 0, 0
+    for wk in sorted(haftalar):
+        _g = haftalar[wk]
+        _tav = _ay_ici_haftalik_norm_tavan(a, _g)
+        _mus = sum(1 for ds in _g if _calisabilir18d(a, ds))
+        _top_tavan += _tav
+        _top_mus += min(_tav, _mus)
+        if _mus < _tav:
+            _satir.append(f"{wk[0]}-W{wk[1]}: çalışılabilir {_mus} < tavan {_tav}")
+            _ozet18d["haftada çalışılabilir < tavan"] += 1
+    for d0 in [AY_ILK - dt.timedelta(days=k) for k in range(6, 0, -1)] + \
+              [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]:
+        _n = len({d0 + dt.timedelta(days=k) for k in range(7)} & (_zor | _cal_onc))
+        if _n > 6:
+            _satir.append(f"H12: {d0}..{d0 + dt.timedelta(days=6)} zorunlu+önceki ay {_n} gün")
+            _ozet18d["H12 zorunlu 7 gün"] += 1
+            break
+    if _top_tavan != kota_map[a]:
+        _satir.append(f"Σ tavan {_top_tavan} ≠ kota {kota_map[a]}")
+        _ozet18d["Σ tavan ≠ kota"] += 1
+    if _top_mus < kota_map[a]:
+        _satir.append(f"ulaşılabilir {_top_mus} < kota {kota_map[a]}")
+        _ozet18d["ulaşılabilir < kota"] += 1
+    if _satir:
+        _sorun18d.append((a, kota_map[a], _satir,
+                          {d.isoformat()[5:]: onceki_gunluk.get(a, {}).get(d)
+                           for d in sorted(PENCERE_GUNLER)}))
 
-
-def _kaprr(t, anahtar):
-    g = t.groupby(anahtar)[["kar", "tc"]].sum()
-    return (g["kar"] / g["tc"].replace(0, np.nan))
-
-
-T = {ad: _m1_tablo(yol) for ad, yol in SENARYOLAR.items()}
-pd.set_option("display.width", 220)
-
-print("=== GENEL (tahmine göre) ===")
-genel = {}
-for ad, t in T.items():
-    t = t.assign(tip=t["hs"].map({0: "hafta içi", 1: "hafta sonu"}))
-    g = t.groupby("tip")
-    genel[ad] = pd.DataFrame({"kisi_saat": g["n"].sum() / 2,
-                              "Kap_RR_tahmin": _kaprr(t, "tip").round(4),
-                              "erl_acik_kisi_slot": g["erl_acik"].sum().round(1),
-                              "kap_alti_slot": g["kap_alti"].sum()})
-print(pd.concat(genel, axis=1).to_string())
-
-for etk, filt in (("CMT", lambda t: t["gun"] == "Cmt"), ("PZR", lambda t: t["gun"] == "Pzr"),
-                  ("HAFTA İÇİ", lambda t: t["hs"] == 0)):
-    tab = pd.DataFrame({ad: (t[filt(t)].groupby("saat")["n"].mean()
-                             - t[filt(t)].groupby("saat")["kap_ih"].mean()).reindex(SAAT).round(0)
-                        for ad, t in T.items()}).T
-    print(f"\n=== {etk} · sahadaki − Kap ihtiyacı (kişi; eksi = eksik) ===")
-    print(tab.to_string())
-
-print("\n=== HAFTA SONU Kap_RR_tahmin (saat) ===")
-print(pd.DataFrame({ad: _kaprr(t[t["hs"] == 1], "saat").reindex(SAAT)
-                    for ad, t in T.items()}).T.round(3).to_string())
-
-print("\n=== HAFTA İÇİ inhouse sahadaki (09–11 ortalama) ===")
-print(pd.DataFrame({ad: t[(t["hs"] == 0) & t["saat"].isin(["09", "10", "11"])]
-                    .groupby("saat")["n_in"].mean().round(0)
-                    for ad, t in T.items()}).T.to_string())
+print("=" * 96)
+print(f"H18M-D  mesaiye kalamaz {len(set(mesai_yok) & set(kota_map))} agent | ay başı {AY_ILK} "
+      f"{DAY_TR[AY_ILK.weekday()]} | sınır haftası {_H18M_SINIR}")
+print(f"  sınır zorunlu {len(mesai_sinir_zorunlu)}, muaf {len(mesai_sinir_muaf)}"
+      + (f" → {dict(_C18d(mesai_sinir_muaf.values()))}" if mesai_sinir_muaf else ""))
+if not _sorun18d:
+    print("  ✓ çelişki yok → sorun burada değil, TESHIS_MODU çıktısına bak")
+else:
+    print(f"  ⚠ {len(_sorun18d)} agent: {dict(_ozet18d)}")
+    for a, _k, _s, _onc in _sorun18d[:15]:
+        print(f"\n  {a}  kota {_k}")
+        print(f"     önceki ay {_onc}")
+        print("     ay başı: " + ", ".join(
+            f"{ds[5:]} {'ZORUNLU' if (a, ds) in _sz18d else mesai_sinir_muaf.get((a, ds), '-')}"
+            for ds in PLAN_GUNLER[:6]))
+        for _x in _s:
+            print(f"     · {_x}")
+    if len(_sorun18d) > 15:
+        print(f"\n  ... {len(_sorun18d) - 15} agent daha")
+print("=" * 96)
