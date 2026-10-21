@@ -1,25 +1,9 @@
-# Model-1'in KENDİ inhouse planı (Model-2 yerine) — teşhis
-m1 = {}
-for ds, r in results.items():
-    mi = ((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}
-    cov = mi.get("shift_coverage", {}) or {}
-    ert = (dt.date.fromisoformat(ds) + dt.timedelta(days=1)).isoformat()
-    for s, k in (mi.get("assignments") or {}).items():
-        c = cov.get(s, {})
-        if k <= 0 or c.get("company") != "inhouse":
-            continue
-        for sl in c.get("slots", []):
-            m1[(ds, sl)] = m1.get((ds, sl), 0) + k
-        for sl in c.get("slots_d1", []):
-            m1[(ert, sl)] = m1.get((ert, sl), 0) + k
-
-_d = df_slot[df_slot["hafta_sonu"] == 1].copy()
-_d["m1_in"] = [m1.get((str(t), s), 0) for t, s in zip(_d["tarih"], _d["slot"])]
-_d["m1_sahadaki"] = _d["m1_in"] + _d["biz_out"] + _d["biz_pt"]
-_d["acik_biz"] = (_d["tahmin_erlang_ihtiyac"] - _d["biz_sahadaki"]).clip(lower=0)
-_d["acik_m1"] = (_d["tahmin_erlang_ihtiyac"] - _d["m1_sahadaki"]).clip(lower=0)
-
-print(_d.groupby(["tarih", "gun"])[["acik_biz", "acik_m1"]].sum().round(1).to_string())
-print(_d[_d["acik_biz"] > 0].sort_values("acik_biz", ascending=False)[
-    ["tarih", "gun", "slot", "tahmin_erlang_ihtiyac", "biz_sahadaki", "m1_sahadaki",
-     "biz_in", "m1_in", "acik_biz", "acik_m1"]].head(30).to_string())
+_h = df_slot[df_slot["hafta_sonu"] == 1].assign(saat=lambda d: d["slot"].str[:2])
+_o = _h.groupby(["gun", "saat"]).agg(
+    biz=("biz_sahadaki", "mean"),
+    erl_tahmin=("tahmin_erlang_ihtiyac", "mean"),
+    kap_tahmin=("tahmin_kap_ihtiyac", "mean"),
+    kap=("biz_kap", "sum"), tc=("tahmin_cagri", "sum"))
+_o["KapRR_tahmin"] = (_o["kap"] / _o["tc"]).round(3)
+print(_o.loc[(slice(None), [f"{h:02d}" for h in range(8, 21)]), :]
+        .drop(columns=["kap", "tc"]).round(1).to_string())
