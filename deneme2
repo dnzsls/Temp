@@ -1,75 +1,96 @@
-# %% [KONTROL] H19D + MIN_KOVA — TALEBE BAĞLI SERT KURALLAR (H19D'den sonra)
+# %% [KONTROL] MESAİYE KALAMAZ — AGENT BAZLI MİNİ MODEL (H12+H16C+H17+H18M)
 from ortools.sat.python import cp_model as _cpk
-from itertools import combinations as _komb
-_G = globals()
-_tb_k  = _G.get("tip_kapasite_taban", {})          # ⓪ ham taban (yoksa kural yok)
-_tv_k  = _G.get("_tavan19d", [])                   # ③ tavan
-_mt_k  = _G.get("_mt19_uygun", {})                 # ④ min takım
-_boy_k = _G.get("_boyut19d", {T: len(u) for T, u in takimlar.items()})
-_et_k  = _G.get("takim_etkin", {})
-_ust_k = (_G.get("takim_etkin_tip_max") if _G.get("TIP_FAZLA_KALABALIK_GUN", True)
-          else _G.get("takim_etkin_tip")) or {}
-print("=" * 90)
-print(f"notebook'ta tanımlı: ⓪taban {'VAR' if 'tip_kapasite_taban' in _G else 'YOK'} "
-      f"({len(_tb_k)}) | ③tavan {'VAR' if '_tavan19d' in _G else 'YOK'} ({len(_tv_k)}) | "
-      f"④min {'VAR' if '_mt19_uygun' in _G else 'YOK'} ({len(_mt_k)} hafta) | "
-      f"TIP_MIN_KAPASITE_ORANI={_G.get('TIP_MIN_KAPASITE_ORANI', 'YOK')}")
-if not (_tv_k or _mt_k or _tb_k):
-    print("  ⚠ hiçbir H19D değişkeni yok → HÜCRE 19D çalışmamış. Önce 19D'yi koş.")
-
-# ── [1] MIN_KOVA: değişkeni olan ama kimsenin fiilen çalışamadığı kova ──
-_bos = []
-for (ds, v), k in talep.items():
-    _var = [a for a in AGENTS if (a, ds, v) in x]
-    if _var and MIN_KOVA and not any(_kova_calisabilir(a, ds, v) for a in _var):
-        _bos.append((ds, v, k, len(_var)))
-print(f"\n[1] MIN_KOVA: {len(_bos)} kova kimse tarafından doldurulamıyor")
-for ds, v, k, n in _bos[:15]:
-    print(f"    ⚠ {ds} {v}  talep {k}  değişkenli {n} agent, hepsi kıdem/sabahçı engelli")
+from collections import Counter as _Cmx
 
 
-# ── [2] H19D: sadece y üzerinde mini model ──────────────────────────────
-def _mini19d(wk, kurallar):
+def _ok_mx(a, ds):
+    """o gün fiilen çalışabilir mi (H9/H13/H14B/H16/H16B/H15-ay başı)."""
+    d = dt.date.fromisoformat(ds)
+    if d in TATIL:
+        return False
+    for v in gun_vardiyalari.get(ds, []):
+        if (a, ds, v) not in x or not _kova_calisabilir(a, ds, v):
+            continue
+        if d in ARIFE and (v != ARIFE_YARIM or d.weekday() >= 5):
+            continue
+        if d == AY_ILK and not _h18m_h15_uygun(a, ds, v):
+            continue
+        return True
+    return False
+
+
+_gd_mx = [dt.date.fromisoformat(ds) for ds in PLAN_GUNLER]
+_pen_mx = [AY_ILK - dt.timedelta(days=k) for k in range(6, 0, -1)] + _gd_mx
+_talep_off_mx = set(mesai_hs_talep_off)
+_sz_mx = set(mesai_sinir_zorunlu)
+
+
+def _mini_mx(a, kurallar):
     m = _cpk.CpModel()
-    y = {k: m.NewBoolVar("") for k in takim_tip if k[1] == wk}
-    _g = {}
-    for (T, w, t), yv in y.items():
-        _g.setdefault(T, []).append(yv)
-    for vs in _g.values():
-        m.AddExactlyOne(vs)
-    if "taban" in kurallar:
-        for (w, t), tb in _tb_k.items():
-            if w == wk:
-                m.Add(sum(_boy_k[T] * yv for (T, _, t2), yv in y.items() if t2 == t) >= tb)
-    if "tavan" in kurallar:
-        for (w, t, z, tv, _) in _tv_k:
-            if w == wk:
-                m.Add(sum(_ust_k.get((T, wk, t), _et_k.get((T, wk), _boy_k[T])) * yv
-                          for (T, _, t2), yv in y.items() if t2 == t) <= z + tv)
-    if "min" in kurallar:
-        for t, sg in _mt_k.get(wk, {}).items():
-            if sg:
-                m.Add(sum(y[(T, wk, t)] for T in sg if (T, wk, t) in y) >= 1)
+    w = {ds: m.NewBoolVar(ds) for ds in PLAN_GUNLER if _ok_mx(a, ds)}
+    if "H16C" in kurallar:
+        for wk, g in haftalar.items():
+            m.Add(sum(w[ds] for ds in g if ds in w) <= _ay_ici_haftalik_norm_tavan(a, g))
+    if "H17" in kurallar:
+        m.Add(sum(w.values()) >= kota_map[a])
+    if "H12" in kurallar:
+        _cal = onceki_calisti.get(a, set())
+        for s in _pen_mx:
+            if s + dt.timedelta(days=6) > _gd_mx[-1]:
+                continue
+            _p = [s + dt.timedelta(days=k) for k in range(7)]
+            _v = [w[d.isoformat()] for d in _p if d.isoformat() in w]
+            if _v:
+                m.Add(sum(_v) <= max(0, 6 - sum(1 for d in _p if d < AY_ILK and d in _cal)))
+    if "H18M" in kurallar:
+        for (b, cmt), (_uyg, _ger) in mesai_hs_zorunlu.items():
+            if b == a:
+                m.Add(sum(w[ds] for ds in _uyg if ds in w) >= _ger)
+        for ds in PLAN_GUNLER:
+            if (a, ds) in _talep_off_mx and ds in w:
+                m.Add(w[ds] == 0)
+            if (a, ds) in _sz_mx:
+                m.Add(w[ds] == 1) if ds in w else m.Add(0 == 1)
     s = _cpk.CpSolver()
-    s.parameters.max_time_in_seconds = 20
-    s.parameters.num_search_workers = 8
+    s.parameters.max_time_in_seconds = 5
     return s.StatusName(s.Solve(m))
 
 
-_kur = [k for k, d in (("taban", _tb_k), ("tavan", _tv_k), ("min", _mt_k)) if d]
-_hft = sorted({w for (w, t) in _tb_k} | {r[0] for r in _tv_k} | set(_mt_k))
-print(f"\n[2] H19D mini model (kurallar: {_kur})")
-for wk in _hft:
-    _st = _mini19d(wk, set(_kur))
-    print(f"  {wk[0]}-W{wk[1]}: {_st}")
-    if _st in ("INFEASIBLE", "UNKNOWN") and len(_kur) > 1:
-        for r in range(1, len(_kur)):
-            for kk in _komb(_kur, r):
-                print(f"      sadece {'+'.join(kk):<17} → {_mini19d(wk, set(kk))}")
-    if _st in ("INFEASIBLE", "UNKNOWN"):
-        print(f"      {'tip':>6} {'zirve':>6} {'⓪taban':>7} {'③tavan':>7}  takım boyları (ham)")
-        for (w, t, z, tv, _) in sorted(r for r in _tv_k if r[0] == wk):
-            _bl = sorted((_boy_k[T] for (T, w2, t2) in takim_tip if w2 == wk and t2 == t),
-                         reverse=True)
-            print(f"      {t:>6} {z:>6} {_tb_k.get((wk, t), '-'):>7} {z + tv:>7}  {_bl[:8]}")
-print("=" * 90)
+_KUR = ["H12", "H16C", "H17", "H18M"]
+_bozuk_mx = []
+for a in sorted(set(mesai_yok) & set(kota_map)):
+    if _mini_mx(a, set(_KUR)) == "INFEASIBLE":
+        _gerekli = [k for k in _KUR if _mini_mx(a, set(_KUR) - {k}) != "INFEASIBLE"]
+        _bozuk_mx.append((a, _gerekli))
+
+print("=" * 96)
+print(f"MESAİYE KALAMAZ MİNİ MODEL: {len(set(mesai_yok) & set(kota_map))} agent, "
+      f"{len(_bozuk_mx)} agent TEK BAŞINA çözümsüz")
+print(f"  çelişkide gereken kurallar: {dict(_Cmx(tuple(g) for _, g in _bozuk_mx))}")
+_onc_mx = sorted(d for d in PENCERE_GUNLER)
+for a, _g in _bozuk_mx[:12]:
+    _cal = onceki_calisti.get(a, set())
+    print(f"\n  {a}  kota {kota_map[a]}  gerekli: {_g}")
+    print("    önceki ay: " + " ".join(f"{d.day:02d}{'█' if d in _cal else '·'}" for d in _onc_mx))
+    for wk in sorted(haftalar):
+        _gg = haftalar[wk]
+        _s = []
+        for ds in _gg:
+            d = dt.date.fromisoformat(ds)
+            if (a, ds) in _sz_mx:
+                k = "Z"                                   # H18M sınır zorunlu
+            elif (a, ds) in _talep_off_mx:
+                k = "o"                                   # hafta sonu off_t kesin off
+            elif not _ok_mx(a, ds):
+                k = "x"                                   # çalışamaz (izin/off_t2/tatil/kıdem/H15)
+            elif any(b == a and ds in u for (b, _c), (u, _r) in mesai_hs_zorunlu.items()):
+                k = "H"                                   # H18M hafta sonu zorunlu
+            else:
+                k = "."
+            _s.append(f"{d.day:02d}{DAY_TR[d.weekday()][:2]}{k}")
+        print(f"    W{wk[1]} tavan {_ay_ici_haftalik_norm_tavan(a, _gg)}: " + " ".join(_s)
+              + "".join(f"  [{mesai_sinir_muaf[(a, ds)]}]" for ds in _gg if (a, ds) in mesai_sinir_muaf))
+if len(_bozuk_mx) > 12:
+    print(f"\n  ... {len(_bozuk_mx) - 12} agent daha")
+print("  lejant: Z sınır zorunlu | H h.sonu zorunlu | o h.sonu off_t | x çalışamaz | . serbest | █ önceki ay çalıştı")
+print("=" * 96)
