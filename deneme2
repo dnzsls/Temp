@@ -1,14 +1,11 @@
-PKL_S4 = "…S4 Model-1 pickle yolu…"
-PKL_S7 = "…S7 Model-1 pickle yolu…"
-
-def m1_tablo(yol, queue=QUEUE):
+def m1_tablo(yol):
     with open(yol, "rb") as f:
         res = pickle.load(f)
     res = {ds: r for ds, r in res.items()
            if dt.date.fromisoformat(ds).year == YEAR and dt.date.fromisoformat(ds).month == MONTH}
     saha = {}
     for ds, r in res.items():
-        mi = ((r or {}).get(queue) or {}).get("mip_info", {}) or {}
+        mi = ((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}
         cov = mi.get("shift_coverage", {}) or {}
         ert = (dt.date.fromisoformat(ds) + dt.timedelta(days=1)).isoformat()
         for s, k in (mi.get("assignments") or {}).items():
@@ -16,12 +13,13 @@ def m1_tablo(yol, queue=QUEUE):
             if k <= 0:
                 continue
             sk = c.get("company", "inhouse")
+            sk = sk if sk in ("outsource", "part_time") else "inhouse"
             for g, sl_list in ((ds, c.get("slots", [])), (ert, c.get("slots_d1", []))):
                 for sl in sl_list:
-                    saha.setdefault((g, sl), _BOS())[sk if sk in ("outsource", "part_time") else "inhouse"] += k
+                    saha.setdefault((g, sl), _BOS())[sk] += k
     sat = []
     for ds, r in res.items():
-        rq = (r or {}).get(queue) or {}
+        rq = (r or {}).get(QUEUE) or {}
         hr = (rq.get("_config") or {}).get("hourly_report") or {}
         tcs = rq.get("calls_by_slot") or {}
         te = (rq.get("mip_info", {}) or {}).get("erlang_by_slot_ham") or rq.get("erlang_by_slot") or {}
@@ -41,36 +39,3 @@ def m1_tablo(yol, queue=QUEUE):
     t = pd.DataFrame(sat)
     t["erl_acik"] = (t["te"] - t["n"]).clip(lower=0)
     return t
-
-def ozet_m1(t):
-    g = t.assign(tip=t["hs"].map({0: "hafta içi", 1: "hafta sonu"})).groupby("tip")
-    return pd.DataFrame({
-        "kisi_saat": g["n"].sum() / 2,
-        "Kap_RR_tahmin": g.apply(lambda d: np.minimum(d["kap"], d["tc"]).sum() / d["tc"].sum()),
-        "erl_acik_kisi_slot": g["erl_acik"].sum(),
-        "kap_alti_slot": g.apply(lambda d: int(((d["kap"] < d["tc"]) & (d["tc"] > 0)).sum()))}).round(4)
-
-t4, t7 = m1_tablo(PKL_S4), m1_tablo(PKL_S7)
-print("=== GENEL ===")
-print(pd.concat({"S4": ozet_m1(t4), "S7": ozet_m1(t7)}, axis=1).to_string())
-
-# saatlik: biz − kap_ihtiyacı (artı = fazla, eksi = eksik), 08–20
-SAAT = [f"{h:02d}" for h in range(8, 21)]
-for etk, filt in (("CMT", lambda t: t["gun"] == "Cmt"), ("PZR", lambda t: t["gun"] == "Pzr"),
-                  ("HAFTA İÇİ", lambda t: t["hs"] == 0)):
-    tab = pd.DataFrame({ad: (t[filt(t)].groupby("saat")["n"].mean()
-                             - t[filt(t)].groupby("saat")["kap_ih"].mean()).loc[SAAT].round(0)
-                        for ad, t in (("S4", t4), ("S7", t7))}).T
-    print(f"\n=== {etk} · sahadaki − kap ihtiyacı (kişi) ===")
-    print(tab.to_string())
-
-# hafta sonu Kap_RR_tahmin saat bazında
-print("\n=== HAFTA SONU Kap_RR_tahmin (saat) ===")
-print(pd.DataFrame({ad: t[t["hs"] == 1].groupby("saat").apply(
-    lambda d: np.minimum(d["kap"], d["tc"]).sum() / d["tc"].sum() if d["tc"].sum() else np.nan).loc[SAAT]
-    for ad, t in (("S4", t4), ("S7", t7))}).T.round(3).to_string())
-
-# hafta içi 09:00 inhouse yığılması geri geldi mi
-print("\n=== HAFTA İÇİ inhouse sahadaki (09–11 ort.) ===")
-for ad, t in (("S4", t4), ("S7", t7)):
-    print(ad, t[(t["hs"] == 0) & t["saat"].isin(["09", "10", "11"])].groupby("saat")["n_in"].mean().round(0).to_dict())
