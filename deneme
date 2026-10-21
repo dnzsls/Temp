@@ -1,40 +1,277 @@
 # =============================================================================
-# MODEL-1 SENARYO KARŞILAŞTIRMA — TAHMİNE GÖRE Kap / Erlang (2026-10-21)
+# SENARYO KARŞILAŞTIRMASI — Model-1 pickle'ları yan yana (2026-10-19)
 # =============================================================================
-# Tek hücre, tek seferde çalışır. Yalnız Model-1 pickle'larını okur
-# (inhouse dahil — Model-2 yok). Başka hücreye bağımlı değil.
+# Aynı ay için farklı ayarlarla koşulmuş pickle'ları AYNI ölçülerle kıyaslar:
+#   A) slot_cap Erlang'a göre     (slot_cap_olcu='erlang', kap_denge kapalı)
+#   B) slot_cap Kap_RR'a göre     (slot_cap_olcu='kap_rr', kap_denge kapalı)
+#   C) Kap_RR dengesi             (kap_denge.kitle.enabled=True)
+# Senaryo sayısı serbest — SENARYOLAR sözlüğüne ad → pickle yolu yaz.
 #
-#   GENEL        : gün tipi bazında kişi-saat · Kap_RR_tahmin · Erlang açığı
-#   SAATLİK      : sahadaki − Kap ihtiyacı (eksi = eksik, artı = fazla)
-#                  Cmt / Pzr / hafta içi ayrı
-#   Kap_RR saat  : hafta sonu saat bazında Kap_RR_tahmin
-#   09–11        : hafta içi inhouse yığılması
+# ÖLÇÜLER (hepsi Model-1 Excel raporuyla AYNI formül):
+#   Erlang_karsilama : 1 − Σ eksik ÷ Σ Erlang ihtiyacı (kişi; fazla eksiği örtmez)
+#   Kap_RR (gün/ay)  : Σ min(kapasite, çağrı) ÷ Σ çağrı (tavanlı)
+#   Kap_RR (slot)    : net kişi × çağrı_adedi/2 ÷ çağrı (tavansız) — dağılım ölçüleri buradan
+#   DAĞILIM          : gündüz (07:00–24:00) slotlarının Kap_RR'ı — ortalama, yayılma (std),
+#                      %10/%90 dilimleri, %98–102 ve %90–110 aralığındaki slot payı.
+#                      Yayılma küçüldükçe ve aralık payları büyüdükçe dağılım DENGELİ.
+#   GECE             : 00:00–07:00 — Kap_RR ortalaması ve Erlang'a göre fazla kişi-slot
+#   VARDİYA          : hafta içi günde ortalama kaç farklı outsource / inhouse vardiyası açık
+#   YIĞILMA          : hafta içi inhouse'un en kalabalık başlangıç saati — kişi ve inhouse
+#                      içindeki payı; %10'dan fazla inhouse alan başlangıç sayısı.
+#                      'baslangic' sayfası: başlangıç saati × senaryo (hafta içi gün ortalaması)
+#   TEŞHİS (HÜCRE 5, ekrana) : TAHMİNE göre saat saat sahadaki − Kap ihtiyacı (Cmt/Pzr/hafta içi),
+#                      MIP'in koyduğu ↔ surplus dağıtıcısının eklediği, hafta sonu vardiya
+#                      başlangıcı × kişi (yayma kontrolü). Fazla/eksik NEREDEN geliyor sorusu.
+#
+# Hücreleri notebook'a sırayla yapıştır.
 # =============================================================================
+
+
+# %% [HÜCRE 1] — Ayarlar
 import pickle
 import datetime as dt
-import numpy as np
 import pandas as pd
+import numpy as np
 
-YEAR, MONTH = 2026, 10
-QUEUE = "kitle"
-SENARYOLAR = {                       # istediğin kadar senaryo ekleyebilirsin
-    "S4": "…S4 Model-1 pickle yolu…",
-    "S7": "…S7 Model-1 pickle yolu…",
+SENARYOLAR = {
+    "A_slotcap_erlang": "",     # pickle yolu
+    "B_slotcap_kaprr":  "",
+    "C_kap_denge":      "",
+    # yayma karşılaştırması (C + yayma): boş bırakılan atlanır
+    "D_kap_denge_yayma50":  "",
+    "E_kap_denge_yayma500": "",
 }
-SAAT = [f"{h:02d}" for h in range(8, 21)]   # saatlik tablolarda gösterilen saatler
+KUYRUKLAR = ("kitle", "kurumsal", "gold")
+GECE = ("00:00", "07:00")     # [başlangıç, bitiş)
+CIKTI = "senaryo_karsilastirma.xlsx"
+TESHIS_KUYRUK = "kitle"                      # HÜCRE 5 teşhis tabloları bu kuyruk için
+TESHIS_SAAT = [f"{h:02d}" for h in range(8, 21)]   # teşhis tablolarında gösterilen saatler
 
-_SLOTS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
-_GUN = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
+
+# %% [HÜCRE 2] — Fonksiyonlar
+SLOTS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+GUN_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 
 
-def _oran(tbl, h, vars_):
+def _oran(tbl, saat, vars_):
     tbl = tbl or {}
-    return tbl.get(h, tbl.get("default", vars_))
+    return tbl.get(saat, tbl.get("default", vars_))
 
 
-def _atama(r, asama):
-    """asama 'son' → mip_info.assignments (dağıtım SONRASI) · 'mip' → mip_info_stage1 (dağıtım ÖNCESİ)."""
-    rq = (r or {}).get(QUEUE) or {}
+def _kap(sahadaki, cagri, slot, hr):
+    """(kapasite_cagri, Kap_RR) — Model-1 Excel raporuyla aynı formül."""
+    h = int(slot[:2])
+    net = (sahadaki - round(sahadaki * _oran(hr.get("rapor_etkisi"), h, 0))
+           - round(sahadaki * _oran(hr.get("kapasite_kaybi"), h, 0)))
+    ck = net * (_oran(hr.get("cagri_adedi"), h, 15) / 2)
+    return ck, ((ck / cagri) if cagri > 0 else None)
+
+
+def slot_tablosu(results, senaryo):
+    """pickle → slot satırları (senaryo, kuyruk, tarih, slot, çağrı, ihtiyaç, sahadaki, Kap_RR …)."""
+    sat = []
+    for ds in sorted(results):
+        for q in KUYRUKLAR:
+            rq = (results.get(ds) or {}).get(q)
+            if not rq:
+                continue
+            mi = rq.get("mip_info", {}) or {}
+            cagri = rq.get("calls_by_slot", {}) or {}
+            erl = mi.get("erlang_by_slot_ham") or rq.get("erlang_by_slot") or {}
+            saha = mi.get("fiili_by_slot") or mi.get("mip_by_slot") or {}
+            hr = (rq.get("_config") or {}).get("hourly_report") or {}
+            d = dt.date.fromisoformat(ds)
+            for s in SLOTS:
+                c = float(cagri.get(s, 0) or 0)
+                e = float(erl.get(s, 0) or 0)
+                if c <= 0 and e <= 0:
+                    continue
+                n = int(saha.get(s, 0) or 0)
+                ck, kr = _kap(n, c, s, hr)
+                sat.append({"senaryo": senaryo, "kuyruk": q, "tarih": d,
+                            "gun": GUN_TR[d.weekday()], "hafta_ici": d.weekday() < 5,
+                            "slot": s, "gece": GECE[0] <= s < GECE[1],
+                            "cagri": c, "ihtiyac": e, "sahadaki": n,
+                            "eksik": max(0.0, e - n), "fazla": max(0.0, n - e),
+                            "kapasite": ck, "karsilanan": max(0.0, min(ck, c)), "Kap_RR": kr})
+    return pd.DataFrame(sat)
+
+
+def vardiya_sayisi(results, senaryo):
+    """hafta içi gün başına açık (kişi>0) vardiya sayısı — şirket bazında ortalama."""
+    sat = []
+    for ds in sorted(results):
+        if dt.date.fromisoformat(ds).weekday() >= 5:
+            continue
+        for q in KUYRUKLAR:
+            rq = (results.get(ds) or {}).get(q)
+            if not rq:
+                continue
+            mi = rq.get("mip_info", {}) or {}
+            sc = mi.get("shift_coverage", {}) or {}
+            say = {}
+            for s, k in (mi.get("assignments") or {}).items():
+                if k > 0:
+                    co = (sc.get(s) or {}).get("company", "?")
+                    say[co] = say.get(co, 0) + 1
+            sat.append({"senaryo": senaryo, "kuyruk": q, "tarih": ds, **say})
+    df = pd.DataFrame(sat).fillna(0)
+    if not len(df):
+        return df
+    kol = [c for c in ("inhouse", "outsource", "part_time") if c in df.columns]
+    return (df.groupby(["senaryo", "kuyruk"])[kol].mean().round(1)
+            .rename(columns={c: f"vardiya_{c}" for c in kol}).reset_index())
+
+
+def baslangic_dagilimi(results, senaryo):
+    """hafta içi gün ortalaması: başlangıç saati × şirket → kişi."""
+    sat = []
+    gunler = [ds for ds in sorted(results) if dt.date.fromisoformat(ds).weekday() < 5]
+    for ds in gunler:
+        for q in KUYRUKLAR:
+            rq = (results.get(ds) or {}).get(q)
+            if not rq:
+                continue
+            mi = rq.get("mip_info", {}) or {}
+            sc = mi.get("shift_coverage", {}) or {}
+            for s, k in (mi.get("assignments") or {}).items():
+                if k > 0:
+                    c = sc.get(s) or {}
+                    sat.append({"senaryo": senaryo, "kuyruk": q, "tarih": ds,
+                                "sirket": c.get("company", "?"),
+                                "baslangic": str(c.get("start", "?"))[:5], "kisi": k})
+    df = pd.DataFrame(sat)
+    if not len(df):
+        return df
+    g = (df.groupby(["senaryo", "kuyruk", "sirket", "baslangic"])["kisi"].sum()
+         / max(1, len(gunler))).round(1)
+    return g.reset_index()
+
+
+def yigilma(df_bas):
+    """inhouse en kalabalık başlangıç: kişi, inhouse payı, %10+ alan başlangıç sayısı."""
+    d = df_bas[df_bas["sirket"] == "inhouse"]
+    sat = []
+    for (sen, q), g in d.groupby(["senaryo", "kuyruk"]):
+        top = g["kisi"].sum()
+        en = g.loc[g["kisi"].idxmax()]
+        sat.append({"senaryo": sen, "kuyruk": q,
+                    "inhouse_en_kalabalik_baslangic": en["baslangic"],
+                    "inhouse_en_kalabalik_kisi": en["kisi"],
+                    "inhouse_en_kalabalik_payi": (en["kisi"] / top) if top else None,
+                    "inhouse_%10_ustu_baslangic_sayisi": int((g["kisi"] >= 0.10 * top).sum())})
+    return pd.DataFrame(sat)
+
+
+def ozet(df, anahtar):
+    def _f(g):
+        gun = g[~g["gece"]]
+        gc = g[g["gece"]]
+        k = gun["Kap_RR"].dropna()
+        E, C = g["ihtiyac"].sum(), g["cagri"].sum()
+        return pd.Series({
+            "Erlang_karsilama": (1 - g["eksik"].sum() / E) if E else None,
+            "Kap_RR": (g["karsilanan"].sum() / C) if C else None,
+            "eksik_kisi_slot": round(g["eksik"].sum()),
+            "fazla_kisi_slot": round(g["fazla"].sum()),
+            "gunduz_KapRR_ort": k.mean() if len(k) else None,
+            "gunduz_KapRR_yayilma": k.std() if len(k) > 1 else None,
+            "gunduz_KapRR_p10": k.quantile(0.10) if len(k) else None,
+            "gunduz_KapRR_p90": k.quantile(0.90) if len(k) else None,
+            "gunduz_%98_102_payi": ((k >= 0.98) & (k <= 1.02)).mean() if len(k) else None,
+            "gunduz_%90_110_payi": ((k >= 0.90) & (k <= 1.10)).mean() if len(k) else None,
+            "gece_KapRR_ort": gc["Kap_RR"].dropna().mean() if len(gc) else None,
+            "gece_fazla_kisi_slot": round(gc["fazla"].sum()),
+        })
+    return df.groupby(anahtar).apply(_f).reset_index()
+
+
+# %% [HÜCRE 3] — Hesapla
+_parcalar, _vard, _bas, _res = [], [], [], {}
+for ad, yol in SENARYOLAR.items():
+    if not yol:
+        print(f"  ⚠ {ad}: pickle yolu boş → atlandı")
+        continue
+    with open(yol, "rb") as f:
+        res = pickle.load(f)
+    _parcalar.append(slot_tablosu(res, ad))
+    _vard.append(vardiya_sayisi(res, ad))
+    _bas.append(baslangic_dagilimi(res, ad))
+    _res[ad] = res                          # HÜCRE 5 teşhis için
+    print(f"  ✓ {ad}: {len(res)} gün  ({yol})")
+
+df_slot = pd.concat(_parcalar, ignore_index=True)
+df_bas = pd.concat(_bas, ignore_index=True)
+df_ozet = (ozet(df_slot, ["kuyruk", "senaryo"])
+           .merge(pd.concat(_vard, ignore_index=True), on=["kuyruk", "senaryo"], how="left")
+           .merge(yigilma(df_bas), on=["kuyruk", "senaryo"], how="left"))
+# başlangıç saati × senaryo (hafta içi gün ortalaması kişi), şirket ayrı
+df_baslangic = (df_bas.pivot_table(index=["kuyruk", "sirket", "baslangic"], columns="senaryo",
+                                   values="kisi", aggfunc="sum", fill_value=0)
+                .reset_index())
+df_gun = ozet(df_slot, ["kuyruk", "tarih", "gun", "senaryo"])
+# saat profili (hafta içi): her saatin ortalama Kap_RR'ı — dağılımın şekli
+df_saat = (df_slot[df_slot["hafta_ici"]]
+           .assign(saat=lambda d: d["slot"].str[:2] + ":00")
+           .groupby(["kuyruk", "saat", "senaryo"])["Kap_RR"].mean()
+           .unstack("senaryo").reset_index())
+
+pd.set_option("display.width", 220)
+pd.set_option("display.max_columns", 30)
+print(df_ozet.to_string(index=False))
+
+
+# %% [HÜCRE 4] — Excel
+ACIKLAMA = pd.DataFrame([
+    ("Erlang_karsilama", "planda yeterli KİŞİ: 1 − Σ eksik ÷ Σ Erlang ihtiyacı"),
+    ("Kap_RR", "çağrının yüzde kaçı karşılanır (iş birimi, 15 çağrı/saat, kayıplar düşülmüş); her yarım saatte en fazla gelen çağrı kadar sayılır"),
+    ("eksik / fazla_kisi_slot", "Erlang ihtiyacına göre yarım saatlerin toplamı"),
+    ("gunduz_KapRR_ort", "07:00–24:00 yarım saatlerinin Kap_RR ortalaması (tavansız)"),
+    ("gunduz_KapRR_yayilma", "yarım saatler arası Kap_RR farkı (std). KÜÇÜK = DENGELİ"),
+    ("gunduz_KapRR_p10 / p90", "yarım saatlerin %10'u bunun altında / %10'u bunun üstünde. Birbirine YAKIN = dengeli"),
+    ("gunduz_%98_102_payi / %90_110_payi", "Kap_RR bu aralıkta olan yarım saatlerin payı. BÜYÜK = dengeli"),
+    ("gece_KapRR_ort / gece_fazla_kisi_slot", "00:00–07:00: Kap_RR ortalaması ve Erlang'a göre fazla kişi-slot. Küçük = gece şişmemiş"),
+    ("vardiya_outsource / inhouse", "hafta içi gün başına açık vardiya sayısı (ortalama). Outsource ekibi az vardiya istiyor"),
+    ("saat sayfası", "hafta içi her saatin ortalama Kap_RR'ı, senaryolar yan yana — dağılımın şekli"),
+    ("inhouse_en_kalabalik_*", "hafta içi inhouse'un en çok kişi başlayan saati, kişi (gün ortalaması) ve inhouse içindeki payı. KÜÇÜK pay = YAYILMIŞ"),
+    ("inhouse_%10_ustu_baslangic_sayisi", "inhouse'un %10'undan fazlasını alan başlangıç saati sayısı. BÜYÜK = YAYILMIŞ"),
+    ("baslangic sayfası", "başlangıç saati × senaryo: hafta içi gün ortalaması kişi (inhouse/outsource/PT ayrı)"),
+], columns=["kolon", "anlam"])
+
+YUZDE = {"Erlang_karsilama", "Kap_RR", "gunduz_KapRR_ort", "gunduz_KapRR_yayilma",
+         "gunduz_KapRR_p10", "gunduz_KapRR_p90", "gunduz_%98_102_payi",
+         "gunduz_%90_110_payi", "gece_KapRR_ort", "inhouse_en_kalabalik_payi"} | set(SENARYOLAR)
+with pd.ExcelWriter(CIKTI, engine="openpyxl") as xl:
+    for ad, df in (("ozet", df_ozet), ("gun", df_gun), ("saat", df_saat),
+                   ("baslangic", df_baslangic), ("ACIKLAMA", ACIKLAMA)):
+        df.to_excel(xl, sheet_name=ad, index=False)
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    for ws in xl.book.worksheets:
+        bas = [c.value for c in ws[1]]
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+        if ws.max_row > 1:
+            ws.auto_filter.ref = ws.dimensions
+        for j, h in enumerate(bas, 1):
+            ws.column_dimensions[get_column_letter(j)].width = (95 if h == "anlam"
+                                                                else max(9, min(24, len(str(h)) + 2)))
+            if h in YUZDE:
+                for r in range(2, ws.max_row + 1):
+                    if isinstance(ws.cell(row=r, column=j).value, (int, float)) and ws.title != "baslangic":
+                        ws.cell(row=r, column=j).number_format = "0.0%"
+print(f"✓ {CIKTI}  (ozet · gun · saat · baslangic · ACIKLAMA)")
+
+
+# %% [HÜCRE 5] — Teşhis: eksik/fazla NEREDEN geliyor? (TESHIS_KUYRUK, tahmine göre, ekrana)
+# Sahadaki kişi atamalardan kurulur (gece sarkanı ertesi güne). İki aşama:
+#   son = mip_info.assignments (dağıtıcı SONRASI) · mip = mip_info_stage1 (dağıtıcı ÖNCESİ)
+_BOS3 = lambda: {"inhouse": 0, "outsource": 0, "part_time": 0}
+
+
+def _atama(r, asama, q=TESHIS_KUYRUK):
+    rq = (r or {}).get(q) or {}
     mi = rq.get("mip_info", {}) or {}
     if asama == "mip":
         st1 = mi.get("mip_info_stage1") or rq.get("mip_info_stage1") or {}
@@ -43,12 +280,12 @@ def _atama(r, asama):
     return mi.get("assignments") or {}
 
 
-def _saha(res, asama):
+def _saha(res, asama, q=TESHIS_KUYRUK):
     saha = {}
     for ds, r in res.items():
-        cov = (((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
+        cov = (((r or {}).get(q) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
         ert = (dt.date.fromisoformat(ds) + dt.timedelta(days=1)).isoformat()
-        for s, k in _atama(r, asama).items():
+        for s, k in _atama(r, asama, q).items():
             c = cov.get(s, {})
             if k <= 0:
                 continue
@@ -56,120 +293,75 @@ def _saha(res, asama):
             sk = sk if sk in ("outsource", "part_time") else "inhouse"
             for g, sl_list in ((ds, c.get("slots", [])), (ert, c.get("slots_d1", []))):
                 for sl in sl_list:
-                    saha.setdefault((g, sl), {"inhouse": 0, "outsource": 0, "part_time": 0})[sk] += k
+                    saha.setdefault((g, sl), _BOS3())[sk] += k
     return saha
 
 
-def _yukle(yol):
-    with open(yol, "rb") as f:
-        res = pickle.load(f)
-    return {ds: r for ds, r in res.items()
-            if dt.date.fromisoformat(ds).year == YEAR and dt.date.fromisoformat(ds).month == MONTH}
-
-
-def _m1_tablo(res):
-    """Model-1 sonuçları → slot tablosu (sahadaki, tahmin çağrı, Erlang ve Kap ihtiyacı, Kap kapasitesi).
-    n_mip = surplus dağıtımı ÖNCESİ sahadaki (yalnız MIP)."""
-    saha = _saha(res, "son")
-    saha_mip = _saha(res, "mip")
+def teshis_tablo(res, q=TESHIS_KUYRUK):
+    """slot satırları: n (son), n_mip (dağıtıcı öncesi), n_in, tahmin çağrı, Kap ihtiyacı, kapasite."""
+    son, mip = _saha(res, "son", q), _saha(res, "mip", q)
     sat = []
     for ds, r in res.items():
-        rq = (r or {}).get(QUEUE) or {}
+        rq = (r or {}).get(q) or {}
         hr = (rq.get("_config") or {}).get("hourly_report") or {}
         tcs = rq.get("calls_by_slot") or {}
-        te = (rq.get("mip_info", {}) or {}).get("erlang_by_slot_ham") or rq.get("erlang_by_slot") or {}
         d = dt.date.fromisoformat(ds)
-        for s in _SLOTS:
-            x = saha.get((ds, s), {"inhouse": 0, "outsource": 0, "part_time": 0})
+        for s in SLOTS:
+            x, xm = son.get((ds, s), _BOS3()), mip.get((ds, s), _BOS3())
             n = x["inhouse"] + x["outsource"] + x["part_time"]
             tc = float(tcs.get(s, 0) or 0)
             h = int(s[:2])
-            ca = _oran(hr.get("cagri_adedi"), h, 15)
-            rp, ky = _oran(hr.get("rapor_etkisi"), h, 0), _oran(hr.get("kapasite_kaybi"), h, 0)
-            pay = ca / 2 * (1 - rp - ky)
-            net = n - round(n * rp) - round(n * ky)
-            xm = saha_mip.get((ds, s), {"inhouse": 0, "outsource": 0, "part_time": 0})
-            sat.append({"tarih": ds, "gun": _GUN[d.weekday()], "hs": int(d.weekday() >= 5),
-                        "saat": s[:2], "n": n, "n_in": x["inhouse"], "tc": tc,
-                        "n_mip": xm["inhouse"] + xm["outsource"] + xm["part_time"],
-                        "te": float(te.get(s, 0) or 0),
+            pay = (_oran(hr.get("cagri_adedi"), h, 15) / 2
+                   * (1 - _oran(hr.get("rapor_etkisi"), h, 0) - _oran(hr.get("kapasite_kaybi"), h, 0)))
+            sat.append({"gun": GUN_TR[d.weekday()], "hs": int(d.weekday() >= 5), "saat": s[:2],
+                        "n": n, "n_mip": xm["inhouse"] + xm["outsource"] + xm["part_time"],
+                        "n_in": x["inhouse"], "tc": tc,
                         "kap_ih": tc / pay if pay > 0 else 0.0,
-                        "kap": net * ca / 2})
-    t = pd.DataFrame(sat)
-    t["erl_acik"] = (t["te"] - t["n"]).clip(lower=0)
-    t["kar"] = np.minimum(t["kap"], t["tc"])          # karşılanan çağrı (fazla saat açığı örtmez)
-    t["kap_alti"] = ((t["kap"] < t["tc"]) & (t["tc"] > 0)).astype(int)
-    return t
+                        "kar": min(_kap(n, tc, s, hr)[0], tc)})
+    return pd.DataFrame(sat)
 
 
-def _kaprr(t, anahtar):
-    g = t.groupby(anahtar)[["kar", "tc"]].sum()
-    return (g["kar"] / g["tc"].replace(0, np.nan))
+T = {ad: teshis_tablo(res) for ad, res in _res.items()}
+print(f"\n################ TEŞHİS · {TESHIS_KUYRUK} · TAHMİNE göre ################")
 
-
-RES = {ad: _yukle(yol) for ad, yol in SENARYOLAR.items()}
-T = {ad: _m1_tablo(r) for ad, r in RES.items()}
-pd.set_option("display.width", 220)
-
-print("=== GENEL (tahmine göre) ===")
-genel = {}
-for ad, t in T.items():
-    t = t.assign(tip=t["hs"].map({0: "hafta içi", 1: "hafta sonu"}))
-    g = t.groupby("tip")
-    genel[ad] = pd.DataFrame({"kisi_saat": g["n"].sum() / 2,
-                              "Kap_RR_tahmin": _kaprr(t, "tip").round(4),
-                              "erl_acik_kisi_slot": g["erl_acik"].sum().round(1),
-                              "kap_alti_slot": g["kap_alti"].sum()})
-print(pd.concat(genel, axis=1).to_string())
-
+# 1) saat saat sahadaki − Kap ihtiyacı (kişi; eksi = eksik, artı = fazla)
 for etk, filt in (("CMT", lambda t: t["gun"] == "Cmt"), ("PZR", lambda t: t["gun"] == "Pzr"),
                   ("HAFTA İÇİ", lambda t: t["hs"] == 0)):
     tab = pd.DataFrame({ad: (t[filt(t)].groupby("saat")["n"].mean()
-                             - t[filt(t)].groupby("saat")["kap_ih"].mean()).reindex(SAAT).round(0)
-                        for ad, t in T.items()}).T
+                             - t[filt(t)].groupby("saat")["kap_ih"].mean()).reindex(TESHIS_SAAT)
+                        for ad, t in T.items()}).T.round(0)
     print(f"\n=== {etk} · sahadaki − Kap ihtiyacı (kişi; eksi = eksik) ===")
     print(tab.to_string())
 
-print("\n=== HAFTA SONU Kap_RR_tahmin (saat) ===")
-print(pd.DataFrame({ad: _kaprr(t[t["hs"] == 1], "saat").reindex(SAAT)
+# 2) hafta sonu saat bazında Kap_RR (tahmine göre, yarım saat tavanlı)
+print("\n=== HAFTA SONU Kap_RR — saat (tahmine göre) ===")
+print(pd.DataFrame({ad: (lambda g: g["kar"] / g["tc"].replace(0, np.nan))(
+                        t[t["hs"] == 1].groupby("saat")[["kar", "tc"]].sum()).reindex(TESHIS_SAAT)
                     for ad, t in T.items()}).T.round(3).to_string())
 
-print("\n=== HAFTA İÇİ inhouse sahadaki (09–11 ortalama) ===")
-print(pd.DataFrame({ad: t[(t["hs"] == 0) & t["saat"].isin(["09", "10", "11"])]
-                    .groupby("saat")["n_in"].mean().round(0)
-                    for ad, t in T.items()}).T.to_string())
-
-
-# =============================================================================
-# TEŞHİS — fazlalık nereden geliyor? (MIP mi, surplus dağıtıcısı mı, yayma mı)
-# =============================================================================
-print("\n\n################ TEŞHİS ################")
-
-# 1) HAFTA İÇİ: MIP'in kendi planı vs dağıtıcı sonrası (kişi; eksi = eksik)
+# 3) HAFTA İÇİ: MIP'in kendi planı ↔ dağıtıcının eklediği
 for ad, t in T.items():
-    h = t[t["hs"] == 0]
-    g = h.groupby("saat")[["n_mip", "n", "kap_ih"]].mean()
-    tab = pd.DataFrame({"MIP − kap ihtiyacı": g["n_mip"] - g["kap_ih"],
+    g = t[t["hs"] == 0].groupby("saat")[["n_mip", "n", "kap_ih"]].mean()
+    print(f"\n=== {ad} · HAFTA İÇİ: MIP ↔ dağıtıcı (saat ortalaması, kişi) ===")
+    print(pd.DataFrame({"MIP − kap ihtiyacı": g["n_mip"] - g["kap_ih"],
                         "dağıtıcının eklediği": g["n"] - g["n_mip"],
-                        "SON − kap ihtiyacı": g["n"] - g["kap_ih"]}).reindex(SAAT).round(0).T
-    print(f"\n=== {ad} · HAFTA İÇİ (saat ortalaması, kişi) ===")
-    print(tab.to_string())
+                        "SON − kap ihtiyacı": g["n"] - g["kap_ih"]}).reindex(TESHIS_SAAT).round(0).T.to_string())
 
-# 2) Dağıtıcının eklediği kişi — şirket × vardiya başlangıcı (hafta içi gün ortalaması)
-for ad, res in RES.items():
-    sat = []
+# 4) dağıtıcının eklediği kişi — şirket × vardiya başlangıcı (hafta içi gün ortalaması)
+for ad, res in _res.items():
+    sat, n_gun = [], 0
     for ds, r in res.items():
         if dt.date.fromisoformat(ds).weekday() >= 5:
             continue
-        cov = (((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
+        n_gun += 1
+        cov = (((r or {}).get(TESHIS_KUYRUK) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
         once, son = _atama(r, "mip"), _atama(r, "son")
         for s in set(once) | set(son):
             ek = son.get(s, 0) - once.get(s, 0)
             if ek:
                 c = cov.get(s, {})
                 sat.append({"sirket": c.get("company", "inhouse"),
-                            "bas": (c.get("slots") or ["?"])[0], "ek": ek})
-    n_gun = sum(1 for ds in res if dt.date.fromisoformat(ds).weekday() < 5)
+                            "bas": str(c.get("start", "?"))[:5], "ek": ek})
     print(f"\n=== {ad} · dağıtıcının eklediği (hafta içi, gün başına ortalama kişi) ===")
     if sat:
         e = pd.DataFrame(sat).groupby(["sirket", "bas"])["ek"].sum() / max(n_gun, 1)
@@ -177,25 +369,26 @@ for ad, res in RES.items():
     else:
         print("  dağıtıcı bir şey eklememiş (ya da pickle'da mip_info_stage1 yok)")
 
-# 3) HAFTA SONU yayma kontrolü — inhouse vardiya başlangıcı × kişi (her gün)
-#    Birçok vardiya AYNI tavan sayıda → yayma bağlayıcı
-for ad, res in RES.items():
+# 5) HAFTA SONU yayma kontrolü — gün × vardiya başlangıcı × kişi
+#    Birçok inhouse vardiyası AYNI tavan sayıda → yayma bağlayıcı
+for ad, res in _res.items():
     sat = []
     for ds, r in sorted(res.items()):
         d = dt.date.fromisoformat(ds)
         if d.weekday() < 5:
             continue
-        cov = (((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
+        cov = (((r or {}).get(TESHIS_KUYRUK) or {}).get("mip_info", {}) or {}).get("shift_coverage", {}) or {}
         for s, k in _atama(r, "son").items():
             c = cov.get(s, {})
             if k > 0:
-                sat.append({"gun": f"{ds[5:]} {_GUN[d.weekday()]}", "sirket": c.get("company", "inhouse"),
-                            "bas": (c.get("slots") or ["?"])[0], "k": k})
+                sat.append({"gun": f"{ds[5:]} {GUN_TR[d.weekday()]}", "sirket": c.get("company", "inhouse"),
+                            "bas": str(c.get("start", "?"))[:5], "k": k})
     if not sat:
         continue
     df = pd.DataFrame(sat)
     for sir in ("inhouse", "outsource"):
         p = df[df["sirket"] == sir].pivot_table(index="gun", columns="bas", values="k",
                                                 aggfunc="sum", fill_value=0)
-        print(f"\n=== {ad} · HAFTA SONU {sir} — vardiya başlangıcı × kişi ===")
-        print(p.to_string())
+        if len(p):
+            print(f"\n=== {ad} · HAFTA SONU {sir} — vardiya başlangıcı × kişi ===")
+            print(p.to_string())
