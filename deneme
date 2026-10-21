@@ -1,2 +1,16 @@
-CONFIG['kadro']['inhouse']['kitle'].update(
-    {'hafta_1': 394, 'hafta_2': 398, 'hafta_3': 396, 'hafta_4': 402, 'hafta_5': 408})
+_h = df_slot.assign(saat=df_slot["slot"].str[:2])
+rows = []
+for (hs, s), g in _h.groupby(["hafta_sonu", "saat"]):
+    r = {"hs": hs, "saat": s, "ihtiyac": g["kap_ihtiyac"].mean()}
+    for k in ("biz", "ekip"):
+        r[k] = g[f"{k}_sahadaki"].mean()
+        r[f"{k}_RR"] = (np.minimum(g[f"{k}_kap"], g["cagri"]).sum() / g["cagri"].sum()
+                        if g["cagri"].sum() else np.nan)
+    r["biz−ekip"] = r["biz"] - r["ekip"]
+    rows.append(r)
+t = pd.DataFrame(rows)
+for hs, ad in ((0, "HAFTA İÇİ"), (1, "HAFTA SONU")):
+    print(f"\n=== {ad} (gerçek çağrıya göre Kap) ===")
+    print(t[(t["hs"] == hs) & (t["saat"] >= "07")].drop(columns="hs")
+          .round({"ihtiyac": 0, "biz": 0, "ekip": 0, "biz−ekip": 0, "biz_RR": 3, "ekip_RR": 3})
+          .to_string(index=False))
