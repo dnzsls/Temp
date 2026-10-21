@@ -1,7 +1,21 @@
 # %% [KONTROL] H19D + MIN_KOVA — TALEBE BAĞLI SERT KURALLAR (H19D'den sonra)
 from ortools.sat.python import cp_model as _cpk
 from itertools import combinations as _komb
-_ust_k = takim_etkin_tip_max if TIP_FAZLA_KALABALIK_GUN else takim_etkin_tip
+_G = globals()
+_tb_k  = _G.get("tip_kapasite_taban", {})          # ⓪ ham taban (yoksa kural yok)
+_tv_k  = _G.get("_tavan19d", [])                   # ③ tavan
+_mt_k  = _G.get("_mt19_uygun", {})                 # ④ min takım
+_boy_k = _G.get("_boyut19d", {T: len(u) for T, u in takimlar.items()})
+_et_k  = _G.get("takim_etkin", {})
+_ust_k = (_G.get("takim_etkin_tip_max") if _G.get("TIP_FAZLA_KALABALIK_GUN", True)
+          else _G.get("takim_etkin_tip")) or {}
+print("=" * 90)
+print(f"notebook'ta tanımlı: ⓪taban {'VAR' if 'tip_kapasite_taban' in _G else 'YOK'} "
+      f"({len(_tb_k)}) | ③tavan {'VAR' if '_tavan19d' in _G else 'YOK'} ({len(_tv_k)}) | "
+      f"④min {'VAR' if '_mt19_uygun' in _G else 'YOK'} ({len(_mt_k)} hafta) | "
+      f"TIP_MIN_KAPASITE_ORANI={_G.get('TIP_MIN_KAPASITE_ORANI', 'YOK')}")
+if not (_tv_k or _mt_k or _tb_k):
+    print("  ⚠ hiçbir H19D değişkeni yok → HÜCRE 19D çalışmamış. Önce 19D'yi koş.")
 
 # ── [1] MIN_KOVA: değişkeni olan ama kimsenin fiilen çalışamadığı kova ──
 _bos = []
@@ -9,10 +23,10 @@ for (ds, v), k in talep.items():
     _var = [a for a in AGENTS if (a, ds, v) in x]
     if _var and MIN_KOVA and not any(_kova_calisabilir(a, ds, v) for a in _var):
         _bos.append((ds, v, k, len(_var)))
-print("=" * 90)
-print(f"[1] MIN_KOVA: {len(_bos)} kova kimse tarafından doldurulamıyor")
+print(f"\n[1] MIN_KOVA: {len(_bos)} kova kimse tarafından doldurulamıyor")
 for ds, v, k, n in _bos[:15]:
     print(f"    ⚠ {ds} {v}  talep {k}  değişkenli {n} agent, hepsi kıdem/sabahçı engelli")
+
 
 # ── [2] H19D: sadece y üzerinde mini model ──────────────────────────────
 def _mini19d(wk, kurallar):
@@ -24,16 +38,16 @@ def _mini19d(wk, kurallar):
     for vs in _g.values():
         m.AddExactlyOne(vs)
     if "taban" in kurallar:
-        for (w, t), tb in tip_kapasite_taban.items():
+        for (w, t), tb in _tb_k.items():
             if w == wk:
-                m.Add(sum(_boyut19d[T] * yv for (T, _, t2), yv in y.items() if t2 == t) >= tb)
+                m.Add(sum(_boy_k[T] * yv for (T, _, t2), yv in y.items() if t2 == t) >= tb)
     if "tavan" in kurallar:
-        for (w, t, z, tv, _) in _tavan19d:
+        for (w, t, z, tv, _) in _tv_k:
             if w == wk:
-                m.Add(sum(_ust_k.get((T, wk, t), takim_etkin.get((T, wk), _boyut19d[T])) * yv
+                m.Add(sum(_ust_k.get((T, wk, t), _et_k.get((T, wk), _boy_k[T])) * yv
                           for (T, _, t2), yv in y.items() if t2 == t) <= z + tv)
     if "min" in kurallar:
-        for t, sg in _mt19_uygun.get(wk, {}).items():
+        for t, sg in _mt_k.get(wk, {}).items():
             if sg:
                 m.Add(sum(y[(T, wk, t)] for T in sg if (T, wk, t) in y) >= 1)
     s = _cpk.CpSolver()
@@ -41,21 +55,21 @@ def _mini19d(wk, kurallar):
     s.parameters.num_search_workers = 8
     return s.StatusName(s.Solve(m))
 
-_hft = sorted({w for (w, t) in tip_kapasite_taban} | {r[0] for r in _tavan19d})
-print(f"\n[2] H19D mini model (taban=⓪ ham %{TIP_MIN_KAPASITE_ORANI*100:.0f}, tavan=③, min=④)")
+
+_kur = [k for k, d in (("taban", _tb_k), ("tavan", _tv_k), ("min", _mt_k)) if d]
+_hft = sorted({w for (w, t) in _tb_k} | {r[0] for r in _tv_k} | set(_mt_k))
+print(f"\n[2] H19D mini model (kurallar: {_kur})")
 for wk in _hft:
-    _st = _mini19d(wk, {"taban", "tavan", "min"})
-    _top_tb = sum(tb for (w, t), tb in tip_kapasite_taban.items() if w == wk)
-    _top_ham = sum(_boyut19d[T] for T in {k[0] for k in takim_tip if k[1] == wk})
-    print(f"  {wk[0]}-W{wk[1]}: {_st:<10} Σ ham taban {_top_tb} / Σ ham takım {_top_ham}")
-    if _st in ("INFEASIBLE", "UNKNOWN"):
-        for r in (1, 2):
-            for kk in _komb(["taban", "tavan", "min"], r):
+    _st = _mini19d(wk, set(_kur))
+    print(f"  {wk[0]}-W{wk[1]}: {_st}")
+    if _st in ("INFEASIBLE", "UNKNOWN") and len(_kur) > 1:
+        for r in range(1, len(_kur)):
+            for kk in _komb(_kur, r):
                 print(f"      sadece {'+'.join(kk):<17} → {_mini19d(wk, set(kk))}")
-        print(f"      {'tip':>6} {'zirve':>6} {'⓪taban':>7} {'③tavan':>7} {'takım boyları (ham)'}")
-        for (w, t, z, tv, _) in sorted(r for r in _tavan19d if r[0] == wk):
-            _bl = sorted((_boyut19d[T] for (T, w2, t2) in takim_tip if w2 == wk and t2 == t),
+    if _st in ("INFEASIBLE", "UNKNOWN"):
+        print(f"      {'tip':>6} {'zirve':>6} {'⓪taban':>7} {'③tavan':>7}  takım boyları (ham)")
+        for (w, t, z, tv, _) in sorted(r for r in _tv_k if r[0] == wk):
+            _bl = sorted((_boy_k[T] for (T, w2, t2) in takim_tip if w2 == wk and t2 == t),
                          reverse=True)
-            print(f"      {t:>6} {z:>6} {tip_kapasite_taban.get((wk, t), '-'):>7} "
-                  f"{z + tv:>7} {_bl[:8]}")
+            print(f"      {t:>6} {z:>6} {_tb_k.get((wk, t), '-'):>7} {z + tv:>7}  {_bl[:8]}")
 print("=" * 90)
