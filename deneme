@@ -564,31 +564,40 @@ def _xeksen(ax):
 PT_ETIKET = "kısmiler dahil" if KISMI_DAHIL else "kısmisiz"
 
 
-def grafik_ihtiyac_ust_uste(df_slot, df_tip, dosya=None):
-    """A) gerçek çağrıdan gereken kişi (Erlang) · BİZ ve EKİP sahadaki."""
+# olcu: "erlang" → gereken kişi = Erlang-C (ASA ≤ 30 sn, shrinkage dahil)
+#       "kap"    → gereken kişi = Kap ihtiyacı (15 çağrı/saat, rapor + kayıp düşülmüş;
+#                  sahadaki bu çizgide → Kap_RR %100)
+OLCU = {"erlang": ("erlang_ihtiyac", "Erlang-C"),
+        "kap": ("kap_ihtiyac", "Kap · 15 çağrı/saat")}
+
+
+def grafik_ihtiyac_ust_uste(df_slot, df_tip, olcu="erlang", dosya=None):
+    """A) gerçek çağrıdan gereken kişi · BİZ ve EKİP sahadaki."""
+    kol, etk = OLCU[olcu]
     fig, eks = plt.subplots(1, 2, figsize=(17, 6))
-    fig.suptitle(f"{QUEUE.upper()} — GERÇEK çağrıdan gereken kişi · BİZ ve EKİP sahadaki ({PT_ETIKET})",
-                 fontweight="bold")
+    fig.suptitle(f"{QUEUE.upper()} — GERÇEK çağrıdan gereken kişi ({etk}) · BİZ ve EKİP sahadaki "
+                 f"({PT_ETIKET})", fontweight="bold")
     for j, (hs, ad) in enumerate(((0, "HAFTA İÇİ"), (1, "HAFTA SONU"))):
         ax = eks[j]
         d = df_slot[df_slot["hafta_sonu"] == hs]
         if d.empty:
             ax.set_visible(False)
             continue
-        g = d.groupby("slot")[["erlang_ihtiyac", "biz_sahadaki", "ekip_sahadaki"]].mean().reindex(SLOTS)
+        g = d.groupby("slot")[[kol, "biz_sahadaki", "ekip_sahadaki"]].mean().reindex(SLOTS)
         x = range(len(g))
-        ax.fill_between(x, g["erlang_ihtiyac"], color="#f3edc8", alpha=.8)
-        ax.plot(x, g["erlang_ihtiyac"], color="k", ls="--", lw=2,
-                label="Gereken kişi (GERÇEK çağrı · Erlang-C)")
+        ax.fill_between(x, g[kol], color="#f3edc8", alpha=.8)
+        ax.plot(x, g[kol], color="k", ls="--", lw=2, label=f"Gereken kişi (GERÇEK çağrı · {etk})")
         ax.plot(x, g["biz_sahadaki"], color="#1f4e9c", lw=2.2, label="BİZ — sahadaki kişi")
         ax.plot(x, g["ekip_sahadaki"], color="#d9541e", lw=2.2, label="EKİP — sahadaki kişi")
         n_gun = d["tarih"].nunique()
         o = df_tip[df_tip["gun_tipi"] == ("hafta içi" if hs == 0 else "hafta sonu")].iloc[0]
-        _kutu(ax, "\n".join(
-            f"{k.upper()}: Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f} · açıkta "
-            f"{o[f'{k}_karsilanamayan_cagri'] / n_gun:,.0f} çağrı/gün · eksik "
-            f"{o[f'{k}_eksik_kisi_slot'] / 2 / n_gun:,.0f} kişi-saat/gün"
-            for k in ("biz", "ekip")) + f"\n{n_gun} gün ortalaması")
+        satir = []
+        for k in ("biz", "ekip"):
+            eksik = (d[kol] - d[f"{k}_sahadaki"]).clip(lower=0).sum() / 2 / n_gun   # bu ölçüye göre
+            satir.append(f"{k.upper()}: Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f} · açıkta "
+                         f"{o[f'{k}_karsilanamayan_cagri'] / n_gun:,.0f} çağrı/gün · eksik "
+                         f"{eksik:,.0f} kişi-saat/gün")
+        _kutu(ax, "\n".join(satir) + f"\neksik: {etk} çizgisinin altı · {n_gun} gün ortalaması")
         ax.set_title(ad, loc="left", fontweight="bold")
         ax.set_ylabel("kişi")
         ax.set_ylim(0, np.nanmax(g.values) * 1.2)             # kutu tepeyi örtmesin
@@ -600,11 +609,12 @@ def grafik_ihtiyac_ust_uste(df_slot, df_tip, dosya=None):
     plt.show()
 
 
-def grafik_kirilim(df_slot, df_giris, dosya=None):
+def grafik_kirilim(df_slot, df_giris, olcu="erlang", dosya=None):
     """B) sahadaki inhouse/outsource/PT yığılı + vardiya başlangıcı. Üst BİZ, alt EKİP."""
+    kol, etk = OLCU[olcu]
     fig, eks = plt.subplots(2, 2, figsize=(17, 10), sharex=True)
-    fig.suptitle(f"{QUEUE.upper()} — sahadaki kırılım + vardiya başlangıcı ({PT_ETIKET})",
-                 fontweight="bold")
+    fig.suptitle(f"{QUEUE.upper()} — sahadaki kırılım + vardiya başlangıcı · gereken: {etk} "
+                 f"({PT_ETIKET})", fontweight="bold")
     for j, (hs, ad) in enumerate(((0, "HAFTA İÇİ"), (1, "HAFTA SONU"))):
         d = df_slot[df_slot["hafta_sonu"] == hs]
         if d.empty:
@@ -614,7 +624,7 @@ def grafik_kirilim(df_slot, df_giris, dosya=None):
         n_gun = d["tarih"].nunique()
         for i, (taraf, k) in enumerate((("BİZ", "biz"), ("EKİP", "ekip"))):
             ax = eks[i][j]
-            g = d.groupby("slot")[[f"{k}_in", f"{k}_out", f"{k}_pt", "erlang_ihtiyac"]].mean().reindex(SLOTS)
+            g = d.groupby("slot")[[f"{k}_in", f"{k}_out", f"{k}_pt", kol]].mean().reindex(SLOTS)
             x = range(len(g))
             a1 = g[f"{k}_in"]
             a2 = a1 + g[f"{k}_out"]
@@ -624,8 +634,7 @@ def grafik_kirilim(df_slot, df_giris, dosya=None):
             if g[f"{k}_pt"].sum() > 0:
                 ax.fill_between(x, a2, a3, color="#4caf7d", label="kısmi (PT)")
             ax.plot(x, a3, color="#1f4e9c", lw=1.8)
-            ax.plot(x, g["erlang_ihtiyac"], color="k", ls="--", lw=1.6,
-                    label="gereken kişi (GERÇEK çağrı)")
+            ax.plot(x, g[kol], color="k", ls="--", lw=1.6, label=f"gereken kişi (GERÇEK çağrı · {etk})")
             gb = df_giris[(df_giris["taraf"] == taraf) & (df_giris["hafta_sonu"] == hs)]
             bas = (gb.groupby("slot")["kisi"].sum() / n_gun).reindex(SLOTS, fill_value=0)
             ax.plot(x, bas, color="#d62728", lw=1.8, marker="o", ms=3,
@@ -647,5 +656,12 @@ def grafik_kirilim(df_slot, df_giris, dosya=None):
 
 
 df_giris = giris_tablosu(results, roster_gun, df_ekip, set(df_slot["tarih"].astype(str)))
-grafik_ihtiyac_ust_uste(df_slot, df_tip, os.path.join(GRAFIK_KLASOR, f"ihtiyac_ust_uste_{QUEUE}.png"))
-grafik_kirilim(df_slot, df_giris, os.path.join(GRAFIK_KLASOR, f"kirilim_giris_{QUEUE}.png"))
+grafik_ihtiyac_ust_uste(df_slot, df_tip, "erlang", os.path.join(GRAFIK_KLASOR, f"ihtiyac_ust_uste_erlang_{QUEUE}.png"))
+grafik_kirilim(df_slot, df_giris, "erlang", os.path.join(GRAFIK_KLASOR, f"kirilim_giris_erlang_{QUEUE}.png"))
+
+
+# %% [HÜCRE 7] — Aynı grafikler Kap_RR ölçüsüyle (gereken = Kap ihtiyacı, 15 çağrı/saat)
+# Önkoşul: HÜCRE 6 çalışmış olmalı (fonksiyonlar + df_giris).
+# Sahadaki çizgi siyah kesiklinin ÜSTÜNDE → o slotta Kap_RR ≥ %100.
+grafik_ihtiyac_ust_uste(df_slot, df_tip, "kap", os.path.join(GRAFIK_KLASOR, f"ihtiyac_ust_uste_kap_{QUEUE}.png"))
+grafik_kirilim(df_slot, df_giris, "kap", os.path.join(GRAFIK_KLASOR, f"kirilim_giris_kap_{QUEUE}.png"))
