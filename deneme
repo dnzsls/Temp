@@ -1,9 +1,10 @@
-# df_out: satır = ajan, kolonlar = tarihler, hücre = vardiya / OFF / boş
-gun_kol = [c for c in df_out.columns if pd.notna(pd.to_datetime(c, errors="coerce"))]
-aktif = df_out[gun_kol].notna() & (df_out[gun_kol].astype(str).str.strip() != "")
-g = aktif.sum().rename("aktif").to_frame()
-g.index = pd.to_datetime(g.index)
-g["calisan"] = df_out[gun_kol].astype(str).apply(lambda s: s.str.contains(r"\d{1,2}:\d{2}")).sum().values
-g["hafta"] = g.index.isocalendar().week
-print(g.to_string())
-print(g.groupby("hafta")[["aktif", "calisan"]].mean().round(0))
+SELECT off_gun, COUNT(*) AS ajan_sayisi
+FROM (
+    SELECT AGENT_USER_CODE,
+           SUM(CASE WHEN LOWER(VARDIYA) = 'off' OR LOWER(CALISMAMA_TIPI) = 'off' THEN 1 ELSE 0 END) AS off_gun,
+           SUM(CASE WHEN VARDIYA LIKE '%:%' THEN 1 ELSE 0 END) AS calisma_gun
+    FROM BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_092026
+    GROUP BY AGENT_USER_CODE
+)
+GROUP BY off_gun
+ORDER BY off_gun;
