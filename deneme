@@ -1,12 +1,9 @@
-g = df_giris[df_giris["sirket"] == "outsource"].copy()
-g["tarih"] = pd.to_datetime(g["tarih"])
-g["hafta"] = g["tarih"].dt.isocalendar().week
-g["hs"] = g["tarih"].dt.weekday >= 5
-t = g.groupby(["hafta", "hs", "taraf"])["kisi"].sum().unstack(["taraf", "hs"]).fillna(0)
-t.columns = [f"{a}_{'hafta sonu' if b else 'hafta içi'}" for a, b in t.columns]
-print(t.astype(int).to_string())
-print(g.groupby("taraf")["kisi"].sum())
-
-# ekip df'inde saat içermeyen outsource vardiyaları var mı
-_v = df_ekip[pd.to_numeric(df_ekip["OUTSOURCE_FLG"], errors="coerce") == 1]["VARDIYA"].astype(str)
-print(_v[~_v.str.contains(r"\d{1,2}:\d{2}")].value_counts().head(10))
+# df_out: satır = ajan, kolonlar = tarihler, hücre = vardiya / OFF / boş
+gun_kol = [c for c in df_out.columns if pd.notna(pd.to_datetime(c, errors="coerce"))]
+aktif = df_out[gun_kol].notna() & (df_out[gun_kol].astype(str).str.strip() != "")
+g = aktif.sum().rename("aktif").to_frame()
+g.index = pd.to_datetime(g.index)
+g["calisan"] = df_out[gun_kol].astype(str).apply(lambda s: s.str.contains(r"\d{1,2}:\d{2}")).sum().values
+g["hafta"] = g.index.isocalendar().week
+print(g.to_string())
+print(g.groupby("hafta")[["aktif", "calisan"]].mean().round(0))
