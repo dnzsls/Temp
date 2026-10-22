@@ -1,37 +1,13 @@
-CONFIG['kap_denge']['kitle']['kurallar'] = [
-    # HAFTA İÇİ — ekip dağılımı: öğlen ve 17-19 önemli, sabah erken ve akşam ucuz
-    {'gunler': ('hafta_ici',), 'start': '11:00', 'end': '14:00', 'alt_carpan': 3.0},
-    {'gunler': ('hafta_ici',), 'start': '17:00', 'end': '19:00', 'alt_carpan': 2.0},
-    {'gunler': ('hafta_ici',), 'start': '19:00', 'end': '23:00', 'alt_carpan': 0.5},
-    {'gunler': ('hafta_ici',), 'start': '07:00', 'end': '09:00', 'ust_carpan': 3.0},   # 08:00 fazlası pahalı
-    # HAFTA SONU — mevcut
-    {'gunler': ('cumartesi', 'pazar'), 'start': '09:00', 'end': '16:00', 'alt_carpan': 3.0},
-    {'gunler': ('cumartesi', 'pazar'), 'start': '19:00', 'end': '23:00', 'alt_carpan': 0.5},
-]
-
-
-
-_k = {f"{t}_{s}": "max" for t in ("biz", "ekip") for s in ("in", "out", "pt", "sahadaki")}
-mx = df_slot.groupby(["tarih", "gun"]).agg(_k).astype(int)
-mx.columns = [c.replace("_in", "_inhouse").replace("_out", "_outsource") for c in mx.columns]
-print(mx.to_string())
-print("\nORTALAMA (hafta içi / hafta sonu):")
-print(mx.groupby(mx.index.get_level_values("gun").isin(["Cmt", "Pzr"])).mean().round(0)
-        .rename(index={False: "hafta içi", True: "hafta sonu"}).T.to_string())
-
-
-
 o = pd.DataFrame({"biz": bas_biz["outsource"], "ekip": bas_ekip["outsource"]}).fillna(0)
 o.index = pd.to_datetime(o.index)
 o = o[(o.index.year == YEAR) & (o.index.month == MONTH)]
 o["hafta"] = o.index.isocalendar().week
 o["hs"] = o.index.weekday >= 5
-t = o.groupby(["hafta", "hs"])[["biz", "ekip"]].sum().unstack("hs")
+t = o.groupby(["hafta", "hs"])[["biz", "ekip"]].sum().unstack("hs").fillna(0)
 t.columns = [f"{a}_{'hafta sonu' if b else 'hafta içi'}" for a, b in t.columns]
 t["biz_top"] = o.groupby("hafta")["biz"].sum()
 t["ekip_top"] = o.groupby("hafta")["ekip"].sum()
 t["gun"] = o.groupby("hafta").size()
 t["ekip_ima_kisi"] = (t["ekip_top"] / (t["gun"] * 0.8)).round(0)
-print(t.astype(int).to_string())
+print(t.fillna(0).astype(int).to_string())
 print("AY:", int(o["biz"].sum()), "biz  /", int(o["ekip"].sum()), "ekip")
-print(CONFIG_KISI := globals().get("CONFIG", {}).get("kadro", {}).get("outsource_kisi", "config yok bu notebook'ta"))
