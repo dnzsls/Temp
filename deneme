@@ -2,28 +2,15 @@ SELECT TO_CHAR(TO_DATE(gun, 'YYYY-MM-DD'), 'IW') AS hafta,
        MIN(gun) AS ilk_gun, MAX(gun) AS son_gun,
        ROUND(AVG(aktif))   AS ort_aktif,
        ROUND(AVG(calisan)) AS ort_calisan,
+       SUM(calisan)        AS calisan_kisi_gun,
        ROUND(SUM(calisan) / NULLIF(SUM(aktif), 0), 3) AS calisma_orani
 FROM (
-    SELECT TO_CHAR("DATE", 'YYYY-MM-DD') AS gun,
+    SELECT SUBSTR("DATE", 1, 10) AS gun,
            COUNT(DISTINCT CASE WHEN VARDIYA LIKE '%:%' OR LOWER(VARDIYA) = 'off'
                                  OR LOWER(CALISMAMA_TIPI) = 'off' THEN AGENT_USER_CODE END) AS aktif,
            COUNT(DISTINCT CASE WHEN VARDIYA LIKE '%:%' THEN AGENT_USER_CODE END)            AS calisan
     FROM BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_092026
-    GROUP BY TO_CHAR("DATE", 'YYYY-MM-DD')
+    GROUP BY SUBSTR("DATE", 1, 10)
 )
 GROUP BY TO_CHAR(TO_DATE(gun, 'YYYY-MM-DD'), 'IW')
 ORDER BY 1;
-
-
-
-SELECT "DATE"                                                        AS gun,
-       COUNT(DISTINCT AGENT_USER_CODE)                               AS aktif,
-       COUNT(DISTINCT CASE WHEN VARDIYA LIKE '%:%' THEN AGENT_USER_CODE END) AS calisan,
-       COUNT(DISTINCT CASE WHEN LOWER(VARDIYA) = 'off'
-                             OR LOWER(CALISMAMA_TIPI) = 'off' THEN AGENT_USER_CODE END) AS off_sayi,
-       COUNT(DISTINCT CASE WHEN VARDIYA IS NULL OR TRIM(VARDIYA) IN ('-', '')
-                            THEN AGENT_USER_CODE END)                AS bos
-FROM BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_092026
-GROUP BY "DATE"
-ORDER BY "DATE";
-
