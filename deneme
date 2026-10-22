@@ -11,15 +11,10 @@ CONFIG['kap_denge']['kitle']['kurallar'] = [
 
 
 
-_s = []
-for ds, r in sorted(results.items()):
-    mi = ((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}
-    cov = mi.get("shift_coverage", {}) or {}
-    for s, k in (mi.get("assignments") or {}).items():
-        c = cov.get(s, {})
-        if k > 0:
-            _s.append({"tarih": ds, "gun": GUN_TR[dt.date.fromisoformat(ds).weekday()],
-                       "sirket": c.get("company"), "vardiya": f"{c.get('start')}-{c.get('end')}", "kisi": k})
-m1 = pd.DataFrame(_s)
-print(m1[m1["sirket"] == "inhouse"].pivot_table(index=["tarih", "gun"], columns="vardiya", values="kisi",
-      aggfunc="sum", fill_value=0, margins=True, margins_name="TOPLAM").to_string())
+_k = {f"{t}_{s}": "max" for t in ("biz", "ekip") for s in ("in", "out", "pt", "sahadaki")}
+mx = df_slot.groupby(["tarih", "gun"]).agg(_k).astype(int)
+mx.columns = [c.replace("_in", "_inhouse").replace("_out", "_outsource") for c in mx.columns]
+print(mx.to_string())
+print("\nORTALAMA (hafta içi / hafta sonu):")
+print(mx.groupby(mx.index.get_level_values("gun").isin(["Cmt", "Pzr"])).mean().round(0)
+        .rename(index={False: "hafta içi", True: "hafta sonu"}).T.to_string())
