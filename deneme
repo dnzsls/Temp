@@ -55,6 +55,8 @@ KISMI_DAHIL = True   # PT sahadaki kişiye dahil (Model-1 sahadakisi PT'yi içer
 
 
 # %% [HÜCRE 2] — Fonksiyonlar
+# Grafiklerde görünen adlar (veri anahtarları "BİZ"/"EKİP" olarak kalır)
+AD = {"biz": "Analitik model", "ekip": "Planlama ekibi", "BİZ": "Analitik model", "EKİP": "Planlama ekibi"}
 SLOTS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 GUN_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 _SAAT_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
@@ -354,8 +356,8 @@ def grafik_profil(df, hafta_sonu, baslik, dosya=None):
             label="Erlang ihtiyacı — TAHMİN + buffer (Model-1'in planladığı)")
     a2.plot(x, g["tahmin_kap_ihtiyac"], color="#a6d96a", ls=":", lw=2.2,
             label="Kap ihtiyacı — TAHMİN + buffer (Model-1'in planladığı)")
-    a2.plot(x, g["biz_sahadaki"], color="#1f77b4", lw=2.2, label="BİZ sahadaki")
-    a2.plot(x, g["ekip_sahadaki"], color="#ff7f0e", lw=2.2, label="EKİP sahadaki")
+    a2.plot(x, g["biz_sahadaki"], color="#1f77b4", lw=2.2, label=f"{AD['biz']} sahadaki")
+    a2.plot(x, g["ekip_sahadaki"], color="#ff7f0e", lw=2.2, label=f"{AD['ekip']} sahadaki")
     a2.set_ylabel("kişi")
     a2.legend(loc="upper left")
     a2.set_xticks(list(x)[::2])
@@ -378,11 +380,11 @@ def grafik_kaprr(df_saat, df_gun, dosya=None):
         for hs, ls in ((0, "-"), (1, "--")):
             g = df_saat[df_saat["hafta_sonu"] == hs]
             ad = "hafta içi" if hs == 0 else "hafta sonu"
-            a1.plot(g["saat"], g[f"biz_Kap_RR{ek}"] * 100, color="#1f77b4", ls=ls, label=f"BİZ {ad}")
-            a1.plot(g["saat"], g[f"ekip_Kap_RR{ek}"] * 100, color="#ff7f0e", ls=ls, label=f"EKİP {ad}")
+            a1.plot(g["saat"], g[f"biz_Kap_RR{ek}"] * 100, color="#1f77b4", ls=ls, label=f"{AD['biz']} {ad}")
+            a1.plot(g["saat"], g[f"ekip_Kap_RR{ek}"] * 100, color="#ff7f0e", ls=ls, label=f"{AD['ekip']} {ad}")
         a1.set_title(f"Kap_RR — saat · {ad_olcu}")
-        a2.plot(df_gun["tarih"].astype(str), df_gun[f"biz_Kap_RR{ek}"] * 100, "o-", color="#1f77b4", label="BİZ")
-        a2.plot(df_gun["tarih"].astype(str), df_gun[f"ekip_Kap_RR{ek}"] * 100, "o-", color="#ff7f0e", label="EKİP")
+        a2.plot(df_gun["tarih"].astype(str), df_gun[f"biz_Kap_RR{ek}"] * 100, "o-", color="#1f77b4", label=AD["biz"])
+        a2.plot(df_gun["tarih"].astype(str), df_gun[f"ekip_Kap_RR{ek}"] * 100, "o-", color="#ff7f0e", label=AD["ekip"])
         a2.set_title(f"Kap_RR — gün · {ad_olcu}")
         a1.set_ylabel("%")
         for a in (a1, a2):
@@ -453,9 +455,9 @@ print(df_tip.T.to_string(header=False))
 
 # %% [HÜCRE 4] — Grafikler
 os.makedirs(GRAFIK_KLASOR, exist_ok=True)
-grafik_profil(df_slot, 0, f"{QUEUE.upper()} · HAFTA İÇİ · gerçek çağrı — BİZ vs EKİP",
+grafik_profil(df_slot, 0, f"{QUEUE.upper()} · HAFTA İÇİ · gerçek çağrı — {AD['biz']} vs {AD['ekip']}",
               os.path.join(GRAFIK_KLASOR, f"profil_hafta_ici_{QUEUE}.png"))
-grafik_profil(df_slot, 1, f"{QUEUE.upper()} · HAFTA SONU · gerçek çağrı — BİZ vs EKİP",
+grafik_profil(df_slot, 1, f"{QUEUE.upper()} · HAFTA SONU · gerçek çağrı — {AD['biz']} vs {AD['ekip']}",
               os.path.join(GRAFIK_KLASOR, f"profil_hafta_sonu_{QUEUE}.png"))
 grafik_kaprr(df_saat, df_gun, os.path.join(GRAFIK_KLASOR, f"kap_rr_{QUEUE}.png"))
 
@@ -586,7 +588,7 @@ def grafik_ihtiyac_ust_uste(df_slot, df_tip, olcu="erlang", dosya=None):
     """A) gerçek çağrıdan gereken kişi · BİZ ve EKİP sahadaki."""
     kol, etk = OLCU[olcu]
     fig, eks = plt.subplots(1, 2, figsize=(17, 6))
-    fig.suptitle(f"{QUEUE.upper()} — GERÇEK çağrıdan gereken kişi ({etk}) · BİZ ve EKİP sahadaki "
+    fig.suptitle(f"{QUEUE.upper()} — GERÇEK çağrıdan gereken kişi ({etk}) · {AD['biz']} ve {AD['ekip']} sahadaki "
                  f"({PT_ETIKET})", fontweight="bold")
     for j, (hs, ad) in enumerate(((0, "HAFTA İÇİ"), (1, "HAFTA SONU"))):
         ax = eks[j]
@@ -598,14 +600,14 @@ def grafik_ihtiyac_ust_uste(df_slot, df_tip, olcu="erlang", dosya=None):
         x = range(len(g))
         ax.fill_between(x, g[kol], color="#f3edc8", alpha=.8)
         ax.plot(x, g[kol], color="k", ls="--", lw=2, label=f"Gereken kişi (GERÇEK çağrı · {etk})")
-        ax.plot(x, g["biz_sahadaki"], color="#1f4e9c", lw=2.2, label="BİZ — sahadaki kişi")
-        ax.plot(x, g["ekip_sahadaki"], color="#d9541e", lw=2.2, label="EKİP — sahadaki kişi")
+        ax.plot(x, g["biz_sahadaki"], color="#1f4e9c", lw=2.2, label=f"{AD['biz']} — sahadaki kişi")
+        ax.plot(x, g["ekip_sahadaki"], color="#d9541e", lw=2.2, label=f"{AD['ekip']} — sahadaki kişi")
         n_gun = d["tarih"].nunique()
         o = df_tip[df_tip["gun_tipi"] == ("hafta içi" if hs == 0 else "hafta sonu")].iloc[0]
         satir = []
         for k in ("biz", "ekip"):
             eksik = (d[kol] - d[f"{k}_sahadaki"]).clip(lower=0).sum() / 2 / n_gun   # bu ölçüye göre
-            satir.append(f"{k.upper()}: Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f} · açıkta "
+            satir.append(f"{AD[k]}: Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f} · açıkta "
                          f"{o[f'{k}_karsilanamayan_cagri'] / n_gun:,.0f} çağrı/gün · eksik "
                          f"{eksik:,.0f} kişi-saat/gün")
         _kutu(ax, "\n".join(satir) + f"\neksik: {etk} çizgisinin altı · {n_gun} gün ortalaması")
@@ -652,7 +654,7 @@ def grafik_kirilim(df_slot, df_giris, olcu="erlang", dosya=None):
                     label=f"vardiya başlangıcı (günde {bas.sum():.0f} kişi başlıyor)")
             _kutu(ax, f"tepe sahadaki {a3.max():.0f} kişi @ {SLOTS[int(np.nanargmax(a3.values))]}"
                       f"\n{n_gun} gün ortalaması")
-            ax.set_title(f"{taraf} · {ad}", loc="left", fontweight="bold")
+            ax.set_title(f"{AD[taraf]} · {ad}", loc="left", fontweight="bold")
             ax.set_ylabel("kişi")
             ax.legend(loc="upper left", fontsize=8)
             _xeksen(ax)
@@ -771,20 +773,19 @@ def grafik_sunum(df_slot, df_giris, df_tip, olcu=SUNUM_OLCU, dosya=None):
         n_gun = d["tarih"].nunique()
         g = d.groupby("slot")[[kol, "biz_sahadaki", "ekip_sahadaki"]].mean().reindex(sl)
         ax.fill_between(x, g[kol], color=RENK_SUN["dolgu"], alpha=.9, lw=0)
-        ax.plot(x, g[kol], color="k", ls="--", lw=1.8, label=f"Gereken kişi (gerçek çağrı · {etk})")
-        ax.plot(x, g["ekip_sahadaki"], color=RENK_SUN["ekip"], lw=2.6, label="EKİP — sahadaki")
-        ax.plot(x, g["biz_sahadaki"], color=RENK_SUN["biz"], lw=2.6, label="BİZ — sahadaki")
+        ax.plot(x, g[kol], color="k", ls="--", lw=1.8, label="Gereken kişi (gerçek çağrı)")
+        ax.plot(x, g["ekip_sahadaki"], color=RENK_SUN["ekip"], lw=2.6, label=f"{AD['ekip']} — sahadaki")
+        ax.plot(x, g["biz_sahadaki"], color=RENK_SUN["biz"], lw=2.6, label=f"{AD['biz']} — sahadaki")
         for taraf, k in (("EKİP", "ekip"), ("BİZ", "biz")):
             gb = df_giris[(df_giris["taraf"] == taraf) & (df_giris["hafta_sonu"] == hs)]
             b = (gb.groupby("slot")["kisi"].sum() / n_gun).reindex(sl, fill_value=0)
             ax.plot(x, b, color=RENK_SUN[k], lw=1.3, marker="o", ms=3.5, alpha=.75,
-                    label=f"{taraf} — vardiya girişi (günde {b.sum():.0f} kişi)")
+                    label=f"{AD[taraf]} — vardiya girişi (günde {b.sum():.0f} kişi)")
         o = df_tip[df_tip["gun_tipi"] == ("hafta içi" if hs == 0 else "hafta sonu")].iloc[0]
         ax.text(0.985, 0.97,
-                f"Kap_RR   BİZ %{o['biz_Kap_RR'] * 100:.1f}   ·   EKİP %{o['ekip_Kap_RR'] * 100:.1f}\n"
-                f"açıkta çağrı/gün   BİZ {o['biz_karsilanamayan_cagri'] / n_gun:,.0f}   ·   "
-                f"EKİP {o['ekip_karsilanamayan_cagri'] / n_gun:,.0f}",
-                transform=ax.transAxes, ha="right", va="top", fontsize=11,
+                "\n".join(f"{AD[k]}:  Kap_RR %{o[f'{k}_Kap_RR'] * 100:.1f}  ·  açıkta "
+                          f"{o[f'{k}_karsilanamayan_cagri'] / n_gun:,.0f} çağrı/gün" for k in ("biz", "ekip")),
+                transform=ax.transAxes, ha="right", va="top", fontsize=10,
                 bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="#cccccc"))
         ax.set_title(f"{ad}  ·  {n_gun} gün ortalaması", loc="left", fontweight="bold", fontsize=14)
         ax.set_ylim(0, np.nanmax(g.values) * 1.22)
@@ -795,7 +796,7 @@ def grafik_sunum(df_slot, df_giris, df_tip, olcu=SUNUM_OLCU, dosya=None):
         ax.set_xlim(-0.6, len(sl) - 0.4)
         ax.grid(axis="y", alpha=.25)
         ax.spines[["top", "right"]].set_visible(False)
-    fig.suptitle(f"{QUEUE.upper()} — BİZ (Model-1 + Model-2) ve EKİP planı · gerçekleşen çağrıya göre "
+    fig.suptitle(f"{QUEUE.upper()} — {AD['biz']} (Model-1 + Model-2) ve {AD['ekip']} planı · gerçekleşen çağrıya göre "
                  f"({PT_ETIKET if 'PT_ETIKET' in globals() else ''})",
                  fontsize=15, fontweight="bold", y=0.995)
     fig.subplots_adjust(top=0.90, bottom=0.12, left=0.05, right=0.99)
@@ -849,7 +850,7 @@ def grafik_sunum_biz(df_slot, df_giris, df_tip, olcu=SUNUM_OLCU, dosya=None):
         ax.set_xlim(-0.6, len(sl) - 0.4)
         ax.grid(axis="y", alpha=.25)
         ax.spines[["top", "right"]].set_visible(False)
-    fig.suptitle(f"{QUEUE.upper()} — planımız (Model-1 + Model-2) · gerçekleşen çağrıya göre "
+    fig.suptitle(f"{QUEUE.upper()} — {AD['biz']} (Model-1 + Model-2) · gerçekleşen çağrıya göre "
                  f"({PT_ETIKET if 'PT_ETIKET' in globals() else ''})",
                  fontsize=15, fontweight="bold", y=0.995)
     fig.subplots_adjust(top=0.90, bottom=0.12, left=0.05, right=0.99)
