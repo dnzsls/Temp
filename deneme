@@ -57,6 +57,19 @@ KISMI_DAHIL = True   # PT sahadaki kişiye dahil (Model-1 sahadakisi PT'yi içer
 # %% [HÜCRE 2] — Fonksiyonlar
 # Grafiklerde görünen adlar (veri anahtarları "BİZ"/"EKİP" olarak kalır)
 AD = {"biz": "Analitik model", "ekip": "Planlama ekibi", "BİZ": "Analitik model", "EKİP": "Planlama ekibi"}
+# Excel ve ekran tablolarında kolon ön ekleri: biz_ → model_ · ekip_ → planlama_
+KOLON_ON = {"biz_": "model_", "ekip_": "planlama_"}
+
+
+def adlandir(df):
+    """Çıktı tabloları için kolon adlarını değiştirir (içerideki df'ler aynen kalır)."""
+    def _y(c):
+        c = str(c).replace("(biz−ekip)", "(model−planlama)")
+        for a, b in KOLON_ON.items():
+            if c.startswith(a):
+                return b + c[len(a):]
+        return c
+    return df.rename(columns=_y)
 SLOTS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 GUN_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Pzr"]
 _SAAT_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
@@ -449,8 +462,8 @@ for ad, bas in (("biz", bas_biz), ("ekip", bas_ekip)):
 
 pd.set_option("display.width", 220)
 pd.set_option("display.max_columns", 40)
-print(df_ay.T.to_string(header=False))
-print(df_tip.T.to_string(header=False))
+print(adlandir(df_ay).T.to_string(header=False))
+print(adlandir(df_tip).T.to_string(header=False))
 
 
 # %% [HÜCRE 4] — Grafikler
@@ -464,9 +477,10 @@ grafik_kaprr(df_saat, df_gun, os.path.join(GRAFIK_KLASOR, f"kap_rr_{QUEUE}.png")
 
 # %% [HÜCRE 5] — Excel
 ACIKLAMA = pd.DataFrame([
-    ("SORU", "Gerçekleşen çağrıya göre BİZİM plan (Model-2 inhouse + Model-1 outsource/PT) mi, EKİBİN planı mı daha iyi?"),
-    ("biz_sahadaki", "inhouse: Model-2 pickle'ındaki agent_plan (o yarım saatte çalışan agent) · outsource+PT: Model-1 pickle'ı"),
-    ("ekip_sahadaki", f"df_ekip vardiyaları; outsource bitişi +{OUTSOURCE_EK_DK} dk; PT {'dahil' if KISMI_DAHIL else 'hariç'}"),
+    ("SORU", "Gerçekleşen çağrıya göre ANALİTİK MODELİN planı (Model-2 inhouse + Model-1 outsource/PT) mi, PLANLAMA EKİBİNİN planı mı daha iyi?"),
+    ("model_* / planlama_*", "model_ = Analitik model (Model-1 + Model-2) · planlama_ = Planlama ekibi (df_ekip)"),
+    ("model_sahadaki", "inhouse: Model-2 pickle'ındaki agent_plan (o yarım saatte çalışan agent) · outsource+PT: Model-1 pickle'ı"),
+    ("planlama_sahadaki", f"df_ekip vardiyaları; outsource bitişi +{OUTSOURCE_EK_DK} dk; PT {'dahil' if KISMI_DAHIL else 'hariç'}"),
     ("gece", "gece yarısını aşan vardiyanın kalanı ERTESİ güne; ayın 1'i gecesi iki tarafa da ekip tablosundan"),
     ("erlang_ihtiyac", "GERÇEK çağrı + alt-kuyruk ağırlıklı AHT → Erlang-C (ASA hedefi) ÷ (1 − shrinkage). Ayarlar Model-1 config'i"),
     ("kap_ihtiyac", "Kap_RR %100 için gereken kişi: çağrı ÷ (7,5 × (1 − rapor − kayıp))"),
@@ -476,19 +490,19 @@ ACIKLAMA = pd.DataFrame([
     ("*_tahmin (RR)", "aynı plan TAHMİNE göre ölçülünce: Model-1 tahmine göre ne kadar karşılıyordu. Gerçek ile fark = tahmin hatasının etkisi"),
     ("Erlang_karsilama", "1 − Σ eksik ÷ Σ Erlang ihtiyacı — planda yeterli KİŞİ var mı"),
     ("Kap_RR", "Σ min(kapasite, çağrı) ÷ Σ çağrı — çağrının yüzde kaçı karşılanır (15 çağrı/saat, kayıplar düşülmüş)"),
-    ("AHT_RR", "Kap_RR ile aynı soru, 15 yerine bizim AHT (net kişi × 1800 ÷ AHT); boşta bekleme yok → iyimser"),
+    ("AHT_RR", "Kap_RR ile aynı soru, 15 yerine model AHT'si (net kişi × 1800 ÷ AHT); boşta bekleme yok → iyimser"),
     ("karsilanamayan_cagri", "her yarım saatte max(0, çağrı − Kap kapasitesi) toplamı"),
     ("kap_rr_alti_slot", "Kap_RR %100'ün altında kalan yarım saat sayısı"),
     ("*_kisi (gun)", "o gün işe BAŞLAYAN kişi (inhouse/outsource/PT)"),
 ], columns=["kolon", "anlam"])
 
-YUZDE = {f"{k}_{m}" for k in ("biz", "ekip") for m in ("Erlang_karsilama", "Kap_RR", "AHT_RR",
+YUZDE = {f"{k}_{m}" for k in ("model", "planlama") for m in ("Erlang_karsilama", "Kap_RR", "AHT_RR",
                                                       "Erlang_karsilama_tahmin", "Kap_RR_tahmin")} \
-        | {"Kap_RR_fark (biz−ekip)", "tahmin_sapma"}
+        | {"Kap_RR_fark (model−planlama)", "tahmin_sapma"}
 with pd.ExcelWriter(CIKTI, engine="openpyxl") as xl:
     for ad, df in (("ay", df_ay), ("gun_tipi", df_tip), ("gun", df_gun), ("saat", df_saat),
                    ("slot", df_slot), ("ACIKLAMA", ACIKLAMA)):
-        df.to_excel(xl, sheet_name=ad, index=False)
+        adlandir(df).to_excel(xl, sheet_name=ad, index=False)
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
     KIR, YES = PatternFill("solid", fgColor="FFC7CE"), PatternFill("solid", fgColor="C6EFCE")
@@ -743,9 +757,9 @@ for ad, bas in (("biz", bas_biz), ("ekip", bas_ekip)):
 CIKTI = CIKTI.replace(".xlsx", "_M1inhouse.xlsx") if "_M1inhouse" not in CIKTI else CIKTI
 pd.set_option("display.width", 220)
 pd.set_option("display.max_columns", 40)
-print("⚠ BİZ inhouse = Model-1 (Model-2 değil) · Excel:", CIKTI)
-print(df_ay.T.to_string(header=False))
-print(df_tip.T.to_string(header=False))
+print(f"⚠ {AD['biz']} inhouse = Model-1 (Model-2 değil) · Excel:", CIKTI)
+print(adlandir(df_ay).T.to_string(header=False))
+print(adlandir(df_tip).T.to_string(header=False))
 
 
 # %% [HÜCRE 9] — SUNUM grafiği: BİZ ↔ EKİP üst üste + vardiya girişleri (aynı panelde)
