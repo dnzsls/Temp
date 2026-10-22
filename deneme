@@ -1,24 +1,17 @@
-import os, datetime as _dt
-_z = lambda p: _dt.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d.%m %H:%M")
+print(CIKTI)                                         # sonu "_M1inhouse.xlsx" ise HÜCRE 8 bir ara çalışmış
+print(sum(len(v) for v in roster_gun.values()),      # grafikteki BİZ inhouse agent-gün
+      len(_m2["agent_plan"]))                        # Model-2 pickle'ındaki satır sayısı
 
-# 1) hangi dosyalar okundu, ne zaman yazılmışlar
-print("Model-1:", PKL_PATH, "| yazıldı:", _z(PKL_PATH))
-print("Model-2:", M2_PKL_PATH, "| yazıldı:", _z(M2_PKL_PATH))
 
-# 2) Model-2 hangi Model-1 pickle'ından üretilmiş
-_m2 = pickle.load(open(M2_PKL_PATH, "rb"))
-_meta = _m2.get("meta", {})
-print("Model-2 kaynağı :", _meta.get("kaynak_pickle"), "| üretim:", _meta.get("uretim"), "| durum:", _meta.get("durum"))
-print("kaynak = PKL_PATH?", os.path.basename(str(_meta.get("kaynak_pickle"))) == os.path.basename(PKL_PATH))
-
-# 3) Model-1 koşusunda kullanılan kadro ve outsource ayarı (pickle'ın içinden)
-_c = next(r[QUEUE]["_config"] for r in results.values() if r and r.get(QUEUE))
-print("inhouse kadro   :", _c.get("kadro", {}).get("inhouse", {}).get(QUEUE))
-print("outsource_kisi  :", _c.get("kadro", {}).get("outsource_kisi", {}).get(QUEUE))
-print("kap_denge kural :", len((_c.get("kap_denge", {}).get(QUEUE) or {}).get("kurallar", [])), "adet")
-
-# 4) gün gün: Model-1 inhouse talebi ↔ Model-2'nin verdiği
-_t = pd.DataFrame({"M1": {k: len(v) for k, v in m1_roster(results).items()},
+_m1 = {}
+for ds, r in results.items():
+    mi = ((r or {}).get(QUEUE) or {}).get("mip_info", {}) or {}
+    cov = mi.get("shift_coverage", {}) or {}
+    _m1[dt.date.fromisoformat(ds)] = sum(k for s, k in (mi.get("assignments") or {}).items()
+                                        if k > 0 and cov.get(s, {}).get("company") in (None, "inhouse"))
+_t = pd.DataFrame({"M1": _m1,
                    "M2": {k: len(v) for k, v in roster_gun.items() if (k.year, k.month) == (YEAR, MONTH)}}).fillna(0)
 _t["fark"] = _t["M2"] - _t["M1"]
-print(_t.astype(int).to_string())
+_t["gun"] = [GUN_TR[d.weekday()] for d in _t.index]
+print(_t.to_string())
+print(_t.groupby(_t["gun"].isin(["Cmt", "Pzr"]))[["M1", "M2", "fark"]].mean().round(1))
