@@ -860,3 +860,58 @@ def grafik_sunum_biz(df_slot, df_giris, df_tip, olcu=SUNUM_OLCU, dosya=None):
 
 grafik_sunum_biz(df_slot, df_giris, df_tip, SUNUM_OLCU,
                  os.path.join(GRAFIK_KLASOR, f"sunum_biz_{SUNUM_OLCU}_{QUEUE}.png"))
+
+
+# %% [HÜCRE 11] — SUNUM, slayt sağ sütunu için KÜÇÜK boy (yalnız BİZ)
+# Önkoşul: HÜCRE 9 çalışmış olmalı. Slayttaki "MODEL – Hafta İçi / Hafta Sonu" başlıkları
+# zaten var → grafikte başlık yok. İki ayrı PNG (her başlığın altına bir tane) +
+# alt alta tek PNG. Boyut inç cinsinden: slayt sütununa göre KUCUK_BOY'u ayarla.
+KUCUK_BOY = (6.4, 2.7)      # tek grafik (genişlik, yükseklik) — alt alta PNG 2 katı yükseklik
+KUCUK_DPI = 220
+
+
+def _kucuk_panel(ax, hs, olcu=SUNUM_OLCU):
+    kol, etk = OLCU[olcu]
+    sl = [s for s in SLOTS if SUNUM_SAAT[0] <= s < (SUNUM_SAAT[1] if SUNUM_SAAT[1] != "24:00" else "99")]
+    x = np.arange(len(sl))
+    d = df_slot[df_slot["hafta_sonu"] == hs]
+    n_gun = d["tarih"].nunique()
+    g = d.groupby("slot")[[kol, "biz_sahadaki"]].mean().reindex(sl)
+    gb = df_giris[(df_giris["taraf"] == "BİZ") & (df_giris["hafta_sonu"] == hs)]
+    b = (gb.groupby("slot")["kisi"].sum() / n_gun).reindex(sl, fill_value=0)
+    ax.fill_between(x, g[kol], color=RENK_SUN["dolgu"], alpha=.9, lw=0)
+    ax.plot(x, g[kol], color="k", ls="--", lw=1.4, label="Gereken kişi")
+    ax.plot(x, g["biz_sahadaki"], color=RENK_SUN["biz"], lw=2.2, label="Sahadaki kişi")
+    ax.plot(x, b, color=RENK_SUN["biz"], lw=1.0, marker="o", ms=2.5, alpha=.75, label="Vardiya girişi")
+    o = df_tip[df_tip["gun_tipi"] == ("hafta içi" if hs == 0 else "hafta sonu")].iloc[0]
+    ax.text(0.99, 0.97, f"Kap_RR %{o['biz_Kap_RR'] * 100:.1f}", transform=ax.transAxes,
+            ha="right", va="top", fontsize=10, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#cccccc"))
+    ax.set_ylim(0, np.nanmax(g.values) * 1.18)
+    ax.set_xticks(x[::4])
+    ax.set_xticklabels(sl[::4], fontsize=8.5)
+    ax.set_xlim(-0.6, len(sl) - 0.4)
+    ax.tick_params(axis="y", labelsize=8.5)
+    ax.grid(axis="y", alpha=.25)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(loc="upper left", frameon=False, fontsize=8.5, ncol=3,
+              handlelength=1.6, columnspacing=1.0, borderaxespad=0.1)
+
+
+# ayrı ayrı (slayttaki iki başlığın altına)
+for hs, ad in ((0, "hafta_ici"), (1, "hafta_sonu")):
+    fig, ax = plt.subplots(figsize=KUCUK_BOY)
+    _kucuk_panel(ax, hs)
+    fig.tight_layout(pad=0.4)
+    fig.savefig(os.path.join(GRAFIK_KLASOR, f"sunum_kucuk_{ad}_{QUEUE}.png"), dpi=KUCUK_DPI, facecolor="white")
+    plt.show()
+
+# alt alta tek görsel (başlıklar grafiğin içinde)
+fig, eks = plt.subplots(2, 1, figsize=(KUCUK_BOY[0], KUCUK_BOY[1] * 2 + 0.3))
+for ax, (hs, ad) in zip(eks, ((0, "Hafta İçi"), (1, "Hafta Sonu"))):
+    _kucuk_panel(ax, hs)
+    ax.set_title(f"MODEL – {ad}", loc="left", fontsize=11, fontweight="bold")
+fig.tight_layout(pad=0.4, h_pad=1.0)
+fig.savefig(os.path.join(GRAFIK_KLASOR, f"sunum_kucuk_alt_alta_{QUEUE}.png"), dpi=KUCUK_DPI, facecolor="white")
+plt.show()
+print("✓ sunum_kucuk_hafta_ici / _hafta_sonu / _alt_alta PNG:", GRAFIK_KLASOR)
