@@ -18,7 +18,7 @@
 #   kadro_onerisi = hafta içi NET ortalaması − NORM_PAYI
 #   (NORM_PAYI: hafta sonu NORM olarak hafta içinden giden kişi/gün; Eylül ≈ 12)
 #
-# Hücreleri sırayla çalıştır.
+# SIRA: K1 → (SQL tabloları + altındaki düzenleme hücreleri) → K2 → K3
 # =============================================================================
 
 
@@ -35,6 +35,13 @@ MODEL2_DOSYA = "kitle_cagrilar_agent_detayli_model_v7_gpt.py"
 RESMI_TATILLER_AY = ["2026-10-29"]          # Ekim: 29 Ekim Cumhuriyet Bayramı
 ARIFE_GUNLERI_AY = ["2026-10-28"]           # Ekim: 28 Ekim öğleden sonra
 NORM_PAYI = 12                               # kişi/gün — hafta sonu norm payı (Eylül ölçümü)
+
+# Ay tanımı (Model-2 HÜCRE 2'nin pickle'dan ürettikleri) — BURADA kurulur ki
+# SQL'den sonraki düzenleme hücreleri (if df_izin is not None: … GUN_SET …)
+# K1'den sonra sorunsuz çalışsın.
+AY_YIL, AY_AY = YIL, AY
+GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
+GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
 
 
 # %% [K2] — Model-2 hücrelerini çalıştır (H0 + H3 → H8D), pickle'sız
@@ -57,20 +64,26 @@ _adlar = [a for a, _ in _hc]
 if "0" not in _adlar or "8D" not in _adlar:
     raise SystemExit(f"Model-2 dosyasında HÜCRE 0 / 8D bulunamadı: {_adlar[:15]} …")
 
-# HÜCRE 0 — konfig (+ dosya başındaki importlar)
+# HÜCRE 1-2 YERİNE — pickle'sız ay tanımı. HÜCRE 0'dan ÖNCE kurulur: notebook'ta
+# HÜCRE 0 ile HÜCRE 1 arasında başlıksız veri hücreleri (SQL + düzenleme) varsa
+# bloğa onlar da girer ve GUN_SET / GUNLER'i kullanabilir.
+_KUYRUK = QUEUE                              # K1'deki kuyruk
+AY_YIL, AY_AY = YIL, AY
+results = {}                                 # H8B çağrı hacmi → boş (uyarı basar, NET'i etkilemez)
+GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
+GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
+
+# HÜCRE 0 — konfig (+ dosya başındaki importlar ve başlıksız veri hücreleri)
 _bas = _model2_kaynak(MODEL2_DOSYA)
 _bas = _bas[:_bas.index("# %% [HÜCRE 0]")]
 exec(_bas, globals())
 exec(dict(_hc)["0"], globals())
-QUEUE = QUEUE                                # K1'deki kuyruk geçerli
+QUEUE = _KUYRUK
 if RESMI_TATILLER_AY is not None:
     RESMI_TATILLER = list(RESMI_TATILLER_AY)
 if ARIFE_GUNLERI_AY is not None:
     ARIFE_GUNLERI = list(ARIFE_GUNLERI_AY)
-
-# HÜCRE 1-2 YERİNE — pickle'sız ay tanımı (talep sembolik, NET'i etkilemez)
-AY_YIL, AY_AY = YIL, AY
-results = {}                                 # H8B çağrı hacmi → boş (uyarı basar, NET'i etkilemez)
+AY_YIL, AY_AY = YIL, AY                      # HÜCRE 0 ezdiyse geri al
 GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
 GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
 df_talep = pd.DataFrame([{"tarih": ds, "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
