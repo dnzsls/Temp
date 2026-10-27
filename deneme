@@ -171,13 +171,13 @@ print("=== GÜN GÜN (yazılabilir agent) ===")
 print(df_net[["tarih", "gun", "hafta", "hs", "tatil", "arife", "toplam", "izin", "off_t2",
               "hs_y", "tat_y", "ari_y", "net", "off_t"]].to_string(index=False))
 
-_hi = df_net[(df_net["hs"] == 0) & (df_net["tatil"] == 0)]
+_hi = df_net[(df_net["hs"] == 0) & (df_net["tatil"] == 0) & (df_net["arife"] == 0)]   # tatil + arife hariç
 _oz = (_hi.groupby("hafta")
        .agg(ilk=("tarih", "min"), son=("tarih", "max"), gun=("net", "size"),
             net_ort=("net", "mean"), net_min=("net", "min"), net_max=("net", "max")))
 _oz = _oz.reindex(sorted(_oz.index, key=lambda h: int(h.split("_")[1])))
 _oz["kadro_onerisi"] = (_oz["net_ort"] - NORM_PAYI).round().astype(int)
-print(f"\n=== HAFTA (hafta içi, tatil hariç) — kadro_onerisi = NET ort − {NORM_PAYI} ===")
+print(f"\n=== HAFTA (hafta içi, tatil ve arife hariç) — kadro_onerisi = NET ort − {NORM_PAYI} ===")
 print(_oz.round(1).to_string())
 
 _hs = df_net[df_net["hs"] == 1]
@@ -188,6 +188,7 @@ _kadro = {h: int(v) for h, v in _oz["kadro_onerisi"].items()}
 _kadro["default"] = int(round(_oz["kadro_onerisi"].mean()))
 print("\n# ---- Model-1 HÜCRE 3'e yapıştır ----")
 print(f"CONFIG['kadro']['inhouse']['{QUEUE}'].update(\n    {_kadro})")
-if TATIL:
-    print(f"# NOT: tatil {sorted(t.isoformat() for t in TATIL)} ortalamaya katılmadı; "
-          f"Model-1 sabit hafta içi kadroyu o güne de uygular.")
+if TATIL or ARIFE:
+    print(f"# NOT: tatil {sorted(t.isoformat() for t in TATIL)} ve arife "
+          f"{sorted(t.isoformat() for t in ARIFE)} ortalamaya katılmadı; "
+          f"Model-1 sabit hafta içi kadroyu o günlere de uygular.")
