@@ -1,1 +1,4 @@
-Step, müşterilerin çevreye duyarlı davranışlarıyla puan kazanabildiği ve bu puanlarla sosyal sorumluluk projelerine destek olabildiği bir platform. Banka, müşterilerin kazandıkları bağış hakkıyla onlar adına sosyal sorumluluk projelerine bağış yapıyor. Biz de bu projede mümkün olduğunca çok müşterinin bağış hakkı kazanabilmesini sağlarken çevreye duyarlı davranışları teşvik etmek ve yıllık bağış bütçesini dengeli yönetmek için müşterilerin kazanabilecekleri puanları tahmin ettik. Bu tahminlere göre puan değerlerini ve bağış eşiklerini belirledik. Kullanıcıların hem çevreye katkılarını görebilmesi hem de kazandıkları puanlarla bağış yapabilmesi, yaptığımız işin karşılığını görmek açısından benim için çok güzel.
+_h = pd.DataFrame(_8d)
+_h = _h[~_h["hs"] & ~_h["tatil"]]
+_h["hafta"] = pd.to_datetime(_h["tarih"]).dt.isocalendar().week
+print(_h.groupby("hafta")[["net", "talep"]].mean().round(0))
