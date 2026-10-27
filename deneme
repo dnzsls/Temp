@@ -1,4 +1,4 @@
 _h = pd.DataFrame(_8d)
-_h = _h[~_h["hs"] & ~_h["tatil"]]
+_h = _h[(_h["hs"] == 0) & (_h["tatil"] == 0)]
 _h["hafta"] = pd.to_datetime(_h["tarih"]).dt.isocalendar().week
 print(_h.groupby("hafta")[["net", "talep"]].mean().round(0))
