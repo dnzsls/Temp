@@ -45,45 +45,51 @@ GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
 
 
 # %% [K2] — Model-2 hücrelerini çalıştır (H0 + H3 → H8D), pickle'sız
-def _model2_kaynak(yol):
+# YALNIZ "# %% [HÜCRE n]" başlıklı hücreler (ve aynı bölümün devamı) çalışır.
+# Notebook'taki başlıksız hücreler (SQL bağlantısı, veri çekme, düzenleme) ve
+# HÜCRE 0'dan önceki her şey ATLANIR → şifre sormaz; veriyi sen önceden çekiyorsun.
+def _model2_hucreleri(yol):
+    """→ {ad: kod}. .ipynb: başlıklı hücre + başlıksız devam hücreleri (HÜCRE 0 hariç:
+    onun devamı SQL olabilir → yalnız başlıklı hücre). .py: bir sonraki başlığa kadar."""
     if yol.endswith(".ipynb"):
         nb = json.load(open(yol, encoding="utf-8"))
-        return "\n\n".join("".join(c["source"]) for c in nb["cells"] if c.get("cell_type") == "code")
-    return open(yol, encoding="utf-8").read()
-
-
-def _hucreler(kaynak):
-    """'# %% [HÜCRE n]' işaretlerine göre böler → [(ad, kod), …] dosya sırasıyla."""
+        hucre, ad = {}, None
+        for c in nb["cells"]:
+            if c.get("cell_type") != "code":
+                continue
+            kod = "".join(c["source"])
+            m = re.search(r"^# %% \[HÜCRE ([0-9]+[A-Z]?)\]", kod, flags=re.M)
+            if m:
+                ad = m.group(1)
+                hucre[ad] = kod
+            elif ad is not None and ad != "0":
+                hucre[ad] += "\n\n" + kod        # aynı bölümün devam hücresi
+        return hucre
+    kaynak = open(yol, encoding="utf-8").read()
     isaret = list(re.finditer(r"^# %% \[HÜCRE ([0-9]+[A-Z]?)\]", kaynak, flags=re.M))
-    return [(m.group(1), kaynak[m.start(): (isaret[i + 1].start() if i + 1 < len(isaret) else len(kaynak))])
-            for i, m in enumerate(isaret)]
+    return {m.group(1): kaynak[m.start(): (isaret[k + 1].start() if k + 1 < len(isaret) else len(kaynak))]
+            for k, m in enumerate(isaret)}
 
 
-_hc = _hucreler(_model2_kaynak(MODEL2_DOSYA))
-_adlar = [a for a, _ in _hc]
+_hc = _model2_hucreleri(MODEL2_DOSYA)
+_adlar = list(_hc)
 if "0" not in _adlar or "8D" not in _adlar:
     raise SystemExit(f"Model-2 dosyasında HÜCRE 0 / 8D bulunamadı: {_adlar[:15]} …")
 
-# HÜCRE 1-2 YERİNE — pickle'sız ay tanımı. HÜCRE 0'dan ÖNCE kurulur: notebook'ta
-# HÜCRE 0 ile HÜCRE 1 arasında başlıksız veri hücreleri (SQL + düzenleme) varsa
-# bloğa onlar da girer ve GUN_SET / GUNLER'i kullanabilir.
-_KUYRUK = QUEUE                              # K1'deki kuyruk
-AY_YIL, AY_AY = YIL, AY
+import pickle                                # Model-2 hücrelerinin kullandığı modüller
+_KUYRUK = QUEUE
 results = {}                                 # H8B çağrı hacmi → boş (uyarı basar, NET'i etkilemez)
-GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
-GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
 
-# HÜCRE 0 — konfig (+ dosya başındaki importlar ve başlıksız veri hücreleri)
-_bas = _model2_kaynak(MODEL2_DOSYA)
-_bas = _bas[:_bas.index("# %% [HÜCRE 0]")]
-exec(_bas, globals())
-exec(dict(_hc)["0"], globals())
+# HÜCRE 0 — yalnız konfig
+exec(_hc["0"], globals())
 QUEUE = _KUYRUK
 if RESMI_TATILLER_AY is not None:
     RESMI_TATILLER = list(RESMI_TATILLER_AY)
 if ARIFE_GUNLERI_AY is not None:
     ARIFE_GUNLERI = list(ARIFE_GUNLERI_AY)
-AY_YIL, AY_AY = YIL, AY                      # HÜCRE 0 ezdiyse geri al
+
+# HÜCRE 1-2 YERİNE — pickle'sız ay (K1'deki ay; HÜCRE 0 ezdiyse geri alınır)
+AY_YIL, AY_AY = YIL, AY
 GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
 GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
 df_talep = pd.DataFrame([{"tarih": ds, "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
@@ -93,7 +99,8 @@ df_talep = pd.DataFrame([{"tarih": ds, "gun": DAY_TR[dt.date.fromisoformat(ds).w
 
 # HÜCRE 3 → 8D (H9 = model kurulumu, çalıştırılmaz)
 _i3, _i8d = _adlar.index("3"), _adlar.index("8D")
-for _ad, _kod in _hc[_i3: _i8d + 1]:
+for _ad in _adlar[_i3: _i8d + 1]:
+    _kod = _hc[_ad]
     print(f"\n######## Model-2 HÜCRE {_ad} ########")
     exec(_kod, globals())
 
