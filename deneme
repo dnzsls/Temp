@@ -92,6 +92,7 @@ if ARIFE_GUNLERI_AY is not None:
 AY_YIL, AY_AY = YIL, AY
 GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
 GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
+plani_olan = list(GUNLER)                    # HÜCRE 1: planı olan günler → ayın tüm günleri
 df_talep = pd.DataFrame([{"tarih": ds, "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
                           "hafta_sonu": int(dt.date.fromisoformat(ds).weekday() > 4),
                           "vardiya": "09:00-18:00", "baslangic": "09:00", "bitis": "18:00",
