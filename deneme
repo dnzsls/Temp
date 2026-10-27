@@ -1,126 +1,177 @@
 # =============================================================================
-# AYLIK İNHOUSE KADRO — Model-2 NET'inden (Model-1'den ÖNCE, her ay ilk iş)
+# AYLIK İNHOUSE KADRO — yazılabilir agent (NET) sayısından (Model-1'den ÖNCE)
 # =============================================================================
 # Model-1'e yazılacak inhouse kadroyu (CONFIG['kadro']['inhouse'][kuyruk]
-# hafta_1..hafta_N) Model-2'nin "o gün yazılabilir agent" sayısından (H8D NET)
-# çıkarır. Pickle GEREKMEZ: NET talepten bağımsız (agent + izin + off_t2 +
-# hamile/süt/mesai yasakları).
+# hafta_1..hafta_N) her gün "o gün yazılabilir agent" sayısından çıkarır.
+# Kendi içinde hesaplar — Model-2 notebook'una ve pickle'a BAĞLI DEĞİL.
+# Kurallar Model-2 (v7_gpt) HÜCRE 4-7 + 8D ile aynı:
+#   agent   : kuyruk (line_based_main_group) · PT (kismi_calisan_flg) ve eğitim ekibi hariç
+#   izin    : df_izin (öncelikli) + df_off gun_N · idari/doğum izni → tüm ay ·
+#             Pzt..Cuma izinli flag'leri (süt izni: resmi tatil haftasında emilir) ·
+#             hamile/süt: hafta içi off_t/off_t2 → izin, hafta sonu izinleri atılır
+#   yazılamaz zinciri (tek sebep): izin > off_t2 > hamile/süt hafta sonu >
+#             mesaiye kalamaz resmi tatil > (hamile/süt/mesai) arife
+#   NET     = tam zamanlı agent − yazılamaz           (off_t YUMUŞAK → düşülmez)
 #
-# NASIL ÇALIŞIR: Model-2 dosyasının HÜCRE 0 ve HÜCRE 3 → 8D bloklarını OKUYUP
-# çalıştırır (kopya kod YOK → Model-2 değişince burası da güncel kalır).
-# HÜCRE 1-2 (pickle) yerine ay buradan tanımlanır.
+# GİRDİLER (kernel'de; SQL'den çektiğin haliyle — ham ya da düzenlenmiş):
+#   df_agents : agent_user_code · line_based_main_group · teamleader_name · *_flg …
+#   df_izin   : agent_user_code · tarih · izin_tipi (izin / off_t / off_t2)
+#   df_off    : agent_user_code · izin_tipi · gun_1 .. gun_31      (yoksa atlanır)
 #
-# GİRDİLER (Model-2 notebook'undaki gibi kernel'de tanımlı olmalı):
-#   df_agents, df_off  (+ varsa df_onceki, df_off_gecmis, df_gecmis …)
+# ÇIKTI: gün gün tablo · hafta önerisi (hafta içi NET ort − NORM_PAYI) ·
+#        Model-1 HÜCRE 3'e yapıştırılacak satır
 #
-# ÇIKTI:
-#   gün gün NET tablosu · hafta bazında öneri · HÜCRE 3'e yapıştırılacak satır
-#   kadro_onerisi = hafta içi NET ortalaması − NORM_PAYI
-#   (NORM_PAYI: hafta sonu NORM olarak hafta içinden giden kişi/gün; Eylül ≈ 12)
-#
-# SIRA: K1 → (SQL tabloları + altındaki düzenleme hücreleri) → K2 → K3
+# SIRA: tabloları çek → K1 → K2 → K3
 # =============================================================================
 
 
 # %% [K1] — Ayarlar
-import os, re, json, math, calendar
+import calendar
 import datetime as dt
 import pandas as pd
 
 YIL, AY = 2026, 10
 QUEUE = "kitle"
-# Model-2 dosyası: .py ya da .ipynb (hücreleri "# %% [HÜCRE n]" ile başlamalı)
-MODEL2_DOSYA = "kitle_cagrilar_agent_detayli_model_v7_gpt.py"
-# Model-2 HÜCRE 0'daki değerleri EZMEK için (None → HÜCRE 0'daki kalır)
-RESMI_TATILLER_AY = ["2026-10-29"]          # Ekim: 29 Ekim Cumhuriyet Bayramı
-ARIFE_GUNLERI_AY = ["2026-10-28"]           # Ekim: 28 Ekim öğleden sonra
-NORM_PAYI = 12                               # kişi/gün — hafta sonu norm payı (Eylül ölçümü)
+RESMI_TATILLER = ["2026-10-29"]          # Ekim: 29 Ekim Cumhuriyet Bayramı
+ARIFE_GUNLERI = ["2026-10-28"]           # Ekim: 28 Ekim öğleden sonra
+NORM_PAYI = 12                           # kişi/gün — hafta sonuna NORM olarak giden pay (Eylül ölçümü)
 
-# Ay tanımı (Model-2 HÜCRE 2'nin pickle'dan ürettikleri) — BURADA kurulur ki
-# SQL'den sonraki düzenleme hücreleri (if df_izin is not None: … GUN_SET …)
-# K1'den sonra sorunsuz çalışsın.
-AY_YIL, AY_AY = YIL, AY
-GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
-GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
+GUNLER = [dt.date(YIL, AY, g) for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
+GUN_SET = set(GUNLER)
+TATIL = {dt.date.fromisoformat(t) for t in RESMI_TATILLER}
+ARIFE = {dt.date.fromisoformat(t) for t in ARIFE_GUNLERI}
+GUN_TR = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
 
 
-# %% [K2] — Model-2 hücrelerini çalıştır (H0 + H3 → H8D), pickle'sız
-# YALNIZ "# %% [HÜCRE n]" başlıklı hücreler (ve aynı bölümün devamı) çalışır.
-# Notebook'taki başlıksız hücreler (SQL bağlantısı, veri çekme, düzenleme) ve
-# HÜCRE 0'dan önceki her şey ATLANIR → şifre sormaz; veriyi sen önceden çekiyorsun.
-def _model2_hucreleri(yol):
-    """→ {ad: kod}. .ipynb: başlıklı hücre + başlıksız devam hücreleri (HÜCRE 0 hariç:
-    onun devamı SQL olabilir → yalnız başlıklı hücre). .py: bir sonraki başlığa kadar."""
-    if yol.endswith(".ipynb"):
-        nb = json.load(open(yol, encoding="utf-8"))
-        hucre, ad = {}, None
-        for c in nb["cells"]:
-            if c.get("cell_type") != "code":
-                continue
-            kod = "".join(c["source"])
-            m = re.search(r"^# %% \[HÜCRE ([0-9]+[A-Z]?)\]", kod, flags=re.M)
-            if m:
-                ad = m.group(1)
-                hucre[ad] = kod
-            elif ad is not None and ad != "0":
-                hucre[ad] += "\n\n" + kod        # aynı bölümün devam hücresi
-        return hucre
-    kaynak = open(yol, encoding="utf-8").read()
-    isaret = list(re.finditer(r"^# %% \[HÜCRE ([0-9]+[A-Z]?)\]", kaynak, flags=re.M))
-    return {m.group(1): kaynak[m.start(): (isaret[k + 1].start() if k + 1 < len(isaret) else len(kaynak))]
-            for k, m in enumerate(isaret)}
+# %% [K2] — Yazılabilir agent (NET) hesabı
+def _kucuk(df):
+    d = df.copy()
+    d.columns = [str(c).strip().lower() for c in d.columns]
+    return d
 
 
-_hc = _model2_hucreleri(MODEL2_DOSYA)
-_adlar = list(_hc)
-if "0" not in _adlar or "8D" not in _adlar:
-    raise SystemExit(f"Model-2 dosyasında HÜCRE 0 / 8D bulunamadı: {_adlar[:15]} …")
+def _flag(seri):
+    return pd.to_numeric(seri, errors="coerce").fillna(0).astype(int) == 1
 
-import pickle                                # Model-2 hücrelerinin kullandığı modüller
-_KUYRUK = QUEUE
-results = {}                                 # H8B çağrı hacmi → boş (uyarı basar, NET'i etkilemez)
 
-# HÜCRE 0 — yalnız konfig
-exec(_hc["0"], globals())
-QUEUE = _KUYRUK
-if RESMI_TATILLER_AY is not None:
-    RESMI_TATILLER = list(RESMI_TATILLER_AY)
-if ARIFE_GUNLERI_AY is not None:
-    ARIFE_GUNLERI = list(ARIFE_GUNLERI_AY)
+# ---- agent listesi (H4 kuyruk · H5 PT + eğitim) ----
+_ag = _kucuk(df_agents).fillna("")
+_ag = _ag[_ag["line_based_main_group"].astype(str).str.strip() == f"{QUEUE}_cagrilar"]
+_pt = _flag(_ag["kismi_calisan_flg"]) if "kismi_calisan_flg" in _ag else False
+_eg = _ag["teamleader_name"].astype(str).str.lower().str.contains("eğit|egit", na=False)
+_ag = _ag[~_pt & ~_eg].copy()
+_ag["agent_user_code"] = _ag["agent_user_code"].astype(str).str.strip()
+AGENTS = list(_ag["agent_user_code"])
 
-# HÜCRE 1-2 YERİNE — pickle'sız ay (K1'deki ay; HÜCRE 0 ezdiyse geri alınır)
-AY_YIL, AY_AY = YIL, AY
-GUNLER = [dt.date(YIL, AY, g).isoformat() for g in range(1, calendar.monthrange(YIL, AY)[1] + 1)]
-GUN_SET = {dt.date.fromisoformat(ds) for ds in GUNLER}
-plani_olan = list(GUNLER)                    # HÜCRE 1: planı olan günler → ayın tüm günleri
-df_talep = pd.DataFrame([{"tarih": ds, "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
-                          "hafta_sonu": int(dt.date.fromisoformat(ds).weekday() > 4),
-                          "vardiya": "09:00-18:00", "baslangic": "09:00", "bitis": "18:00",
-                          "talep": 1} for ds in GUNLER])
 
-# HÜCRE 3 → 8D (H9 = model kurulumu, çalıştırılmaz)
-_i3, _i8d = _adlar.index("3"), _adlar.index("8D")
-for _ad in _adlar[_i3: _i8d + 1]:
-    _kod = _hc[_ad]
-    print(f"\n######## Model-2 HÜCRE {_ad} ########")
-    exec(_kod, globals())
+def _f(row, kol):
+    return pd.to_numeric(row.get(kol, 0), errors="coerce") == 1
+
+
+# ---- tarih → tip (H7-1): df_izin önce (öncelikli), df_off gün kolonları sonra ----
+_BILINEN = {"izin", "off_t", "off_t2"}
+tip_map = {}
+_iz = globals().get("df_izin")
+if _iz is not None:
+    _iz = _kucuk(_iz)
+    _iz["tarih"] = pd.to_datetime(_iz["tarih"], errors="coerce").dt.date
+    _iz["izin_tipi"] = _iz["izin_tipi"].astype(str).str.strip().str.lower()
+    _iz = _iz[_iz["tarih"].isin(GUN_SET) & _iz["izin_tipi"].isin(_BILINEN)]
+    for a, t, tp in zip(_iz["agent_user_code"].astype(str).str.strip(), _iz["tarih"], _iz["izin_tipi"]):
+        tip_map.setdefault(a, {})[t] = tp
+else:
+    print("⚠ df_izin yok → izinler düşülmedi, NET olduğundan YÜKSEK çıkar")
+_of = globals().get("df_off")
+if _of is not None:
+    _of = _kucuk(_of)
+    _gk = [c for c in _of.columns if c.startswith("gun_")]
+    _of[_gk] = _of[_gk].apply(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+    _tipli = "izin_tipi" in _of.columns
+    for _, r in _of.iterrows():
+        tp = str(r["izin_tipi"]).strip().lower() if _tipli else "izin"
+        if tp not in _BILINEN:
+            continue
+        a = str(r["agent_user_code"]).strip()
+        for c in _gk:
+            if r[c] == 1:
+                try:
+                    t = dt.date(YIL, AY, int(c.split("_")[1]))
+                except ValueError:
+                    continue
+                tip_map.setdefault(a, {}).setdefault(t, tp)     # df_izin'dekini ezmez
+else:
+    print("⚠ df_off yok → off_t2'ler düşülmedi")
+
+# ---- agent başına izin / off_t2 / off_t (H7-3) ----
+_HAFTAICI = {"pazartesi_izinli_flg": 0, "sali_izinli_flg": 1, "carsamba_izinli_flg": 2,
+             "persembe_izinli_flg": 3, "cuma_izinli_flg": 4}
+_tatil_hafta = {d.isocalendar()[:2] for d in TATIL if d.weekday() < 5}
+izin_map, off2_map, off1_map = {}, {}, {}
+hs_yasak, mesai_yok = set(), set()
+for _, r in _ag.iterrows():
+    a = r["agent_user_code"]
+    izin, off2, off1 = set(), set(), set()
+    for t, tp in tip_map.get(a, {}).items():
+        (izin if tp == "izin" else off2 if tp == "off_t2" else off1).add(t)
+    if _f(r, "idari_izinli_flg") or _f(r, "dogum_izni_flg"):
+        izin |= GUN_SET
+    sut, hamile = _f(r, "sut_izni_flg"), _f(r, "hamile_flg")
+    for kol, wd in _HAFTAICI.items():
+        if _f(r, kol):
+            g = {d for d in GUNLER if d.weekday() == wd}
+            if sut:
+                g = {d for d in g if d.isocalendar()[:2] not in _tatil_hafta}
+            izin |= g
+    if sut or hamile:
+        hs_yasak.add(a)
+        izin |= {d for d in (off2 | off1) if d.weekday() < 5}
+        off2, off1 = set(), set()
+        izin = {d for d in izin if d.weekday() < 5}
+    if _f(r, "mesaiye_kalamaz_flg"):
+        mesai_yok.add(a)
+    izin_map[a], off2_map[a], off1_map[a] = izin, off2, off1
+arife_kis = hs_yasak | mesai_yok
+
+# ---- gün gün yazılabilir agent (H8D zinciri) ----
+_sat = []
+for d in GUNLER:
+    hs, tt, ar = d.weekday() >= 5, d in TATIL, d in ARIFE
+    say = {"izin": 0, "off_t2": 0, "hs_y": 0, "tat_y": 0, "ari_y": 0, "off_t": 0}
+    for a in AGENTS:
+        if d in izin_map[a]:
+            say["izin"] += 1
+        elif d in off2_map[a]:
+            say["off_t2"] += 1
+        elif hs and a in hs_yasak:
+            say["hs_y"] += 1
+        elif tt and a in mesai_yok:
+            say["tat_y"] += 1
+        elif ar and a in arife_kis:
+            say["ari_y"] += 1
+        elif d in off1_map[a]:
+            say["off_t"] += 1                       # yazılabilir ama off talebi var (bilgi)
+    yaz = say["izin"] + say["off_t2"] + say["hs_y"] + say["tat_y"] + say["ari_y"]
+    _sat.append({"tarih": d.isoformat(), "gun": GUN_TR[d.weekday()],
+                 "hs": int(hs), "tatil": int(tt), "arife": int(ar), "toplam": len(AGENTS),
+                 **say, "yazilamaz": yaz, "net": len(AGENTS) - yaz})
+df_net = pd.DataFrame(_sat)
+print(f"{QUEUE}: tam zamanlı agent {len(AGENTS)} · hamile/süt {len(hs_yasak)} · "
+      f"mesaiye kalamaz {len(mesai_yok)} · izin/off kaydı olan {len(tip_map)}")
 
 
 # %% [K3] — NET → Model-1 inhouse kadro önerisi
 def _hafta_no(d):
     """Model-1'in hafta_N tanımı: ayın 1'i hafta_1, her Pazartesi yeni hafta, ay sınırı geçmez."""
-    ilk = d.replace(day=1)
-    return (d.day - 1 + ilk.weekday()) // 7 + 1
+    return (d.day - 1 + d.replace(day=1).weekday()) // 7 + 1
 
 
-_g = pd.DataFrame(_8d)
-_g["d"] = pd.to_datetime(_g["tarih"]).dt.date
-_g["hafta"] = [f"hafta_{_hafta_no(d)}" for d in _g["d"]]
-print("\n=== GÜN GÜN (yazılabilir agent) ===")
-print(_g[["tarih", "gun", "hafta", "hs", "tatil", "arife", "toplam", "izin", "off_t2",
-          "hs_y", "tat_y", "ari_y", "net", "off_t"]].to_string(index=False))
+df_net["hafta"] = [f"hafta_{_hafta_no(dt.date.fromisoformat(t))}" for t in df_net["tarih"]]
+pd.set_option("display.width", 200)
+print("=== GÜN GÜN (yazılabilir agent) ===")
+print(df_net[["tarih", "gun", "hafta", "hs", "tatil", "arife", "toplam", "izin", "off_t2",
+              "hs_y", "tat_y", "ari_y", "net", "off_t"]].to_string(index=False))
 
-_hi = _g[(_g["hs"] == 0) & (_g["tatil"] == 0)]
+_hi = df_net[(df_net["hs"] == 0) & (df_net["tatil"] == 0)]
 _oz = (_hi.groupby("hafta")
        .agg(ilk=("tarih", "min"), son=("tarih", "max"), gun=("net", "size"),
             net_ort=("net", "mean"), net_min=("net", "min"), net_max=("net", "max")))
@@ -129,14 +180,14 @@ _oz["kadro_onerisi"] = (_oz["net_ort"] - NORM_PAYI).round().astype(int)
 print(f"\n=== HAFTA (hafta içi, tatil hariç) — kadro_onerisi = NET ort − {NORM_PAYI} ===")
 print(_oz.round(1).to_string())
 
-_hs = _g[_g["hs"] == 1]
+_hs = df_net[df_net["hs"] == 1]
 if len(_hs):
-    print(f"\nhafta sonu NET ort: {_hs['net'].mean():.0f}  (Model-1 h.sonu inhouse tavanı yok — bilgi)")
+    print(f"\nhafta sonu NET ort: {_hs['net'].mean():.0f}  (bilgi — Model-1'de h.sonu inhouse tavanı yok)")
 
 _kadro = {h: int(v) for h, v in _oz["kadro_onerisi"].items()}
 _kadro["default"] = int(round(_oz["kadro_onerisi"].mean()))
 print("\n# ---- Model-1 HÜCRE 3'e yapıştır ----")
 print(f"CONFIG['kadro']['inhouse']['{QUEUE}'].update(\n    {_kadro})")
-_tt = sorted(_g.loc[_g["tatil"] == 1, "tarih"])
-if _tt:
-    print(f"# NOT: tatil günü(leri) {_tt} ortalamaya katılmadı; o hafta Model-1 sabit kadroyu tatile de uygular.")
+if TATIL:
+    print(f"# NOT: tatil {sorted(t.isoformat() for t in TATIL)} ortalamaya katılmadı; "
+          f"Model-1 sabit hafta içi kadroyu o güne de uygular.")
