@@ -1,19 +1,5 @@
-from collections import Counter
-_c = Counter()
-_k = _iz2[_iz2["izin_tipi"].isin(_BILINEN)]
-for a, t in zip(_k["agent_user_code"], _k["tarih"]):
-    _c[(a, t)] += 1
-_of2 = _kucuk(df_off)
-_of2["agent_user_code"] = _of2["agent_user_code"].astype(str).str.strip()
-_gk2 = [c for c in _of2.columns if c.startswith("gun_")]
-for _, r in _of2.iterrows():
-    if str(r.get("izin_tipi", "izin")).strip().lower() not in _BILINEN:
-        continue
-    for c in _gk2:
-        if pd.to_numeric(r[c], errors="coerce") == 1:
-            try:
-                _c[(r["agent_user_code"], dt.date(YIL, AY, int(c.split("_")[1])))] += 1
-            except ValueError:
-                pass
-_e["fazla_satir"] = [sum(_c[(a, d)] - 1 for a in _kalan if _c[(a, d)] > 1) for d in GUNLER]
-print(_e[["tarih", "gun", "fark_E", "fazla_satir"]].to_string(index=False))
+CONFIG['surplus_distribution']['windows'] = [
+    {'name': 'sabah',     'start': '08:00', 'end': '09:00', 'ratio': 0.3},
+    {'name': 'gec_sabah', 'start': '10:30', 'end': '10:30', 'ratio': 0.4},   # V09 → 11:30-12:30 deliği
+    {'name': 'aksam',     'start': '15:00', 'end': '15:00', 'ratio': 0.3},   # V18 → 21:00-22:30 deliği
+]
