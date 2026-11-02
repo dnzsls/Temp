@@ -1,30 +1,19 @@
-ark = [399, 398, 403, 404, 403, 393, 375, 379, 399, 402, 398, 401, 392, 348, 360,
-       389, 390, 391, 392, 388, 369, 370, 396, 398, 400, 396, 398, 371, 363, 405]
-_tam = {r["agent_user_code"] for _, r in _ag.iterrows()
-        if _f(r, "idari_izinli_flg") or _f(r, "dogum_izni_flg")}
-_kalan = [a for a in AGENTS if a not in _tam]
-
-# bizim okumadığımız izin tipleri
-_iz2 = _kucuk(df_izin)
-_iz2["tarih"] = pd.to_datetime(_iz2["tarih"], errors="coerce").dt.date
-_iz2["izin_tipi"] = _iz2["izin_tipi"].astype(str).str.strip().str.lower()
-_iz2["agent_user_code"] = _iz2["agent_user_code"].astype(str).str.strip()
-_iz2 = _iz2[_iz2["tarih"].isin(GUN_SET)]
-print("df_izin tipleri:", _iz2["izin_tipi"].value_counts().to_dict())
-if "izin_tipi" in _kucuk(df_off).columns:
-    print("df_off tipleri :", _kucuk(df_off)["izin_tipi"].astype(str).str.strip().str.lower().value_counts().to_dict())
-_diger = _iz2[~_iz2["izin_tipi"].isin(_BILINEN) & _iz2["agent_user_code"].isin(set(_kalan))]
-_diger_gun = _diger.groupby("tarih")["agent_user_code"].nunique()
-
-# E: kaydı olan herkes düşülür, hamileye özel kural yok
-_s = []
-for i, d in enumerate(GUNLER):
-    kayit = sum(1 for a in _kalan if d in tip_map.get(a, {}))
-    ham_k = sum(1 for a in hs_yasak if a in _kalan and d in tip_map.get(a, {}))
-    E = len(_kalan) - kayit
-    _s.append({"tarih": d, "gun": GUN_TR[d.weekday()], "ark": ark[i], "E": E,
-               "fark_E": E - ark[i], "hamile_kaydi": ham_k,
-               "diger_tip": int(_diger_gun.get(d, 0))})
-_e = pd.DataFrame(_s)
-print(_e.to_string(index=False))
-print("ortalama |fark_E|:", round(_e["fark_E"].abs().mean(), 2))
+from collections import Counter
+_c = Counter()
+_k = _iz2[_iz2["izin_tipi"].isin(_BILINEN)]
+for a, t in zip(_k["agent_user_code"], _k["tarih"]):
+    _c[(a, t)] += 1
+_of2 = _kucuk(df_off)
+_of2["agent_user_code"] = _of2["agent_user_code"].astype(str).str.strip()
+_gk2 = [c for c in _of2.columns if c.startswith("gun_")]
+for _, r in _of2.iterrows():
+    if str(r.get("izin_tipi", "izin")).strip().lower() not in _BILINEN:
+        continue
+    for c in _gk2:
+        if pd.to_numeric(r[c], errors="coerce") == 1:
+            try:
+                _c[(r["agent_user_code"], dt.date(YIL, AY, int(c.split("_")[1])))] += 1
+            except ValueError:
+                pass
+_e["fazla_satir"] = [sum(_c[(a, d)] - 1 for a in _kalan if _c[(a, d)] > 1) for d in GUNLER]
+print(_e[["tarih", "gun", "fark_E", "fazla_satir"]].to_string(index=False))
