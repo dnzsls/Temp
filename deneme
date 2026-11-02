@@ -1,14 +1,14 @@
-# Toplam 468 → 436 farkı nereden: kimler, neden
-_a = _ag.set_index("agent_user_code")
-_kol = ["idari_izinli_flg", "dogum_izni_flg", "hamile_flg", "sut_izni_flg",
-        "mesaiye_kalamaz_flg", "pazartesi_izinli_flg", "sali_izinli_flg",
-        "carsamba_izinli_flg", "persembe_izinli_flg", "cuma_izinli_flg"]
-_kol = [c for c in _kol if c in _a.columns]
-print("flag'i 1 olan kişi sayısı:")
-print({c: int(_flag(_a[c]).sum()) for c in _kol})
-
-# bütün ay hiç yazılamayanlar (her gün izin/off_t2)
-_tam = [a for a in AGENTS if all((d in izin_map[a]) or (d in off2_map[a]) for d in GUNLER)]
-print(f"\nbütün ay yazılamayan: {len(_tam)} kişi   → 468 − {len(_tam)} = {len(AGENTS) - len(_tam)}")
-print(_a.loc[_tam, [c for c in ("agent_name", "teamleader_name", "idari_izinli_flg", "dogum_izni_flg")
-                     if c in _a.columns]].to_string())
+ark = [399, 398, 403, 404, 403, 393, 375, 379, 399, 402, 398, 401, 392, 348, 360,
+       389, 390, 391, 392, 388, 369, 370, 396, 398, 400, 396, 398, 371, 363, 405]
+t = df_net[["tarih", "gun", "hs", "net", "off_t", "hs_y"]].copy()
+t["ark"] = ark
+t["A_biz"] = t["net"]
+t["B_offt_dus"] = t["net"] - t["off_t"]
+t["C_hamile_dusme"] = t["net"] + t["hs_y"]
+t["D_offt_dus_hamile_dusme"] = t["net"] - t["off_t"] + t["hs_y"]
+for k in ["A_biz", "B_offt_dus", "C_hamile_dusme", "D_offt_dus_hamile_dusme"]:
+    t[f"fark_{k[0]}"] = t[k] - t["ark"]
+print(t.to_string(index=False))
+print("\nortalama |fark| (0'a en yakın = arkadaşının kuralı):")
+print({k: round((t[k] - t["ark"]).abs().mean(), 2)
+       for k in ["A_biz", "B_offt_dus", "C_hamile_dusme", "D_offt_dus_hamile_dusme"]})
