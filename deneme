@@ -577,7 +577,6 @@ CONFIG_UNIFIED = {
     # =========================================================================
     # GÜN TİPİ BAZLI BLOKLAR
     # =========================================================================
-    # yatırım: gold bloğunun kopyası, dosyanın SONUNDA (min_per_shift 0) — burada yazılmadı
     'queue_configs': {
         'kitle': {
             'hafta_ici': {
@@ -1028,19 +1027,148 @@ CONFIG_UNIFIED = {
                 'balance_penalty': {'enabled': False, 'windows': []},
             },
         },
+        # YATIRIM (2026-11-04): gold bloğunun AÇIK kopyası — gold değişirse buraya ELLE taşı.
+        # Fark: min_per_shift 0 (35 kişilik ekip, şimdilik 13 kuralı yok).
+        'yatirim': {
+            'hafta_ici': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.03, 1: 0.03, 2: 0.03, 3: 0.03, 4: 0.03, 5: 0.03, 6: 0.03, 7: 0.03,
+                        8: 0.03, 9: 0.21, 10: 0.08, 11: 0.11, 12: 0.24, 13: 0.22, 14: 0.1,
+                        15: 0.21, 16: 0.25, 17: 0.21, 18: 0.13, 19: 0.11, 20: 0.08, 21: 0.18,
+                        22: 0.2, 23: 0.11, 'default': 0.0,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {
+                    'cost_inhouse': 1.0,
+                    'cost_outsource': 1.0,
+                    'min_per_shift': 0,
+                    'min_per_shift_overrides': {},
+                },
+                'rr_penalty': {
+                    'enabled': False,
+                    'peak_exempt': False,
+                    'penalty_per_person': 2.0,
+                    'peak_penalty': 4.0,
+                    'peak_threshold': 0.7,
+                },
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '07:00', 'end': '08:00', 'max_ratio': 1.15, 'penalty': 50.0},
+                        {'start': '09:00', 'end': '10:00', 'max_ratio': 1.3, 'penalty': 50.0},
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 100.0},
+                        # (gold'dan) HAFTA İÇİ — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.25, 'penalty': 50.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.15, 'penalty': 100.0},
+                    ],
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.18, 10: 0.05, 11: 0.08, 12: 0.21, 13: 0.19, 14: 0.07, 15: 0.18,
+                        16: 0.22, 17: 0.18, 18: 0.1, 19: 0.08, 20: 0.05, 21: 0.15, 22: 0.17,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+            },
+            'cumartesi': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 5: 0.05, 6: 0.05, 7: 0.05,
+                        8: 0.05, 9: 0.21, 10: 0.13, 11: 0.12, 12: 0.14, 13: 0.21, 14: 0.18,
+                        15: 0.24, 16: 0.26, 17: 0.24, 18: 0.17, 19: 0.14, 20: 0.17, 21: 0.12,
+                        22: 0.15, 23: 0.13, 'default': 0.05,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # GOLD CUMARTESİ — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.16, 10: 0.08, 11: 0.07, 12: 0.09, 13: 0.16, 14: 0.13, 15: 0.19,
+                        16: 0.21, 17: 0.18, 18: 0.12, 19: 0.09, 20: 0.12, 21: 0.07, 22: 0.1,
+                        23: 0.08, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+            'pazar': {
+                'erlang': {
+                    'target_asa': 30,
+                    'target_seconds': 30,
+                    'shrinkage': {
+                        0: 0.07, 1: 0.07, 2: 0.07, 3: 0.07, 4: 0.07, 5: 0.07, 6: 0.07, 7: 0.07,
+                        8: 0.07, 9: 0.25, 10: 0.18, 11: 0.2, 12: 0.17, 13: 0.16, 14: 0.22,
+                        15: 0.24, 16: 0.24, 17: 0.33, 18: 0.17, 19: 0.18, 20: 0.17, 21: 0.15,
+                        22: 0.1, 23: 0.24, 'default': 0.07,
+                    },
+                    'interval_minutes': 30,
+                },
+                'mip': {'cost_inhouse': 1.0, 'cost_outsource': 1.0, 'min_per_shift': 0},
+                'slot_cap': {
+                    'enabled': True,
+                    'bands': [
+                        {'start': '00:00', 'end': '07:00', 'max_ratio': 1.0, 'penalty': 400.0},
+                        # GOLD PAZAR — önerilen ek bantlar (pasif).
+                        # İlk deneme: 18:00–24:00; gerekirse 15:00–18:00 ekle.
+                        # {'start': '15:00', 'end': '18:00', 'max_ratio': 1.30, 'penalty': 40.0},
+                        # {'start': '18:00', 'end': '22:00', 'max_ratio': 1.25, 'penalty': 60.0},
+                        # {'start': '22:00', 'end': '00:00', 'max_ratio': 1.20, 'penalty': 80.0},
+                    ],
+                },
+                'rr_penalty': {
+                    'enabled': True,
+                    'peak_exempt': True,
+                    'penalty_per_person': 4.0,
+                    'peak_penalty': 2.0,
+                    'peak_threshold': 0.7,
+                },
+                'hourly_report': {
+                    'rapor_etkisi': {'default': 0.0},
+                    'kapasite_kaybi': {
+                        0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0,
+                        9: 0.19, 10: 0.1, 11: 0.13, 12: 0.1, 13: 0.09, 14: 0.15, 15: 0.17,
+                        16: 0.18, 17: 0.26, 18: 0.1, 19: 0.11, 20: 0.1, 21: 0.08, 22: 0.03,
+                        23: 0.17, 'default': 0.08,
+                    },
+                    'cagri_adedi': {'default': 15},
+                },
+                'balance_penalty': {'enabled': False, 'windows': []},
+            },
+        },
     },
 }
-
-
-# ---- YATIRIM queue_configs (2026-11-04) ----
-# Gold'un bloğunun kopyası (Erlang, shrinkage, slot_cap, hourly_report — üç gün
-# tipi). Fark: min_per_shift yok (35 kişilik ekip, şimdilik 13 kuralı uygulanmıyor).
-# Diğer yatırım ayarları yerlerinde: queues, time_cost_multipliers,
-# part_time.count, kadro.inhouse, solver.gap_rel_by_queue.
-CONFIG_UNIFIED['queue_configs']['yatirim'] = copy.deepcopy(CONFIG_UNIFIED['queue_configs']['gold'])
-for _blk in CONFIG_UNIFIED['queue_configs']['yatirim'].values():   # hafta_ici / cumartesi / pazar
-    _blk['mip']['min_per_shift'] = 0
-    _blk['mip']['min_per_shift_overrides'] = {}
 
 
 def gun_tipi(date_like):
