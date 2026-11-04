@@ -227,8 +227,7 @@ for _q in CONFIG['queues']:
     if _ek:
         _hata.append(f"df_shifts_dict['{_q}']: kolon eksik {_ek}")
         continue
-    _not = ' (gold listesi kopyası)' if _q != 'gold' and _d is df_shifts_dict.get('gold') else ''
-    print(f"  ✓ {_q:<9} {len(_d)} vardiya · {_d[_scol['company']].value_counts().to_dict()}{_not}")
+    print(f"  ✓ {_q:<9} {len(_d)} vardiya · {_d[_scol['company']].value_counts().to_dict()}")
 
 _do = globals().get('df_onceki')
 if _do is not None and len(_do):
