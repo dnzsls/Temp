@@ -190,11 +190,16 @@ for _q in CONFIG['queues']:
         _uyari.append(f"{_q} ({_col}): toplam 0")
 if _fc['date'] in df_forecast.columns:
     _g = pd.to_datetime(df_forecast[_fc['date']], dayfirst=True).dt.date
-    _n = calendar.monthrange(YEAR, MONTH)[1]
-    _ay = _g[_g.map(lambda d: (d.year, d.month) == (YEAR, MONTH))]
-    _eksik = sorted(set(dt.date(YEAR, MONTH, d) for d in range(1, _n + 1)) - set(_ay))
+    # YEAR/MONTH HÜCRE 6'da tanımlanıyor → henüz yoksa veride en çok geçen ay
+    _yil, _ayn = globals().get('YEAR'), globals().get('MONTH')
+    if _yil is None or _ayn is None:
+        _yil, _ayn = _g.map(lambda d: (d.year, d.month)).mode()[0]
+        print(f"  (YEAR/MONTH henüz tanımlı değil → veriden {_yil}/{_ayn:02d}; HÜCRE 6'daki ile aynı olmalı)")
+    _n = calendar.monthrange(_yil, _ayn)[1]
+    _ay = _g[_g.map(lambda d: (d.year, d.month) == (_yil, _ayn))]
+    _eksik = sorted(set(dt.date(_yil, _ayn, d) for d in range(1, _n + 1)) - set(_ay))
     _satir = _ay.value_counts()
-    print(f"  ✓ {YEAR}/{MONTH:02d}: {_ay.nunique()}/{_n} gün, gün başına {_satir.min()}–{_satir.max()} satır")
+    print(f"  ✓ {_yil}/{_ayn:02d}: {_ay.nunique()}/{_n} gün, gün başına {_satir.min()}–{_satir.max()} satır")
     if _eksik:
         _hata.append(f"df_forecast: {len(_eksik)} gün eksik ({_eksik[0]} …)")
     if _satir.min() != _satir.max():
