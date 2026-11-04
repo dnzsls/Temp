@@ -152,16 +152,6 @@ CONFIG['solver']['gap_rel_by_queue']['kitle'] = 0.01
 # vardiya açma cezası (config'te zaten 400; farklı değer denemek için)
 # CONFIG['ceza']['vardiya_acma'] = {'kitle': {'outsource': 1500.0}}
 
-# ---- YATIRIM KUYRUĞU (2026-11-04, v3) ----
-# Ayarlar + kadro config dosyasında (sonundaki YATIRIM KUYRUĞU bloğu).
-# Burada yalnız koşu sırası ve vardiya listesi yedeği.
-QUEUES = ('kitle', 'gold', 'yatirim', 'kurumsal')     # koşu + Excel sırası
-# kadroyu bu ay farklı denemek için (config'tekini ezer):
-# CONFIG['kadro']['inhouse']['yatirim'] = {'default': 35}
-if 'yatirim' not in df_shifts_dict:                               # HÜCRE 2'de Excel'den çekilmediyse
-    print("⚠ df_shifts_dict['yatirim'] yok → gold vardiya listesi kullanılıyor")
-    df_shifts_dict['yatirim'] = df_shifts_dict['gold']
-
 
 # %% [HÜCRE 4] — AHT yükle
 CONFIG['sub_queues'] = load_aht_from_df(df_aht, config=CONFIG)
@@ -186,7 +176,7 @@ for _k in ('datetime', 'date'):
         print(f"  ✓ {_k:<9} {_fc[_k]}")
     else:
         _hata.append(f"df_forecast: {_k} kolonu '{_fc[_k]}' yok")
-for _q in QUEUES:
+for _q in CONFIG['queues']:
     _col = _fc.get(f"{_q}_total", f"{_q.upper()}_NOF_CALL")      # pipeline ile AYNI kural
     _col = _col if _col in df_forecast.columns else None
     if _col is None:
@@ -211,7 +201,7 @@ if _fc['date'] in df_forecast.columns:
         _uyari.append(f"df_forecast: günlerin satır sayısı farklı ({_satir.min()}–{_satir.max()}) → eksik saat olabilir")
 
 print("── df_aht ──")
-for _q in QUEUES:
+for _q in CONFIG['queues']:
     _an = CONFIG['queues'][_q]['actual_name']
     _s = (_sqc.get(_q) or {}).get('queues', [])
     print(f"  {'✓' if _s else '⚠'} {_q:<9} {_an:<20} alt kuyruk: {', '.join(_s) or '-'}")
@@ -223,7 +213,7 @@ for _q in QUEUES:
 
 print("── df_shifts_dict ──")
 _scol = CONFIG['shift_columns']
-for _q in QUEUES:
+for _q in CONFIG['queues']:
     _d = df_shifts_dict.get(_q)
     if _d is None:
         _hata.append(f"df_shifts_dict['{_q}'] yok")
@@ -238,12 +228,12 @@ for _q in QUEUES:
 _do = globals().get('df_onceki')
 if _do is not None and len(_do):
     print("── df_onceki ──")
-    _bil = {str(CONFIG['queues'][q]['actual_name']).lower(): q for q in QUEUES}
+    _bil = {str(CONFIG['queues'][q]['actual_name']).lower(): q for q in CONFIG['queues']}
     for _gr, _k in _do['line_based_main_group'].astype(str).str.strip().str.lower().value_counts().items():
         print(f"  {'✓' if _gr in _bil else '⚠'} {_gr:<20} {_k} satır" + ('' if _gr in _bil else '  → modelde karşılığı yok, okunmaz'))
 
 print("── kadro (inhouse) ──")
-for _q in QUEUES:
+for _q in CONFIG['queues']:
     print(f"  {_q:<9} {CONFIG['kadro']['inhouse'].get(_q, '— YOK')}")
 
 for _u in _uyari:
@@ -666,7 +656,7 @@ _gap = (CONFIG.get('solver', {}).get('gap_rel_by_queue', {}) or {}).get(
 # Ayın 1'i Sal-Cum ise ilk haftanın hafta içi inhouse'u önceki ayın SON
 # gününün Model-2 planıyla (df_onceki, HÜCRE 2) devam eder. Pzt/Cmt/Pzr → yok.
 DEVRIK = devrik_dagilim(globals().get('df_onceki'), YEAR, MONTH, config=CONFIG,
-                        queues=QUEUES)
+                        queues=tuple(CONFIG['queues']))
 
 # PT vardiya SAYISI da ada girer (2026-10-14): 3 vardiya → _pt3, PT kapalı → _pt0.
 # Vardiya eklenince/çıkınca yeni pickle oluşur. Saatlerin kendisi CONFIG sayfasında.
@@ -728,7 +718,7 @@ ONCEKI_AY_GECE = {
 
 _onc_son = (dt.date(YEAR, MONTH, 1) - dt.timedelta(days=1)).isoformat()
 _gece = onceki_gece_df(globals().get('df_onceki'), YEAR, MONTH, config=CONFIG,
-                       queues=QUEUES)
+                       queues=tuple(CONFIG['queues']))
 for _q, _l in ONCEKI_AY_GECE.items():
     _gece.setdefault(_q, []).extend(_l)
 ONCEKI_AY_SON_GUN = gece_sarkan_gun(_gece) if any(_gece.values()) else None
@@ -768,7 +758,7 @@ if os.path.exists(CACHE_FILE):
 else:
     results = run_month_unified(
         YEAR, MONTH, df_forecast, df_shifts_dict, config=CONFIG,
-        queues=QUEUES,
+        queues=tuple(CONFIG['queues']),
         mip1=True,                   # False → tek çözüm, süre yarıya iner
         # sarkan_devret → CONFIG['haftalik_vardiya']['sarkan_devret'] (2026-10-14 taşındı)
         onceki_ay_son_gun=ONCEKI_AY_SON_GUN,
@@ -2363,7 +2353,7 @@ def export_excel_v2(results, year, month, config,
 # Excel adı pickle (CACHE_FILE) ile AYNI ayar izini taşır → hangi Excel hangi
 # koşudan bellidir. Ör. vardiya_plani_2026_10_sabit_sur1_esit0_rrg1_k50000-50000_gap0.03_pt5.xlsx
 _XLSX = CACHE_FILE.replace("m1_", "vardiya_plani_", 1).replace(".pkl", ".xlsx")   # vardiya_plani_2026_10_a3f9c.xlsx
-export_excel_v2(results, YEAR, MONTH, CONFIG, queues=QUEUES,
+export_excel_v2(results, YEAR, MONTH, CONFIG, queues=tuple(CONFIG['queues']),
                 output_path=_XLSX, df_forecast=df_forecast,   # df_forecast → AHT_RR
                 kosu={'pickle': CACHE_FILE,                   # → CONFIG sayfası koşu kartı
                       'tahmin_buffer': tahmin_buffer_metni(CONFIG),
