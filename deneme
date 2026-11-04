@@ -1,1 +1,20 @@
-'vardiya_acma': {'kitle': {'outsource': 3000.0}, 'yatirim': {'inhouse': 1000.0}},
+import pandas as pd
+_gv = ('00:00', '17:00', '18:00', '19:00', '20:00')
+_rows = []
+for ds in sorted(results):
+    r = (results[ds] or {}).get('yatirim')
+    if not r:
+        continue
+    mi = r['mip_info']; cov = mi['shift_coverage']
+    cl = r.get('calls_by_slot', {}) or {}
+    erl = mi.get('erlang_by_slot_ham') or r.get('erlang_by_slot_ham') or mi.get('erlang_by_slot') or {}
+    fi = mi.get('fiili_by_slot') or {}
+    g = [t for t in sorted(set(cl) | set(erl)) if '00:00' <= t < '07:00']
+    _rows.append({'tarih': ds, 'gun': pd.Timestamp(ds).day_name()[:3],
+                  'gece_cagri': round(sum(cl.get(t, 0) for t in g), 1),
+                  'ihtiyac_max': max((erl.get(t, 0) for t in g), default=0),
+                  'sahada_min': min((fi.get(t, 0) for t in g), default=0),
+                  'acik_slot': sum(1 for t in g if erl.get(t, 0) > fi.get(t, 0)),
+                  'gece_vardiya': {cov[s]['start']: k for s, k in mi['assignments'].items()
+                                   if k > 0 and cov[s]['start'] in _gv}})
+print(pd.DataFrame(_rows).to_string(index=False))
