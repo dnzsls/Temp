@@ -680,8 +680,11 @@ if _ya_etiket == '_ya':
     _ya_etiket = ''
 # vardiya açma cezası: açıksa _va + kuyruk/şirket/değer izi (ör. _vako400)
 _va_cfg = _cz.get('vardiya_acma') or {}
-_va_etiket = ''.join(f"{q[0]}{sk[0]}{int(v)}" for q, d in sorted(_va_cfg.items())
-                     for sk, v in sorted((d or {}).items()) if v)
+# 'hafta_sonu' alt sözlüğü (2026-11-05) → 'hs' önekiyle (ör. 'gold': {'hafta_sonu': {'inhouse': 20}} → ghsi20)
+_va_etiket = ''.join(f"{q[0]}{'hs' + hk[0] if isinstance(v, dict) else sk[0]}{int(hv if isinstance(v, dict) else v)}"
+                     for q, d in sorted(_va_cfg.items())
+                     for sk, v in sorted((d or {}).items()) if v
+                     for hk, hv in (sorted(v.items()) if isinstance(v, dict) else [(sk, v)]) if hv)
 _va_etiket = f"_va{_va_etiket}" if _va_etiket else ''
 # tahmin buffer (2026-10-21): açıksa _tb + kural izi (ör. _tbkc10-17x10)
 _tb_etiket = tahmin_buffer_etiketi(CONFIG)
