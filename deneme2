@@ -1,13 +1,80 @@
-print([b for b in CONFIG['queue_configs']['gold']['hafta_ici']['slot_cap']['bands']])
+# ===== GOLD 07:30 TEŞHİS — HÜCRE 6'dan sonra çalıştır (results, CONFIG, df_forecast hazır olmalı) =====
+import sys, math
 import pandas as pd
+_W = sys.modules[solve_week.__module__]          # pipeline modülü (dosya adı ne olursa olsun)
+Q = 'gold'
+HAFTA = ['2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22']
+HI = HAFTA[:5]
+SLOT = '07:30'
+
+# ---- 1) Tavan cezası devrede mi? ----
+_sc = CONFIG['queue_configs'][Q]['hafta_ici'].get('slot_cap') or {}
+_kd = (CONFIG.get('kap_denge') or {}).get(Q) or {}
+_bant = next((b for b in _sc.get('bands', []) if _W.is_slot_in_shift(SLOT, b['start'], b['end'])), None)
+_kb = (results[HI[0]][Q].get('_config') or {}).get('slot_cap') or {}
+print("1) AYARLAR")
+print(f"   slot_cap açık: {_sc.get('enabled')} · ölçü: {CONFIG.get('slot_cap_olcu')} · "
+      f"kap_denge {Q}: {_kd.get('enabled', False)}" + ("  ⚠ kap_denge açıkken slot_cap KAPANIR" if _kd.get('enabled') else ''))
+print(f"   {SLOT}'un bandı (şimdiki CONFIG): {_bant}")
+print(f"   koşudaki (pickle) bantlar: {[(b['start'], b['end'], b.get('penalty')) for b in _kb.get('bands', [])] or 'okunamadı'}")
+
+# ---- 2) 07:30 gün gün (MIP sonucu, surplus öncesi) ----
+_rg = CONFIG.get('rr_gun_dengesi') or {}
 _r = []
-for ds in ['2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20']:
-    mi = results[ds]['gold']['mip_info']; cov = mi['shift_coverage']
-    a1 = (mi.get('mip_info_stage1') or {}).get('assignments', mi['assignments'])
-    erl = mi.get('erlang_by_slot_ham') or mi.get('erlang_by_slot') or {}
-    gece = sum(k for s, k in a1.items() if cov[s]['start'] == '00:00')
-    _r.append({'tarih': ds, 'ihtiyac_0730': erl.get('07:30', 0), 'gece_0000': gece,
-               'v_0730': sum(k for s, k in a1.items() if cov[s]['start'] == '07:30'),
-               'v_0800': sum(k for s, k in a1.items() if cov[s]['start'] == '08:00'),
-               'cagri_0730': round(results[ds]['gold'].get('calls_by_slot', {}).get('07:30', 0))})
+for ds in HI:
+    mi = results[ds][Q]['mip_info']
+    s1 = mi.get('mip_info_stage1') or mi
+    erl = mi.get('erlang_by_slot') or {}
+    sf = s1.get('shortfall_by_slot') or {}
+    c = (results[ds][Q].get('calls_by_slot') or {}).get(SLOT, 0)
+    K = _W.kap_ihtiyac(c, SLOT, _W.blok_coz(CONFIG, Q, ds).get('hourly_report') or {})
+    E, S = sum(v for v in erl.values() if v > 0), sum(sf.values())
+    _r.append({'tarih': ds, 'ihtiyac': erl.get(SLOT), 'cagri': round(c, 1),
+               'tavan': (max(math.ceil(K * _bant['max_ratio']), 3) if (K and _bant) else None),
+               'sahada': (s1.get('fiili_by_slot') or {}).get(SLOT),
+               'tavan_asimi(kayıtlı)': (s1.get('sc_excess_by_slot') or {}).get(SLOT),
+               'eksik_' + SLOT: sf.get(SLOT, 0), 'gun_eksik_%': round(100 * S / E, 2) if E else None})
+print(f"\n2) {SLOT} GÜN GÜN (MIP, surplus öncesi) — tavan_asimi = (fazla kişi, ceza/kişi); boşsa ceza KURULMAMIŞ")
 print(pd.DataFrame(_r).to_string(index=False))
+
+# ---- 3) Aynı haftayı iki şekilde yeniden çöz, bedelleri karşılaştır ----
+_d30 = _W.prepare_forecast_calls_30(df_forecast, config=CONFIG)
+_d30, _ = tahmin_buffer_uygula(_d30, CONFIG, tuple(CONFIG['queues']), verbose=False)
+_onc, _sonra = '2026-11-15', '2026-11-23'
+_sk = _sarkan_son_gun({_onc: results[_onc][Q]['mip_info']}, [_onc])
+_g2 = _d30[_d30['data_date'] == pd.to_datetime(_sonra)]
+_eg = {'tarih': _sonra, 'erl': _W.erlang_per_day(_d30, Q, [_sonra], CONFIG).get(_sonra, {}),
+       'calls': dict(zip(_g2['slot_30'], _g2[f"{Q}_total"].astype(float)))}
+_sh, _scol = df_shifts_dict[Q], CONFIG['shift_columns']
+_bas = _sh[_scol['start']].astype(str).str[:5]
+_inh = _sh[_scol['company']].astype(str) == 'inhouse'
+
+
+def _bedel(ipd):
+    b = {'eksik': 0.0, 'rr_dengesi': 0.0, 'tavan': 0.0}
+    for ds in HAFTA:
+        s1 = ipd[ds].get('mip_info_stage1') or ipd[ds]
+        tip = gun_tipi(ds)
+        sf = s1.get('shortfall_by_slot') or {}
+        b['eksik'] += sum(v * _W.kapsama_cezasi(CONFIG, tip, t) for t, v in sf.items())
+        E, S = sum(v for v in (ipd[ds].get('erlang_by_slot') or {}).values() if v > 0), sum(sf.values())
+        taban = CONFIG['ceza']['kapsama_hafta_ici' if tip == 'hafta_ici' else 'kapsama_hafta_sonu']
+        if _rg.get('enabled'):
+            for e, k in zip(_rg.get('esikler', [0.01, 0.02]), _rg.get('carpanlar', [1.0, 2.0])):
+                b['rr_dengesi'] += max(0.0, S - e * E) * k * taban
+        b['tavan'] += sum(v * p for v, p in (s1.get('sc_excess_by_slot') or {}).values())
+    return b
+
+
+print(f"\n3) HAFTAYI YENİDEN ÇÖZ ({HAFTA[0]}..{HAFTA[-1]}) — hangisi neden ucuz?")
+for _ad, _s in (('A) bugünkü', _sh),
+                ('B) 07:30 inhouse yasak', _sh[~(_inh & (_bas == '07:30'))]),
+                ('C) 07:00+07:30 inhouse yasak (sabah 08:00)', _sh[~(_inh & _bas.isin(['07:00', '07:30']))])):
+    ipd, oz = solve_week(_d30, _s, Q, HAFTA, config=CONFIG, sarkan_ilk_gun=_sk or None,
+                         inhouse_esitlik=False, verbose=False, devrik=None, ertesi_gun=_eg)
+    m = _bedel(ipd)
+    s1, cov = ipd[HI[0]]['mip_info_stage1'], ipd[HI[0]]['shift_coverage']
+    print(f"  {_ad:<44}: AMAÇ {oz['amac']:>13,.0f}  = eksik {m['eksik']:>11,.0f} + rr_dengesi {m['rr_dengesi']:>11,.0f}"
+          f" + tavan {m['tavan']:>10,.0f} + diğer {oz['amac'] - sum(m.values()):>10,.0f}   ({oz['durum']})")
+    print(f"     Pzt vardiyalar: {dict(sorted((cov[s]['start'], k) for s, k in s1['assignments'].items() if k))}")
+print("  → AMAÇ'ı küçük olanı seçer. Hangi kalem farkı yaratıyor, ona bak.")
