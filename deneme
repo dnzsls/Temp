@@ -5978,6 +5978,8 @@ print("=" * _kd_W)
 # Sheet1 "roster"           : roster_2 (agent × gün çizelge + flag + calisma/mesai/off özet)
 # Sheet2 "plan_vs_gerceklesen": her kova için PLANLANAN (Stage-1 talebi) vs
 #                              GERÇEKLEŞEN (kişi atamasından sonra) + fark
+#                              + planlanan = mip_ihtiyac + surplus (Model-1 dağıtımı)
+#                              + eksik = eksik_surplus + eksik_cekirdek (H10 ayrımı)
 #                              + norm/telafi/mesai kırılımı (kovaya atananlar).
 # Sheet3 "gun_ozet"          : gün toplamı + o günün off/off_t/off_t2/izin kişi
 #                              sayısı + norm/telafi/mesai kişi sayısı.
@@ -6031,11 +6033,17 @@ for (ds, v), kisi in talep.items():
     for a in _atananlar:
         _k29[_gun_kat29(a, ds)] += 1
     bas, bit = saat[(ds, v)]
+    _mip29 = mip_ihtiyac.get((ds, v), kisi)          # surplus öncesi MIP ihtiyacı (H2)
+    _eks29 = max(0, kisi - len(_atananlar))
+    _cek29 = max(0, _mip29 - len(_atananlar))        # MIP ihtiyacının altına inen eksik
     _satir.append({"tarih": ds,
                    "gun": DAY_TR[dt.date.fromisoformat(ds).weekday()],
                    "vardiya": v, "saat": f"{bas}-{bit}",
-                   "planlanan": kisi, "gerceklesen": len(_atananlar),
+                   "planlanan": kisi,
+                   "mip_ihtiyac": _mip29, "surplus": kisi - _mip29,
+                   "gerceklesen": len(_atananlar),
                    "fark": len(_atananlar) - kisi,
+                   "eksik_surplus": _eks29 - _cek29, "eksik_cekirdek": _cek29,
                    "norm_kisi": _k29["norm"], "telafi_kisi": _k29["telafi"],
                    "mesai_kisi": _k29["mesai"]})
 df_plan_gercek = pd.DataFrame(_satir).sort_values(["tarih", "saat"]).reset_index(drop=True)
