@@ -350,6 +350,16 @@ W_EKSIK_HS  = 25               # HAFTA SONU eksik kişi başına ceza (coverage 
 # UYARI: bu, tek seferde yapılan EN BÜYÜK ağırlık değişikliği. Coverage her şeyi
 # ezmeye başlar (off dağılımı bozulur, off_t karşılama oranı düşer) → 15'e çek.
 W_EKSIK_HI  = 25               # HAFTA İÇİ eksik kişi başına ceza (hafta sonuyla eşit)
+# HAFTA İÇİ SURPLUS EKSİĞİ (2026-11-09): Model-1'in surplus dağıtımıyla eklenen
+# kişiler (talep − MIP ihtiyacı, pickle'daki mip_info_stage1'den) eksik kalırsa
+# kişi başı bu kadar; MIP ihtiyacının (çekirdek) altına inen eksik W_EKSIK_HI'da kalır.
+# Amaç: hafta sonu eksiğini NORM ile (hafta içi off + hafta sonu çalışma) kapatmak.
+#   1 kişiyi surplus'lu hafta içi vardiyadan hafta sonuna almak:
+#     maliyet = W_EKSIK_SURPLUS(3) + hafta içi off (4..14)  = 7..17  <  W_EKSIK_HS(25) → alır
+#     yoğun gün (+20) ya da çekirdek vardiya (25) → almaz
+# 0 değil: hafta sonu ihtiyacı yokken surplus vardiyaları sebepsiz boşalmasın.
+# Hafta sonu etkilenmez: Model-1 surplus'u yalnız hafta içine dağıtıyor.
+W_EKSIK_SURPLUS = 3
 
 # ════════════════════════════════════════════════════════════════════════
 # ══ OFF CEZALARI VE OFF_T ÖNCELİĞİ (H7B / H20B)
@@ -710,23 +720,44 @@ for ds in sorted(results.keys()):
         continue
     mi = r[QUEUE]["mip_info"]
     sc = mi.get("shift_coverage", {})
+    # Surplus dağıtımı ÖNCESİ (MIP ihtiyacı) — yalnız hafta içi günlerde var.
+    # Yoksa (hafta sonu / eski pickle) talebin tamamı MIP ihtiyacı sayılır.
+    _s1 = (mi.get("mip_info_stage1") or r[QUEUE].get("mip_info_stage1") or {})
+    _s1_asg = _s1.get("assignments") if _s1 else None
     for shift, kisi in mi.get("assignments", {}).items():
         info = sc.get(shift, {})
         if kisi <= 0 or info.get("company") != "inhouse":
             continue
         d = dt.date.fromisoformat(ds)
+        _mip = (int(kisi) if _s1_asg is None
+                else max(0, min(int(kisi), int(_s1_asg.get(shift, 0) or 0))))
         satirlar.append({
-            "tarih":      ds,
-            "gun":        DAY_TR[d.weekday()],
-            "hafta_sonu": int(d.weekday() > 4),
-            "vardiya":    shift,
-            "baslangic":  info.get("start"),
-            "bitis":      info.get("end"),
-            "talep":      int(kisi),
+            "tarih":       ds,
+            "gun":         DAY_TR[d.weekday()],
+            "hafta_sonu":  int(d.weekday() > 4),
+            "vardiya":     shift,
+            "baslangic":   info.get("start"),
+            "bitis":       info.get("end"),
+            "talep":       int(kisi),
+            "mip_ihtiyac": _mip,
+            "surplus":     int(kisi) - _mip,
         })
 
 df_talep = pd.DataFrame(satirlar)
 print(f"talep tablosu: {len(df_talep)} satır (gün × inhouse vardiya)")
+_hi_t = df_talep[df_talep["hafta_sonu"] == 0]
+_s1_gun = sum(1 for ds in results
+              if dt.date.fromisoformat(ds).weekday() < 5 and results[ds].get(QUEUE)
+              and ((results[ds][QUEUE].get("mip_info") or {}).get("mip_info_stage1")
+                   or results[ds][QUEUE].get("mip_info_stage1")))
+if _s1_gun:
+    print(f"  surplus (Model-1 dağıtımı): hafta içi {int(_hi_t['surplus'].sum())} kişi-gün "
+          f"/ talep {int(_hi_t['talep'].sum())}  |  surplus'lu kova "
+          f"{int((_hi_t['surplus'] > 0).sum())}/{len(_hi_t)}  "
+          f"→ bu kişiler eksik kalırsa ceza W_EKSIK_SURPLUS")
+else:
+    print("  ⚠ pickle'da mip_info_stage1 YOK → surplus ayrımı yapılamıyor, "
+          "tüm talep MIP ihtiyacı sayıldı (W_EKSIK_SURPLUS etkisiz)")
 print(df_talep.head(8).to_string(index=False))
 
 # Ay bilgisi (H3'te izin/gün eşlemesi için)
@@ -1359,11 +1390,13 @@ AGENTS = [str(c).strip() for c in df_tam["agent_user_code"]]
 # saat[(gün, vardiya)] = (baslangic, bitis)  → saat-bazlı kısıtlar için (sonra)
 gun_vardiyalari = {}
 talep = {}
+mip_ihtiyac = {}                       # (gün, vardiya) → surplus öncesi MIP ihtiyacı (H10 eksik ayrımı)
 saat = {}
 for _, row in df_talep.iterrows():
     ds, v, kisi = row["tarih"], row["vardiya"], int(row["talep"])
     gun_vardiyalari.setdefault(ds, []).append(v)
     talep[(ds, v)] = kisi
+    mip_ihtiyac[(ds, v)] = int(row["mip_ihtiyac"])
     saat[(ds, v)] = (row["baslangic"], row["bitis"])
 
 # ── ARİFE YARIM-GÜN SÖZDE-VARDİYASI (09:00-13:00) ──────────────────────
@@ -1966,6 +1999,7 @@ _kt_hs_band, _kt_gece_band = [], []           # yalnız açık SERT bandlar vars
 coverage_band_sapma = {}                     # (tarih,vardiya) → band dışı sapma IntVar
 _band_kova_say = {'hafta_sonu': 0, 'gece': 0}
 n_eksik = 0                                   # eksik cezası konan kova sayısı (özet için)
+n_eksik_sur = 0                               # surplus ayrımlı (hafta içi) kova sayısı
 n_min = 0                                     # MIN_KOVA sert tabanı konan kova sayısı
 for (ds, v), kisi in talep.items():
     katilan = []                              # bu çiftte değişkeni olan agentlar
@@ -2010,8 +2044,21 @@ for (ds, v), kisi in talep.items():
     # ASİMETRİK EKSİK CEZASI: yukarıdaki sapma simetrik ve ±SERBEST bedava →
     # kovayı eksik bırakmak bedavaydı. Burada sadece EKSİK yön, ilk kişiden
     # itibaren cezalandırılıyor (fazla yön dokunulmadan kalıyor).
+    # HAFTA İÇİ SURPLUS AYRIMI: talebin surplus kısmından eksik W_EKSIK_SURPLUS,
+    # MIP ihtiyacının altına inen kısım W_EKSIK_HI (ilk `surplus` kişi ucuz, sonrası pahalı).
     _w_eksik = W_EKSIK_HS if _hs else W_EKSIK_HI
-    if _w_eksik:
+    _mip = mip_ihtiyac.get((ds, v), kisi)
+    if not _hs and _mip < kisi:
+        eksik = model.NewIntVar(0, UB, f"eksik_{ds}_{v}")
+        model.Add(eksik >= kisi - atanan)     # tüm eksik (surplus kısmı dahil)
+        amac.append(W_EKSIK_SURPLUS * eksik)
+        if _w_eksik > W_EKSIK_SURPLUS:
+            eksik_cek = model.NewIntVar(0, UB, f"eksikcek_{ds}_{v}")
+            model.Add(eksik_cek >= _mip - atanan)   # MIP ihtiyacının altı
+            amac.append((_w_eksik - W_EKSIK_SURPLUS) * eksik_cek)
+        n_eksik += 1
+        n_eksik_sur += 1
+    elif _w_eksik:
         eksik = model.NewIntVar(0, UB, f"eksik_{ds}_{v}")
         model.Add(eksik >= kisi - atanan)     # ReLU: max(0, talep − atanan)
         amac.append(_w_eksik * eksik)
@@ -2029,6 +2076,8 @@ print(f"  band dışı EK ceza: hafta sonu {W_HS_BAND} ({_band_kova_say['hafta_s
       f"gece {W_GECE_BAND} ({_band_kova_say['gece']} kova)")
 print(f"  eksik cezası (asimetrik, ilk kişiden): {n_eksik} kova  "
       f"(hafta sonu ağ. {W_EKSIK_HS}, hafta içi ağ. {W_EKSIK_HI})")
+print(f"  hafta içi surplus ayrımı: {n_eksik_sur} kova → surplus kısmından eksik ağ. "
+      f"{W_EKSIK_SURPLUS}, MIP ihtiyacının altı ağ. {W_EKSIK_HI}")
 print(f"  MIN_KOVA sert tabanı (aktif kova boş kalamaz): {n_min} kova, "
       f"en az {MIN_KOVA} kişi")
 
@@ -5031,8 +5080,13 @@ for (ds, v), kisi in talep.items():
         if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1:
             atanan += 1
     bas, bit = saat[(ds, v)]
+    _mip = mip_ihtiyac.get((ds, v), kisi)
+    _eks = max(0, kisi - atanan)
+    _eks_cek = max(0, _mip - atanan)
     satir.append({"tarih": ds, "vardiya": v, "saat": f"{bas}-{bit}",
-                  "talep": kisi, "atanan": atanan, "fark": atanan - kisi})
+                  "talep": kisi, "mip_ihtiyac": _mip, "surplus": kisi - _mip,
+                  "atanan": atanan, "fark": atanan - kisi,
+                  "eksik_surplus": _eks - _eks_cek, "eksik_cekirdek": _eks_cek})
 
 df_cov = pd.DataFrame(satir)                    # tüm kovaların talep/atanan/fark detayı
 toplam_fazla = int(df_cov.loc[df_cov["fark"] > 0, "fark"].sum())
@@ -5040,6 +5094,10 @@ toplam_eksik = int(-df_cov.loc[df_cov["fark"] < 0, "fark"].sum())
 tam = int((df_cov["fark"] == 0).sum())
 print(f"coverage raporu: {len(df_cov)} kova  |  tam tutan: {tam}  |  "
       f"toplam FAZLA: +{toplam_fazla}  |  toplam EKSİK: -{toplam_eksik}")
+_hs25 = df_cov["tarih"].map(lambda d: dt.date.fromisoformat(d).weekday() >= 5)
+print(f"  EKSİK dağılımı: hafta sonu -{int(df_cov.loc[_hs25, 'eksik_cekirdek'].sum())}  |  "
+      f"hafta içi surplus'tan -{int(df_cov.loc[~_hs25, 'eksik_surplus'].sum())}  |  "
+      f"hafta içi MIP ihtiyacından (çekirdek) -{int(df_cov.loc[~_hs25, 'eksik_cekirdek'].sum())}")
 print("en çok sapan 12 kova:")
 print(df_cov.reindex(df_cov["fark"].abs().sort_values(ascending=False).index)
       .head(12).to_string(index=False))
