@@ -1,46 +1,35 @@
-import pickle, pandas as pd
-Q, GRUP = "kurumsal", "kurumsal_cagrilar"
-PKL = "BURAYA_KURUMSAL_PICKLE_ADI.pkl"          # ör. m1_2026_11_xxxxx.pkl
+import pandas as pd
+print("QUEUE:", QUEUE, "| ay:", GUNLER[0], "..", GUNLER[-1], f"({len(GUNLER)} gün)")
 
-def _kod(df):
-    return set(df["agent_user_code"].astype(str).str.strip()) if df is not None and "agent_user_code" in df else set()
+# 1) Talep (pickle → kurumsal kovaları)
+print(f"\n[talep] {len(df_talep)} kova · günlük inhouse kişi: "
+      f"min {df_talep.groupby('tarih')['kisi'].sum().min()} / maks {df_talep.groupby('tarih')['kisi'].sum().max()}"
+      if 'kisi' in df_talep else f"\n[talep] {len(df_talep)} satır · kolonlar {list(df_talep.columns)}")
 
-# 1) df_agents — kurumsal agentlar
-_ag = df_agents.copy(); _ag.columns = [c.strip().lower() for c in _ag.columns]
-_kg = _ag["line_based_main_group"].astype(str).str.strip().str.lower()
-print("df_agents gruplar:", _kg.value_counts().to_dict())
-_kur = _ag[_kg == GRUP]
-KUR = _kod(_kur)
-print(f"→ kurumsal agent: {len(KUR)}")
-for c in ("provizyon_flg", "hamile_flg", "sut_izni_flg", "mesaiye_kalamaz_flg",
-          "sabah_calisir_flg", "kismi_calisan_flg", "teamleader_name", "working_main_group"):
-    if c not in _ag.columns:
-        print(f"   ⚠ kolon YOK: {c}")
-    elif c.endswith("_flg"):
-        print(f"   {c:<22}: {int(pd.to_numeric(_kur[c], errors='coerce').fillna(0).sum())} kişi")
-print(f"   takım sayısı: {_kur['teamleader_name'].nunique() if 'teamleader_name' in _kur else '?'}  |  "
-      f"working_main_group: {_kur['working_main_group'].unique().tolist() if 'working_main_group' in _kur else '?'}")
+# 2) Agentlar (kuyruğa süzülmüş, PT + eğitim çıkmış hali)
+_c = lambda k: int(pd.to_numeric(df_tam.get(k, 0), errors="coerce").fillna(0).sum()) if k in df_tam else "KOLON YOK"
+print(f"\n[agent] df_kuyruk {len(df_kuyruk)} → df_tam {len(df_tam)} (PT/eğitim çıktı)")
+for k in ("provizyon_flg", "hamile_flg", "sut_izni_flg", "mesaiye_kalamaz_flg", "sabah_calisir_flg",
+          "idari_izinli_flg", "dogum_izni_flg"):
+    print(f"   {k:<22}: {_c(k)}")
+print(f"   takım: {df_tam['takim'].nunique()} · working_main_group: {df_tam['working_main_group'].unique().tolist()}")
+print(df_tam.groupby('takim_ad').size().sort_values(ascending=False).to_string() if 'takim_ad' in df_tam else "")
 
-# 2) diğer tablolar — kurumsal agentları kapsıyor mu
-for ad in ("df_izin", "df_off", "df_onceki", "df_gecmis", "df_kidem", "df_mesai_saat", "df_off_gecmis"):
+# 3) İzin / off kayıtları kurumsal agentlara bağlanmış mı
+_kod = set(df_tam["agent_user_code"].astype(str).str.strip())
+_say = lambda m: sum(1 for a, s in m.items() if a in _kod and s)
+print(f"\n[izin/off] izinli agent {_say(izin_map)} · off_t2 olan {_say(off_block_map)} · off_t olan {_say(off_soft_map)}"
+      f"  (toplam {len(_kod)} agent)")
+print(f"   gün toplamı: izin {sum(len(izin_map.get(a, ())) for a in _kod)} · "
+      f"off_t2 {sum(len(off_block_map.get(a, ())) for a in _kod)} · off_t {sum(len(off_soft_map.get(a, ())) for a in _kod)}")
+
+# 4) Diğer tablolar
+for ad in ("df_onceki", "df_gecmis", "df_kidem", "df_mesai_saat", "df_off_gecmis"):
     _t = globals().get(ad)
     if _t is None:
-        print(f"{ad:<14}: YOK"); continue
-    _t = _t.copy(); _t.columns = [c.strip().lower() for c in _t.columns]
-    if "agent_user_code" in _t:
-        _k = _kod(_t)
-        print(f"{ad:<14}: {len(_t)} satır · kurumsal agent {len(_k & KUR)}/{len(KUR)}"
-              + (f" · kurumsal dışı {len(_k - KUR)} agent" if _k - KUR else ""))
-    elif "working_main_group" in _t:                     # df_gecmis takım bazlı
-        print(f"{ad:<14}: {len(_t)} satır · gruplar {_t['working_main_group'].astype(str).unique()[:6].tolist()}")
+        print(f"{ad:<14}: YOK")
+    elif "agent_user_code" in _t:
+        _k = set(_t["agent_user_code"].astype(str).str.strip())
+        print(f"{ad:<14}: kurumsal agent {len(_k & _kod)}/{len(_kod)}")
     else:
-        print(f"{ad:<14}: {len(_t)} satır · kolonlar {list(_t.columns)[:6]}")
-
-# 3) pickle — kurumsal kuyruğu var mı
-_r = pickle.load(open(PKL, "rb"))
-_g = sorted(_r)
-_var = sum(1 for d in _g if (_r[d] or {}).get(Q))
-print(f"pickle: {_g[0]}..{_g[-1]} ({len(_g)} gün) · '{Q}' olan gün {_var}/{len(_g)}")
-_mi = _r[_g[1]][Q]["mip_info"]
-_inh = {s: k for s, k in _mi["assignments"].items() if k and _mi["shift_coverage"][s].get("company") == "inhouse"}
-print(f"   örnek gün {_g[1]}: inhouse {sum(_inh.values())} kişi, {len(_inh)} vardiya")
+        print(f"{ad:<14}: {len(_t)} satır (takım bazlı)")
