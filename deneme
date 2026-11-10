@@ -7607,6 +7607,15 @@ LEJANT = [
      "atamalar"),
     ("vardiya_cesidi",    None, None,
      "O takımın bu ay kaç FARKLI vardiyada çalıştığı"),
+    ("--- takim_gun_off SAYFASI ---", None, None, ""),
+    ("satır",             None, None,
+     "Her takım × her gün. calisan + off + off_t + off_t2 + izin = uye (doğum izni "
+     "izin'e dahil). off = modelin verdiği off, off_t = karşılanan off talebi"),
+    ("sayilan_off / tavan / asim", None, None,
+     "sayilan_off = off + off_t → H20G kuralının saydığı (izin ve off_t2 SAYILMAZ). "
+     "tavan = MAX_TAKIM_GUN_OFF, yalnız HAFTA İÇİ ve resmi tatil dışı; hafta sonu boş. "
+     "asim = sayilan_off − tavan (> 0 KIRMIZI). Kural yumuşak (W_TAKIM_GUN_OFF), "
+     "coverage gerektirince aşılabilir. Filtre açık: asim > 0 seç"),
     ("--- takim_gecmis_adalet SAYFASI ---", None, None, ""),
     ("olcu",              None, None,
      "H19B'nin kullandığı ölçü: 'gun_agent_ratio' (takım boyutuna normalize) varsa o, "
@@ -7952,11 +7961,43 @@ elif _hsk_tal_ay > 0.85 * _hsk_kap_ay:
     print(f"  ⚠ DAR: talep üst kapasitenin %{100 * _hsk_tal_ay / max(1, _hsk_kap_ay):.0f}'i — "
           f"kota/7 gün/mesai kuralları gerçek kapasiteyi daha da düşürür.")
 
+# ── TAKIM × GÜN OFF DÖKÜMÜ (takim_gun_off sayfası, 2026-11-10) ───────
+# Her (takım, gün): üye kaç kişi çalıştı / off / off_t / off_t2 / izin.
+# sayilan_off = off + off_t (karşılanan) → H20G'nin saydığı (izin/off_t2 sayılmaz).
+# tavan/asim yalnız HAFTA İÇİ ve resmi tatil dışı (H20G'nin kapsamı).
+# Kaynak roster (çözüm) → H20G kısıtından bağımsız sağlama.
+# Sağlama: calisan + off + off_t + off_t2 + izin = uye.
+_tgo_satir = []
+for _T in sorted(takimlar, key=lambda T: takim_ad_map.get(T, T)):
+    _uy = [a for a in takimlar[_T] if a in roster.index]
+    for ds in PLAN_GUNLER:
+        _d = dt.date.fromisoformat(ds)
+        _vals = [roster.at[a, ds] for a in _uy]
+        _r = {"tarih": ds, "gun": DAY_TR[_d.weekday()],
+              "takim": takim_ad_map.get(_T, _T), "takim_kod": takim_kod_map.get(_T, ""),
+              "uye": len(_uy)}
+        for _k in ("off", "off_t", "off_t2", "izin"):
+            _r[_k] = sum(1 for _v in _vals if _v == _k)
+        _r["calisan"] = len(_uy) - _r["off"] - _r["off_t"] - _r["off_t2"] - _r["izin"]
+        _r["sayilan_off"] = _r["off"] + _r["off_t"]
+        _kapsam = (MAX_TAKIM_GUN_OFF is not None and _d.weekday() < 5 and _d not in TATIL)
+        _r["tavan"] = MAX_TAKIM_GUN_OFF if _kapsam else None
+        _r["asim"] = max(0, _r["sayilan_off"] - MAX_TAKIM_GUN_OFF) if _kapsam else None
+        _tgo_satir.append(_r)
+df_takim_gun_off = pd.DataFrame(_tgo_satir, columns=[
+    "tarih", "gun", "takim", "takim_kod", "uye", "calisan", "off", "off_t", "off_t2",
+    "izin", "sayilan_off", "tavan", "asim"])
+_tgo_asim = df_takim_gun_off[df_takim_gun_off["asim"].fillna(0) > 0]
+print(f"takim_gun_off: {len(df_takim_gun_off)} (takım, gün) satırı  |  hafta içi tavan "
+      f"{MAX_TAKIM_GUN_OFF} aşılan {len(_tgo_asim)} satır, toplam aşım "
+      f"{int(_tgo_asim['asim'].sum()) if len(_tgo_asim) else 0} off")
+
 with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     roster_xl.to_excel(_xl, sheet_name="roster")
     df_plan_gercek.to_excel(_xl, sheet_name="plan_vs_gerceklesen", index=False)
     df_gun_ozet.to_excel(_xl, sheet_name="gun_ozet", index=False)
     df_takim_vardiya.to_excel(_xl, sheet_name="takim_vardiya", index=False)
+    df_takim_gun_off.to_excel(_xl, sheet_name="takim_gun_off", index=False)
     df_takim_adalet.to_excel(_xl, sheet_name="takim_gecmis_adalet", index=False)
     df_kural_denetimi.to_excel(_xl, sheet_name="kural_denetimi", index=False)
     df_hs_kapasite.to_excel(_xl, sheet_name="hafta_sonu_kapasite", index=False)
@@ -7991,6 +8032,20 @@ with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as _xl:
     _wtv.column_dimensions["A"].width = 38         # takım adı sığsın
     _wtv.column_dimensions["B"].width = 12         # takim_kod
     _wtv.freeze_panes = "D2"                       # takım + kod + üye sabit kalsın
+
+    # takim_gun_off: filtre açık, asim > 0 satırının asim hücresi KIRMIZI
+    _wtg = _xl.sheets["takim_gun_off"]
+    _wtg.auto_filter.ref = _wtg.dimensions
+    _wtg.freeze_panes = "E2"                       # tarih + gün + takım + kod sabit
+    _wtg.column_dimensions["C"].width = 38
+    _wtg.column_dimensions["D"].width = 12
+    _tg_bas = [_c.value for _c in _wtg[1]]
+    _tg_ci = _tg_bas.index("asim") + 1
+    _tg_kirmizi = PatternFill("solid", fgColor="FFC7CE")
+    for _r5 in range(2, _wtg.max_row + 1):
+        _cv = _wtg.cell(row=_r5, column=_tg_ci)
+        if isinstance(_cv.value, (int, float)) and _cv.value > 0:
+            _cv.fill = _tg_kirmizi
 
     # takim_gecmis_adalet: cezası olan hücreler KIRMIZI (modele giren sayı)
     _wad = _xl.sheets["takim_gecmis_adalet"]
