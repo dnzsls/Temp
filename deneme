@@ -118,6 +118,8 @@ KAPSAM — KISITLAR VE CEZALAR (hücre hücre):
                         hs günü = norm + mesai BİRLİKTE. FAIR_HS talepten türetilir (ceil);
                         mesai günü zorunlu olarak hafta sonu günü → mesaiyi fiilen bu eşik sınırlar.
     H20D akşam/gece adaleti: W_ADALET_AKSAM(3) × (akşam/gece HAFTASI − FAIR_AKSAM_HAFTA)+; eşik türetilir.
+    H20H vardiya tipi rotasyonu: W_AYNI_TIP(1) × (aynı tipte hafta − MAX_AYNI_TIP_HAFTA(2))+;
+                        TÜM saatler; ayda fiilen tek tip yapabilen agent cezasız.
     H20E haftalık yığılma: W_HAFTA_YIGILMA(6) × (HAFTALIK BRÜT 5-üstü − FAIR_MESAI)+ → 6,6,6,4,0 gibi
                         yığılmayı engeller. Norm'a dokunmaz. FAIR_MESAI artık MAX_MESAI'den
                         TÜRETİLİR (eskiden sabit 2 → sert tavanı 4 yapsan da mesai 2'de takılıyordu).
@@ -409,13 +411,14 @@ W_YOGUN_GUN_OFF = 20           # yazılabilir agent yoğun günde off olursa EK 
                                # off_t dahil; izin/off_t2 ve sert çalışma yasakları hariç.
 
 # ════════════════════════════════════════════════════════════════════════
-# ══ ADALET — 5 ayrı konu, her biri başka şeyi sayar
+# ══ ADALET — 6 ayrı konu, her biri başka şeyi sayar
 # ════════════════════════════════════════════════════════════════════════
 #   1) hafta sonu yükü   (H20C, yumuşak) : agent ayda kaç hafta sonu günü çalıştı
 #   2) aylık mesai       (H20E, SERT)    : kimse ortalama mesainin TOL üstüne çıkamaz
 #   3) haftalık yığılma  (H20E, yumuşak) : aynı mesai tek haftaya toplanmasın (6-6-6-4)
 #   4) akşam/gece        (H20D yumuşak + H16D SERT tavan) : akşam haftaları dönsün
 #   5) geçmiş geç vardiya (H19B, takım)  : önceki aylardan kalan yük dengelensin
+#   6) vardiya tipi tekrarı (H20H, yumuşak): kimse ay boyu aynı vardiyada kalmasın
 #   Ölçüler farklı → tekrar DEĞİL. Tek örtüşme: mesai günü hafta sonuna düştüğü için
 #   (1) mesaiyi dolaylı olarak da sınırlar.
 
@@ -493,6 +496,17 @@ W_GECMIS      = 0              # geçmişte adil payın üstünde geç vardiya y
                                # üyelerin fiili vardiyasını belirlemiyor → takım
                                # bazlı geçmiş cezası anlamını yitiriyor. Kişi bazlı
                                # akşam/gece adaleti (H20D + H16D) yerinde. Kitle: 5.
+
+# ── 6) VARDİYA TİPİ ROTASYONU (H20H, agent bazlı) ─────────────────────
+# Ekip talebi (2026-11-10): bir takım ay boyu hep 09:00'a yazılıyordu. Ölçü:
+# agent kaç HAFTA aynı vardiya tipinde (başlangıç saati; H20 haftalık tipi).
+# MAX_AYNI_TIP_HAFTA'yı aşan her hafta W_AYNI_TIP ceza. TÜM saatler dahil.
+# YUMUŞAK: coverage/izin gerektirirse kalır. Ayda fiilen tek tip yapabilen
+# (sabahçı/kıdem/izin yüzünden) agent cezasız.
+# KALİBRASYON: takım birlikte hareket eder → takımın fazla haftası ≈ üye sayısı
+# × W_AYNI_TIP. 1 → 11 kişilik takım 11 < W_EKSIK_HI(25): rotasyon eksik yazdırmaz.
+MAX_AYNI_TIP_HAFTA = 2         # ayda aynı vardiya tipinde bu kadar hafta serbest
+W_AYNI_TIP         = 1         # fazla her (agent, hafta) cezası; 0 → kapalı
 
 # ════════════════════════════════════════════════════════════════════════
 # ══ TAKIM (H19 / H19E)
@@ -4276,6 +4290,43 @@ else:
     print("takım günlük off tavanı: KAPALI (W_TAKIM_GUN_OFF=0)")
 
 
+# %% [HÜCRE 20H] — VARDİYA TİPİ ROTASYONU (aynı tipte ay boyu kalma, yumuşak) ─
+# Agent bir vardiya tipinde (başlangıç saati) ayda MAX_AYNI_TIP_HAFTA haftadan
+# fazla kalırsa fazla her hafta W_AYNI_TIP ceza:
+#   fazla[a,tip] ≥ Σ_hafta agent_tip[a,hafta,tip] − MAX_AYNI_TIP_HAFTA
+# Gösterge H19/H20 ile ORTAK (agent_tip) → yeni karar değişkeni yok.
+#   SAYILAN : hafta içi haftalık tip; sınır haftası ve ay sonu yarım hafta dahil.
+#   SAYILMAYAN: resmi tatil haftası (agent_tip yok), tip_yasak'taki tipler.
+#   CEZASIZ : ay boyunca fiilen tek tip yapabilen agent (kalmak zorunda).
+# Takım üyeleri birlikte hareket ettiği için takım da döner; H19 buna dokunmaz.
+# AYARLAR H0'da: MAX_AYNI_TIP_HAFTA, W_AYNI_TIP
+ayni_tip_fazla = {}                         # (agent, tip) → fazla hafta IntVar
+_h20h_muaf = []                             # ayda fiilen tek tip yapabilen agentlar
+if W_AYNI_TIP and MAX_AYNI_TIP_HAFTA is not None:
+    _at20h = {}                             # agent → tip → [haftalık gösterge]
+    for (a, wk, bas), ind in agent_tip.items():
+        if (a, bas) in tip_yasak:
+            continue                        # yapamadığı tip (kıdem/gece vb.) sayılmaz
+        _at20h.setdefault(a, {}).setdefault(bas, []).append(ind)
+    for a, _tipler in _at20h.items():
+        if len(_tipler) <= 1:
+            _h20h_muaf.append(a)            # tek tip yapabiliyor → kalmak zorunda
+            continue
+        for bas, _inds in _tipler.items():
+            if len(_inds) <= MAX_AYNI_TIP_HAFTA:
+                continue                    # tavanı aşamaz → kural gereksiz
+            _fz = model.NewIntVar(0, len(_inds) - MAX_AYNI_TIP_HAFTA,
+                                  f"aynitip_{a}_{bas}".replace(":", ""))
+            model.Add(_fz >= sum(_inds) - MAX_AYNI_TIP_HAFTA)
+            amac.append(W_AYNI_TIP * _fz)
+            ayni_tip_fazla[(a, bas)] = _fz
+    print(f"vardiya tipi rotasyonu [YUMUŞAK, ceza {W_AYNI_TIP}/hafta]: aynı tipte "
+          f">{MAX_AYNI_TIP_HAFTA} hafta cezalı | {len(ayni_tip_fazla)} (agent, tip) kısıtı | "
+          f"{len(_h20h_muaf)} agent ayda tek tip yapabiliyor → cezasız")
+else:
+    print("vardiya tipi rotasyonu: KAPALI (W_AYNI_TIP=0)")
+
+
 # %% [HÜCRE 21] — ÇÖZ + DOĞRULA ─────────────────────────────────────────
 # COZUM_SURE_SN H0'da.
 
@@ -5568,6 +5619,51 @@ for k in sorted(dag):
     print(f"  {k} hafta: {dag[k]:4d} agent{isaret}")
 
 
+# vardiya tipi tekrarı (H20H) — agent aynı başlangıç saatinde kaç HAFTA
+# (hafta içi, tatil haftası hariç; çözümden sayılır, gösterge değil)
+agent_tip_tekrar = {}                              # agent → (en çok tekrar eden tip, hafta)
+for a in AGENTS:
+    _say27 = Counter()
+    for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari:
+            continue
+        _say27.update({saat[(ds, v)][0] for ds in gunler
+                       if dt.date.fromisoformat(ds).weekday() < 5
+                       for v in gun_vardiyalari[ds]
+                       if (a, ds, v) in x and solver.Value(x[(a, ds, v)])})
+    if _say27:
+        agent_tip_tekrar[a] = _say27.most_common(1)[0]
+_muaf27 = set(_h20h_muaf)
+_dag27 = Counter(n for _, n in agent_tip_tekrar.values())
+_ust27 = [a for a, (_, n) in agent_tip_tekrar.items() if n > MAX_AYNI_TIP_HAFTA]
+print(f"\n=== VARDİYA TİPİ TEKRARI (H20H)  (aynı tipte serbest = {MAX_AYNI_TIP_HAFTA} hafta) ===")
+print("en çok tekrar eden tipteki hafta → kaç agent:")
+for k in sorted(_dag27):
+    isaret = "  ← cezalı bölge" if k > MAX_AYNI_TIP_HAFTA else ""
+    print(f"  {k} hafta: {_dag27[k]:4d} agent{isaret}")
+print(f"tavan üstü {len(_ust27)} agent  (mecbur/cezasız: "
+      f"{sum(1 for a in _ust27 if a in _muaf27)})")
+# takım görünümü: haftada üyelerin FİİLEN en çok çalıştığı tip (çoğunluk) kaç hafta
+# aynı kaldı. H19 tercih tipi (y) kullanılmıyor: üyeler ayrılabildiği için y fiili
+# vardiyayı göstermeyebilir.
+_tt27 = Counter()
+for T, _uyeler in takimlar.items():
+    for wk, gunler in haftalar.items():
+        if wk in tatil_haftalari:
+            continue
+        _cnt = Counter(saat[(ds, v)][0] for a in _uyeler for ds in gunler
+                       if dt.date.fromisoformat(ds).weekday() < 5
+                       for v in gun_vardiyalari[ds]
+                       if (a, ds, v) in x and solver.Value(x[(a, ds, v)]))
+        if _cnt:
+            _tt27[(T, _cnt.most_common(1)[0][0])] += 1
+_tt27_ust = sorted(((n, T, bas) for (T, bas), n in _tt27.items()
+                    if n > MAX_AYNI_TIP_HAFTA), reverse=True)
+print(f"takım çoğunluğu aynı tipte >{MAX_AYNI_TIP_HAFTA} hafta: {len(_tt27_ust)} (takım, tip)")
+for n, T, bas in _tt27_ust[:10]:
+    print(f"  {takim_gor(T, 30):30s} {bas}  × {n} hafta")
+
+
 # %% [HÜCRE 28] — LOKASYON (working_main_group) BAZLI ÇİZELGE ───────────
 # working_main_group (ör. gebze_kitle, samsun_kitle, uydu_lokasyonlar) bazında:
 # hangi gün / hangi saatte kaç kişi atanmış. Çıktılar DataFrame olarak (display).
@@ -5768,6 +5864,30 @@ _i = [(a, f"{_n} hafta akşam/gece") for a in _kd_agent
       if _n > MAX_AKSAM_HAFTA]
 _kd_ekle(f"H16D akşam/gece ≤{MAX_AKSAM_HAFTA} HAFTA", "agent", _i,
          f"akşam = başlangıç ≥{AKSAM_BASLANGIC} (gece dahil); ölçü HAFTA, gün değil")
+
+# H20H YUMUŞAK → bilgi satırı: aynı vardiya tipinde > MAX_AYNI_TIP_HAFTA hafta kalan agent
+# Bağımsız sayım (roster'dan): hafta içi, tatil haftası hariç haftalık tip.
+if W_AYNI_TIP and MAX_AYNI_TIP_HAFTA is not None:
+    from collections import Counter as _Counter28
+    _i20h, _i20h_muaf = [], 0
+    for a in _kd_agent:
+        _s = _Counter28()
+        for wk, gunler in haftalar.items():
+            if wk in tatil_haftalari:
+                continue
+            _s.update({_kd_gv.get(a, {})[d][0] for d in map(dt.date.fromisoformat, gunler)
+                       if d.weekday() < 5 and d in _kd_gv.get(a, {})})
+        if _s:
+            _t, _n = _s.most_common(1)[0]
+            if _n > MAX_AYNI_TIP_HAFTA:
+                if a in _h20h_muaf:
+                    _i20h_muaf += 1
+                else:
+                    _i20h.append((a, f"{_t}×{_n} hafta"))
+    _kd_ekle(f"H20H aynı vardiya tipi ≤{MAX_AYNI_TIP_HAFTA} hafta (YUMUŞAK — bilgi)", "agent", [],
+             f"{len(_i20h)} agent tavanı aştı (ceza {W_AYNI_TIP}/hafta) + {_i20h_muaf} mecbur "
+             f"(tek tip yapabiliyor, cezasız)"
+             + (": " + " | ".join(f"{k}: {v}" for k, v in _i20h[:5]) if _i20h else ""))
 
 _i = []
 for a in sorted(mesai_yok):
@@ -6377,6 +6497,11 @@ LEJANT = [
      "'sabahçı' → H13: sabah_calisir_flg=1, bitişi >20:00 olan vardiya yasak → gece de kapalı. "
      "'kıdem+sabahçı' → ikisi birden. "
      "Takımı o hafta geceye giderse bu agent ayrı bir vardiyada görünür — hata değil, kural"),
+    ("tip_tekrar",        None, None,
+     "H20H — agentın ay içinde EN ÇOK tekrar eden vardiya tipi × hafta sayısı (hafta içi, "
+     "tatil haftası hariç). Ör. '09:00×4' = 4 hafta 09:00. MAX_AYNI_TIP_HAFTA'yı aşan her "
+     "hafta W_AYNI_TIP ile cezalı (yumuşak). '(mecbur)' = ay boyunca fiilen tek tip "
+     "yapabiliyor, cezasız"),
     ("off_t_talep",       None, None,
      "BU AYIN toplam off_t talebi (verilen + verilemeyen). Geçmiş DEĞİL"),
     ("gecmis_off_talep_gun", None, None,
@@ -6656,6 +6781,11 @@ for _a in _agents_sirali:
     if _a in sabah_agents:
         _gy.append("sabahçı")
     _r["gece_yasak"] = "+".join(_gy)                    # "" | kıdem | sabahçı | kıdem+sabahçı
+    # VARDİYA TİPİ TEKRARI (H20H): en çok tekrar eden tip × hafta (H27'de sayıldı)
+    _tt29 = agent_tip_tekrar.get(_a)
+    _r["tip_tekrar"] = ((f"{_tt29[0]}×{_tt29[1]}"
+                         + (" (mecbur)" if _a in _h20h_muaf else ""))
+                        if _tt29 else "")
     # OFF TALEBİ — bu ay + GEÇMİŞ (H7B). Amaç: KIRMIZI hücreli (off_t'si
     # karşılanmayan) kişinin gerçekten "çok isteyen" olup olmadığı aynı satırda
     # görünsün. gecmis_off_agirlik DÜŞÜKSE kural doğru çalışmış demektir.
