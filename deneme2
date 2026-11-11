@@ -1,13 +1,19 @@
-import pandas as pd
-ds, q = '2026-11-21', 'gold'
-r = results[ds][q]; mi = r['mip_info']
-_W = sys.modules[solve_week.__module__]
-hr = _W.blok_coz(CONFIG, q, ds).get('hourly_report') or {}
-cl, erl, fi = r.get('calls_by_slot', {}), mi.get('erlang_by_slot', {}), mi.get('fiili_by_slot', {})
-_r = []
-for t in sorted(cl):
-    K = _W.kap_ihtiyac(cl.get(t, 0), t, hr) or 0
-    if K and fi.get(t, 0) < K:
-        _r.append({'slot': t, 'cagri': round(cl[t], 1), 'erlang_ihtiyac': erl.get(t, 0),
-                   'kap_ihtiyac': round(K, 1), 'sahada': fi.get(t, 0), 'kap_rr': f"{fi.get(t, 0) / K:.0%}"})
-print(pd.DataFrame(_r).to_string(index=False) if _r else 'Kap eksiği olan slot yok')
+import datetime as _dtk
+_pa = sorted(prov_agents)[0]
+_na = next(a for a in AGENTS if a not in prov_agents)
+_hi = next(ds for ds in PLAN_GUNLER if _dtk.date.fromisoformat(ds).weekday() < 5)
+_gk = next(v for v in gun_vardiyalari[_hi] if (_hi, v) in talep)
+def _ok(ad, kosul): print(("✓ " if kosul else "✗ ESKİ → ") + ad)
+
+_ok("H0  hi_vardiyalar", "hi_vardiyalar" in PROVIZYON and "hi_baslangic" not in PROVIZYON)
+_ok("H8  PROV_HI / sözde-vardiya", "PROV_HI" in globals() and any(v in PROV_HI for v in gun_vardiyalari[_hi]))
+_ok("H14B _kova_calisabilir", not _kova_calisabilir(_na, _hi, next(iter(PROV_HI)))
+                               and not _kova_calisabilir(_pa, _hi, _gk))
+_ok("H14E", "_pv_n_yasak" in globals())
+_ok("H21 _kapali", "_kapali" not in globals() or _kapali(_pa, _hi, _gk) == "H14DE_provizyon")
+_ok("H25B", _arife_atama == sum(solver.Value(x[k]) for k in x if k[2] == ARIFE_YARIM or k[2] in PROV_SOZDE))
+_ok("H26 df_gercek", not df_gercek["vardiya"].isin(PROV_SOZDE).any())
+_ok("H31 provizyon kolonu", df_agent_plan.loc[df_agent_plan["agent_user_code"].isin(prov_agents)
+     & df_agent_plan["date"].map(lambda d: _dtk.date.fromisoformat(d).weekday() < 5), "provizyon"].eq(1).all())
+_ok("H31 prov interval (hafta içi)", any(_dtk.date.fromisoformat(d).weekday() < 5 and n > 0
+                                         for (d, _s), n in _pv_slot.items()))
