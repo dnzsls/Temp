@@ -1,7 +1,26 @@
-_eksik = [k for k in ("hi_hat", "hs_kisi", "W_PROV_HS_DENGE") if k not in PROVIZYON]
-_eski  = [k for k in ("hi_vardiyalar", "hi_zorunlu", "hi_baslangic") if k in PROVIZYON]
-print("H0 eksik anahtar:", _eksik or "yok", "| H0 eski anahtar:", _eski or "yok")
-for _ad in ("PROV_HI", "PROV_HI_KISI", "PROV_HI_ZORUNLU", "PROV_SOZDE",   # H8
-            "prov_hs_pay", "prov_hs_sapma",                               # H14D
-            "prov_hi_bos", "prov_hi_degisim", "prov_tip_eksik"):          # H14E
-    print(f"{_ad:16s}", "✓" if _ad in globals() else "✗ YOK → ilgili hücre eski")
+import re, difflib
+DOSYA = "/Users/deniz/Documents/Beyza/shift_planning/agent_detay_v2/kurumsal_cagrilar_agent_detayli_model_v2.py"
+
+def _parcala(t):
+    d = {}
+    for p in re.split(r"(?m)^(?=# %% \[HÜCRE )", t):
+        m = re.match(r"# %% \[HÜCRE ([^\]]+)\]", p)
+        if m: d[m.group(1)] = p
+    return d
+_norm = lambda s: [l.rstrip() for l in s.strip().splitlines() if l.strip()]
+
+_dosya = _parcala(open(DOSYA, encoding="utf-8").read())
+_nb = {}
+for _kod in In[:-1]:                      # en son koşulan sürüm kazanır
+    _nb.update(_parcala(_kod))
+
+for _k, _dk in _dosya.items():
+    if _k not in _nb:
+        print(f"HÜCRE {_k:4s} — bu oturumda koşulmamış"); continue
+    _a, _b = _norm(_nb[_k]), _norm(_dk)
+    if _a == _b:
+        print(f"HÜCRE {_k:4s} ✓"); continue
+    _fark = [l for l in difflib.unified_diff(_a, _b, "notebook", "dosya", n=0, lineterm="")
+             if l[:1] in "+-" and l[:3] not in ("+++", "---")]
+    print(f"HÜCRE {_k:4s} ✗ FARKLI ({len(_fark)} satır) — ilk farklar:")
+    for l in _fark[:4]: print("      ", l[:110])
