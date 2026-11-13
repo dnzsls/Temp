@@ -1,26 +1,15 @@
-import re, difflib
-DOSYA = "/Users/deniz/Documents/Beyza/shift_planning/agent_detay_v2/kurumsal_cagrilar_agent_detayli_model_v2.py"
+import re, hashlib
+_GUNCEL = {"0":"03606eac","1":"487b3fd9","2":"924cd960","3":"2531b6ea","4":"e975cb80","5":"91dfb09a","6":"cffdb0b3","7":"cd11aca7","7B":"3a7f8820","8":"b4d82482","8B":"ff859455","8C":"dc0f34d0","8D":"e8f11c46","9":"d7e2d285","10":"6d851f60","11":"3bd3aec1","12":"05dd1b6b","13":"a1fcb606","14":"afb0f178","14B":"5fd101d5","14D":"20250c13","14E":"919a5f1f","15":"0d1be850","16":"f66832a2","16B":"be665516","16C":"9712ca91","16E":"a12b192d","16D":"fd40b2da","17":"195e1ce8","17B":"fd6785af","18":"f67bb820","18M":"46d45e20","18E":"808c5e00","19":"a3625e28","19B":"e934bd0e","19E":"b9b64577","19F":"31f18409","20":"3910c883","20B":"d02a0abb","20C":"750a6936","20D":"a4e2ed0b","20E":"51001c75","20F":"2d39fd05","20G":"bcaff9d0","20H":"f7220280","21":"ed6d51de","22":"ed8586cd","23":"0eef231d","24":"a79b85fd","24B":"29aa503f","25":"9749c1ea","25B":"ea413831","25C":"231665c0","26":"ec8b8894","27":"71bbca00","28":"fe0c9b71","28B":"2f7324e0","29":"39f4f0b3","30":"b664e006","31":"c27f8e8b","31B":"dda7c1b5","32":"8d9b98af"}
 
-def _parcala(t):
-    d = {}
-    for p in re.split(r"(?m)^(?=# %% \[HÜCRE )", t):
-        m = re.match(r"# %% \[HÜCRE ([^\]]+)\]", p)
-        if m: d[m.group(1)] = p
-    return d
-_norm = lambda s: [l.rstrip() for l in s.strip().splitlines() if l.strip()]
-
-_dosya = _parcala(open(DOSYA, encoding="utf-8").read())
-_nb = {}
+_iz = {}
 for _kod in In[:-1]:                      # en son koşulan sürüm kazanır
-    _nb.update(_parcala(_kod))
+    for _p in re.split(r"(?m)^(?=# %% \[HÜCRE )", _kod):
+        _m = re.match(r"# %% \[HÜCRE ([^\]]+)\]", _p)
+        if _m:
+            _s = "\n".join(l.rstrip() for l in _p.strip().splitlines() if l.strip())
+            _iz[_m.group(1)] = hashlib.md5(_s.encode()).hexdigest()[:8]
 
-for _k, _dk in _dosya.items():
-    if _k not in _nb:
-        print(f"HÜCRE {_k:4s} — bu oturumda koşulmamış"); continue
-    _a, _b = _norm(_nb[_k]), _norm(_dk)
-    if _a == _b:
-        print(f"HÜCRE {_k:4s} ✓"); continue
-    _fark = [l for l in difflib.unified_diff(_a, _b, "notebook", "dosya", n=0, lineterm="")
-             if l[:1] in "+-" and l[:3] not in ("+++", "---")]
-    print(f"HÜCRE {_k:4s} ✗ FARKLI ({len(_fark)} satır) — ilk farklar:")
-    for l in _fark[:4]: print("      ", l[:110])
+_farkli = [k for k in _GUNCEL if k in _iz and _iz[k] != _GUNCEL[k]]
+_yok    = [k for k in _GUNCEL if k not in _iz]
+print("✗ FARKLI (eski olabilir):", _farkli or "yok")
+print("— koşulmamış / tanınmadı:", _yok or "yok")
