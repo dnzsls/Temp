@@ -22,14 +22,17 @@ KURUMSAL v2 (kitle v7_gpt üzerine kuruldu, 2026-11-09) — KİTLEDEN FARKLAR:
     BİRLİKTE çalışmaz (kaçışlı). Provizyoncular H18'e (ayda ≥1 çift off) TABİ;
     hafta sonu yapıları AYRI → H18E, H18M, H20C ve hafta sonu kapasite sayımları
     (hs_kapasite, H29 hafta_sonu_kapasite, H30) onları KAPSAMAZ. Ayarlar H0 PROVIZYON.
-  • PROVİZYON HAFTA İÇİ HAT (H14E): provizyoncu hafta içi yalnız kendi 3 sözde-
-    vardiyasını (09-18 / 12-21 / 15-24, H8'de eklenir, Model-1'den BAĞIMSIZ) alır;
-    gerçek kovalar ona, sözde-vardiyalar diğerlerine kapalı. Her vardiyada ≤1
-    provizyoncu; 09 ve 15'te her hafta içi günü ≥1 (sert, kaçışlı) → off/izin/norm
-    olunca boşalan 12-21 olur. Hafta içinde tip değişimi yumuşak cezalı.
+  • PROVİZYON HAFTA İÇİ HAT (H14E): provizyoncu hafta içi yalnız H0 hi_hat
+    kütüphanesindeki sözde-vardiyaları alır (varsayılan 09-18 / 12-21 / 15-24, her
+    birinde 1 kişi; H8'de eklenir, Model-1'den BAĞIMSIZ); gerçek kovalar ona,
+    sözde-vardiyalar diğerlerine kapalı. Her vardiyada ≤kişi; zorunlu (09, 15)
+    vardiyalar kişinin altına düşmez (sert, kaçışlı) → off/izin/norm olunca
+    boşalan 12-21 olur. Hafta içinde tip değişimi yumuşak cezalı. Ay içinde
+    her provizyoncu 09/12/15'in her birinde ≥1 hafta (yumuşak, W_PROV_TIP_DENGE).
     COVERAGE DIŞI (hafta sonu flexy gibi). H19 / H19E / H20 / H20H uygulanmaz.
     Ayda mesai_hedef(2) mesai (yumuşak, ağır) ve MESAI_TOL oransal tavanından muaf;
-    hafta sonu 2. provizyoncu kaçışlı cezalı (W_PROV_HS_FAZLA) → normalde tam 1.
+    hafta sonu her gün hs_kisi (1) provizyoncu (iki yönde kaçışlı); hafta sonu gün
+    sayısı müsaitliğe orantılı adil pay (W_PROV_HS_DENGE) → 2 mesai + 1 norm.
     Ekip planı: MF37 = mesai flexy.
   • v2'de kitleden GELEN kurallar (kullanıcı kararı 2026-11-09, hepsi): H10 esnek
     band, H18 çift off esnek, H18E h.sonu ≤1 gün (HS_TEK_GUN), H18M mesaiye kalamaz
@@ -600,7 +603,7 @@ W_SINIR_MOD     = 10           # önceki ayda İZİNLİ/OFF olan üyenin YUMUŞA
 #   bağımsız döner. Eskiden Model-1 kovalarına yazılıyordu → Kasım'da Model-1
 #   12:00 açmadığı için 12-21 hiç oluşmadı, hafta içi kapasite günde 2'ye düştü,
 #   mesai hafta sonuna itildi (orada cezalı) → 0 mesai. Artık H8'de her hafta
-#   içi güne 3 SÖZDE-vardiya (hi_vardiyalar) eklenir: talep'e girmez, COVERAGE
+#   içi güne hi_hat'taki SÖZDE-vardiyalar eklenir: talep'e girmez, COVERAGE
 #   DIŞI (hafta sonu flexy gibi), iş günü sayılır (kota/mesai/H12/H15 işler).
 #   Takım tercihi (H19), sınır kilidi (H19E), haftada tek tip (H20) ve
 #   rotasyon (H20H) provizyonculara UYGULANMAZ — düzenleri bu hattan geliyor.
@@ -609,11 +612,22 @@ W_SINIR_MOD     = 10           # önceki ayda İZİNLİ/OFF olan üyenin YUMUŞA
 #   hafta içine off yığılıyordu. Artık mesai_hedef yumuşak taban (eksik gün başına
 #   W_PROV_MESAI) + MESAI_TOL oransal tavanından MUAF (kuyruk ortalaması düşükse 2'yi
 #   engelliyordu). MAX_MESAI (H17) ve yıllık tavan (H20F) aynen geçerli.
+# TİP DENGESİ (W_PROV_TIP_DENGE, 2026-11-11): gerçek koşuda bir provizyoncu ay
+#   boyu hiç 09 çalışmadı → her provizyoncu ayda her hat vardiyasında (09/12/15)
+#   en az 1 HAFTA çalışsın; eksik her tip cezalı. Yumuşak: izin haftası tipi
+#   kaçırtabilir. Art arda aynı tip cezası (döngü) KONUŞULDU, istenmedi.
 # HAFTA SONU TAM 1 (W_PROV_HS_FAZLA): ekip planında her hafta sonu günü tam 1
 #   provizyoncu; tavan olmazsa mesai günleri aynı güne 2 kişi olarak yığılabilir.
 #   KAÇIŞLI (≥1 kuralı gibi): sert ≤1 Kasım gerçek verisinde INFEASIBLE yaptı
 #   (2026-11-11; H20B haftada ≤2 off + off_t2 provizyoncuyu iki gün birden
 #   hafta sonuna zorlayabiliyor). Fazla her provizyoncu cezalı, yasak değil.
+# KÜTÜPHANE (2026-11-13): hat 3 kişi/3 vardiyaya gömülüydü → 4. provizyoncuda
+#   çalışmazdı. Artık hi_hat listesi (saat, kişi, zorunlu) elle doldurulur;
+#   hafta sonu kişi sayısı hs_kisi. Eski hi_vardiyalar/hi_zorunlu kaldırıldı.
+# HAFTA SONU ADALETİ (W_PROV_HS_DENGE, 2026-11-13): ekip planında herkes 2 mesai
+#   + 1 norm (3 h.sonu günü); model 4/3/2 dağıtmıştı (norm 2/1/0). Pay = toplam
+#   provizyon h.sonu günü × kişinin müsait h.sonu günü ÷ Σ müsait → eşit
+#   müsaitse eşit, izinli olanın payı küçük. Mesai hedefinin (300) altında.
 # Flag kolonu df_agents'te yoksa ya da enabled=False ise HİÇBİR ŞEY kurulmaz.
 PROVIZYON = {
     'enabled': True,
@@ -621,15 +635,29 @@ PROVIZYON = {
     'hs_parcalar': [("10:00", "14:00"), ("18:00", "22:00")],   # görüntü + interval
     'W_PROV_GUN_MUAF': 500,    # provizyoncusuz hafta sonu GÜNÜ (kaçış; > 2×W_EKSIK_HS)
     'W_PROV_CIFT_GUN': 200,    # aynı provizyoncu Cmt+Pzr birlikte (kaçış; < W_PROV_GUN_MUAF)
-    # ── hafta içi hat (H14E) ──
-    'hi_vardiyalar': [("09:00", "18:00"), ("12:00", "21:00"), ("15:00", "00:00")],  # sözde (00:00 = 24:00)
-    'hi_zorunlu':    ["09:00", "15:00"],           # her hafta içi günü ≥1 provizyoncu (başlangıç)
-    'W_PROV_HI_BOS': 500,      # zorunlu başlangıç o gün provizyoncusuz (kaçış)
+    'hs_kisi': 1,              # hafta sonu her GÜN flexy'de kaç provizyoncu (altı W_PROV_GUN_MUAF,
+                               #   üstü W_PROV_HS_FAZLA ile kaçışlı)
+    'W_PROV_HS_DENGE': 150,    # provizyoncunun hafta sonu gün sayısı adil payının (müsait gün
+                               #   orantılı, alt/üst yuvarlama) dışında kalan her gün; 0 → kapalı
+    # ── hafta içi hat (H14E) — KÜTÜPHANE: ekip elle doldurur ──
+    # (başlangıç, bitiş, kişi, zorunlu)   bitiş "00:00" = 24:00
+    #   kişi    : o vardiyada her hafta içi günü EN FAZLA bu kadar provizyoncu (sert)
+    #   zorunlu : True → her gün kişi sayısının ALTINA düşmez (kaçışlı, W_PROV_HI_BOS/eksik kişi)
+    #             False → kişi eksilince ilk feda edilen
+    # Provizyoncu sayısı değişince buradan ayarla (ör. 4 kişi → 12'yi 2 yap ya da saat ekle).
+    # Kapasite ön kontrolü H20E'de basılır (hat kişi-gün vs kota + mesai_hedef).
+    'hi_hat': [
+        ("09:00", "18:00", 1, True),
+        ("12:00", "21:00", 1, False),
+        ("15:00", "00:00", 1, True),
+    ],
+    'W_PROV_HI_BOS': 500,      # zorunlu vardiyada o gün eksik kalan HER provizyoncu (kaçış)
     'W_PROV_HI_DEGISIM': 200,  # hafta içinde her EK vardiya tipi (hafta boyu sabit; < W_PROV_HI_BOS)
+    'W_PROV_TIP_DENGE': 100,   # provizyoncunun ay içinde HİÇ çalışmadığı her hat tipi (< W_PROV_HI_DEGISIM); 0 → kapalı
     # ── mesai + hafta sonu tavanı ──
     'mesai_hedef': 2,          # ayda bu kadar mesai (≤ MAX_MESAI; fazlası MAX_MESAI'ye kırpılır)
     'W_PROV_MESAI': 300,       # hedefin altında kalan her mesai günü (yumuşak taban)
-    'W_PROV_HS_FAZLA': 200,    # hafta sonu bir günde 1'den FAZLA her provizyoncu (kaçış); 0 → kapalı
+    'W_PROV_HS_FAZLA': 200,    # hafta sonu bir günde hs_kisi'den FAZLA her provizyoncu (kaçış); 0 → kapalı
 }
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1486,8 +1514,12 @@ if PROVIZYON.get("enabled") and _pv_kol in df_tam.columns:
         "agent_user_code"].astype(str).str.strip())
 PROV_SAAT = (PROVIZYON["hs_parcalar"][0][0], PROVIZYON["hs_parcalar"][-1][1])
 # Hafta içi hat (H14E): Model-1'den bağımsız 3 sözde-vardiya, aynı desen.
-PROV_HI = {f"__PROV_{_b.replace(':', '')}__": (_b, _e)      # kod → (başlangıç, bitiş)
-           for _b, _e in PROVIZYON["hi_vardiyalar"]}
+PROV_HI, PROV_HI_KISI, PROV_HI_ZORUNLU = {}, {}, set()   # kod → saat / kişi ; zorunlu kodlar
+for _b, _e, _k, _z in PROVIZYON["hi_hat"]:
+    _pk = f"__PROV_{_b.replace(':', '')}_{_e.replace(':', '')}__"
+    PROV_HI[_pk], PROV_HI_KISI[_pk] = (_b, _e), int(_k)
+    if _z:
+        PROV_HI_ZORUNLU.add(_pk)
 PROV_SOZDE = {PROV_VARDIYA} | set(PROV_HI)         # tüm provizyon sözde-vardiyaları (coverage dışı)
 if prov_agents:
     for ds in list(gun_vardiyalari):
@@ -1501,7 +1533,7 @@ if prov_agents:
 print(f"provizyon: "
       + (f"{len(prov_agents)} agent ({_pv_kol}=1) → hafta sonu sözde-vardiya "
          f"{' + '.join(f'{b}-{e}' for b, e in PROVIZYON['hs_parcalar'])}  |  hafta içi "
-         f"sözde-vardiya {' / '.join(f'{b}-{e}' for b, e in PROV_HI.values())}"
+         f"sözde-vardiya {' / '.join(f'{b}-{e}×{PROV_HI_KISI[k]}' + ('*' if k in PROV_HI_ZORUNLU else '') for k, (b, e) in PROV_HI.items())} (*=zorunlu)"
          if prov_agents else
          ("KAPALI (enabled=False)" if not PROVIZYON.get("enabled") else
           f"KAPALI ('{_pv_kol}' kolonu yok ya da 1 olan agent yok)")))
@@ -2414,23 +2446,31 @@ print(f"  toplam tip_yasak: {len(tip_yasak)} (agent,tip)  [kıdem + genel]")
 # Ayarlar ve gerekçe H0 PROVIZYON bloğunda. Sözde-vardiya H8'de eklendi.
 #   (a) provizyoncu hafta sonu GERÇEK kovalara yazılamaz (sadece flexy)
 #   (b) provizyoncu olmayan flexy vardiyayı alamaz
-#   (c) SERT: HER hafta sonu GÜNÜNDE ≥1 provizyoncu (2026-10-01)
-#       Σ_{prov} x[prov, gün, FLEXY] + muaf[gün] ≥ 1   (muaf: W_PROV_GUN_MUAF)
+#   (c) SERT: HER hafta sonu GÜNÜNDE ≥hs_kisi provizyoncu (2026-10-01; kişi 2026-11-13)
+#       Σ_{prov} x[prov, gün, FLEXY] + muaf[gün] ≥ hs_kisi   (muaf: W_PROV_GUN_MUAF/kişi)
+#   (c') yumuşak: ≤hs_kisi; fazla her kişi W_PROV_HS_FAZLA
 #   (d) SERT (kaçışlı): aynı provizyoncu aynı hafta sonunun Cmt+Pzr'ını
 #       BİRLİKTE çalışmaz (2026-10-02)
 #       x[prov, Cmt] + x[prov, Pzr] ≤ 1 + kacis   (kacis: W_PROV_CIFT_GUN)
 #       W_PROV_CIFT_GUN < W_PROV_GUN_MUAF → diğerleri izinliyse aynı kişi
 #       iki günü de çalışır (gün boş kalmaz).
+#   (e) YUMUŞAK: hafta sonu adaleti — provizyoncunun h.sonu gün sayısı adil
+#       payın [alt, üst] yuvarlamasında; dışındaki her gün W_PROV_HS_DENGE.
+#       pay = hs_kisi × h.sonu gün sayısı × müsait_a ÷ Σ müsait
+#       (müsait = flexy değişkeni açık + _kova_calisabilir; izin/off_t2/hamile düşer)
 #   H18 (ayda ≥1 çift off) provizyonculara da uygulanır → offlar dağılır.
 # Hamile/süt provizyoncu hafta sonu çalışamaz (H14 kazanır); mesaiye kalamaz
 # provizyoncu resmi tatil hafta sonunda çalışamaz (H16 kazanır) → değişkenleri
 # 0'a çivili, (c)'yi o gün diğer provizyoncular karşılar ya da muafiyete düşer.
 prov_gun_muaf = {}                                 # ds → "o gün provizyoncu yok" kaçışı
-prov_hs_fazla = {}                                 # ds → o gün 1'den fazla provizyoncu (kaçış)
+prov_hs_fazla = {}                                 # ds → o gün hs_kisi'den fazla provizyoncu (kaçış)
+prov_hs_pay = {}                                   # agent → (alt, üst) hafta sonu gün payı (e)
+prov_hs_sapma = {}                                 # agent → pay dışı gün (IntVar)
 prov_cift_kacis = {}                               # (agent, Cmt) → "Cmt+Pzr birlikte" kaçışı
 _pv_n_kapat = _pv_n_yasak = 0
 if prov_agents:
     _pv_hs_gun = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
+    _pv_hk = int(PROVIZYON["hs_kisi"])
     for ds in _pv_hs_gun:
         for a in AGENTS:
             for v in gun_vardiyalari[ds]:
@@ -2450,13 +2490,13 @@ if prov_agents:
     _pv_rapor = []                                 # (gün, müsait provizyoncu)
     for ds in _pv_hs_gun:                          # (c) SERT (kaçışlı): gün başına
         _gv = _pv_gun_var(ds)
-        _mu = model.NewBoolVar(f"provgunmuaf_{ds}")
+        _mu = model.NewIntVar(0, _pv_hk, f"provgunmuaf_{ds}")
         prov_gun_muaf[ds] = _mu
-        model.Add(sum(_gv) + _mu >= 1)
+        model.Add(sum(_gv) + _mu >= _pv_hk)
         amac.append(PROVIZYON["W_PROV_GUN_MUAF"] * _mu)
-        if PROVIZYON.get("W_PROV_HS_FAZLA") and len(_gv) > 1:   # (c') tam 1 — kaçışlı
-            _fz = model.NewIntVar(0, len(_gv) - 1, f"provhsfazla_{ds}")
-            model.Add(sum(_gv) <= 1 + _fz)
+        if PROVIZYON.get("W_PROV_HS_FAZLA") and len(_gv) > _pv_hk:   # (c') tam hs_kisi — kaçışlı
+            _fz = model.NewIntVar(0, len(_gv) - _pv_hk, f"provhsfazla_{ds}")
+            model.Add(sum(_gv) <= _pv_hk + _fz)
             amac.append(PROVIZYON["W_PROV_HS_FAZLA"] * _fz)
             prov_hs_fazla[ds] = _fz
         _pv_rapor.append((ds, len(_gv)))
@@ -2472,15 +2512,37 @@ if prov_agents:
                 model.Add(x[(a, ds, PROV_VARDIYA)] + x[(a, _pz, PROV_VARDIYA)]
                           <= 1 + _kc)
                 amac.append(PROVIZYON["W_PROV_CIFT_GUN"] * _kc)
+    if PROVIZYON.get("W_PROV_HS_DENGE"):          # (e) hafta sonu adaleti
+        _pv_mus = {a: [ds for ds in _pv_hs_gun if _kova_calisabilir(a, ds, PROV_VARDIYA)]
+                   for a in sorted(prov_agents)}
+        _pv_mus_top = sum(len(g) for g in _pv_mus.values())
+        _pv_hs_top = _pv_hk * len(_pv_hs_gun)
+        for a, _gl in _pv_mus.items():
+            if not _gl:
+                continue
+            _pay = _pv_hs_top * len(_gl) / _pv_mus_top
+            _alt = min(int(_pay), len(_gl))                 # alt yuvarlama
+            _ust = min(int(-(-_pay // 1)), len(_gl))        # üst yuvarlama
+            _hs_a = sum(x[(a, ds, PROV_VARDIYA)] for ds in _gl)
+            _sp = model.NewIntVar(0, len(_gl), f"provhsdenge_{a}")
+            model.Add(_sp >= _alt - _hs_a)
+            model.Add(_sp >= _hs_a - _ust)
+            amac.append(PROVIZYON["W_PROV_HS_DENGE"] * _sp)
+            prov_hs_pay[a], prov_hs_sapma[a] = (_alt, _ust), _sp
 
     print(f"provizyon [H14D]: {len(prov_agents)} agent {sorted(prov_agents)}")
     print(f"  (a) hafta sonu gerçek kova kapatıldı: {_pv_n_kapat}  |  "
           f"(b) diğerlerine flexy yasağı: {_pv_n_yasak}")
     print(f"  (c) SERT: {len(_pv_hs_gun)} hafta sonu GÜNÜNÜN her birinde "
-          f"≥1 provizyoncu (kaçış ağ. {PROVIZYON['W_PROV_GUN_MUAF']})")
+          f"≥{_pv_hk} provizyoncu (eksik kişi kaçış ağ. {PROVIZYON['W_PROV_GUN_MUAF']})")
     if PROVIZYON.get("W_PROV_HS_FAZLA"):
-        print(f"  (c') hafta sonu günü TAM 1 hedefi: fazla her provizyoncu ağ. "
+        print(f"  (c') hafta sonu günü TAM {_pv_hk} hedefi: fazla her provizyoncu ağ. "
               f"{PROVIZYON['W_PROV_HS_FAZLA']} (kaçışlı)")
+    if prov_hs_pay:
+        print(f"  (e) yumuşak: hafta sonu adil pay (gün, müsaitliğe orantılı) ağ. "
+              f"{PROVIZYON['W_PROV_HS_DENGE']} → "
+              + ", ".join(f"{a}: {lo}" + (f"-{hi}" if hi != lo else "")
+                          for a, (lo, hi) in prov_hs_pay.items()))
     print(f"  (d) SERT: aynı provizyoncu Cmt+Pzr BİRLİKTE çalışmaz — "
           f"{len(prov_cift_kacis)} (agent, hafta sonu) (kaçış ağ. "
           f"{PROVIZYON['W_PROV_CIFT_GUN']}, sadece diğerleri yoksa)")
@@ -2489,12 +2551,12 @@ if prov_agents:
     # FİZİBİLİTE ÖN KONTROLÜ — çözmeden ÖNCE görünsün:
     #  • o gün hiç müsait provizyoncu yoksa (hepsi izinli / off_t2) → kaçış
     #  • tek provizyoncu varsa "her gün çalış" ile "1 çift off" çelişir
-    _pv_bos = [g for g, n in _pv_rapor if n == 0]
+    _pv_bos = [(g, n) for g, n in _pv_rapor if n < _pv_hk]
     if _pv_bos:
-        print(f"  ⚠ {len(_pv_bos)} hafta sonu gününde HİÇ müsait provizyoncu yok "
+        print(f"  ⚠ {len(_pv_bos)} hafta sonu gününde müsait provizyoncu <{_pv_hk} "
               f"(izin/off_t2) → o gün muafiyete düşecek: {_pv_bos}")
     else:
-        print(f"  ✓ her hafta sonu gününde en az 1 müsait provizyoncu var")
+        print(f"  ✓ her hafta sonu gününde en az {_pv_hk} müsait provizyoncu var")
     if len(prov_agents) < 2 and CIFT_HS_OFF:
         print(f"  ⚠ tek provizyoncu: her hafta sonu günü çalışması ile ayda 1 çift "
               f"off (H18) birlikte TUTAMAZ → biri kaçışa düşecek.")
@@ -2507,26 +2569,36 @@ else:
     print("provizyon [H14D]: KAPALI")
 
 
-# %% [HÜCRE 14E] — PROVİZYON: HAFTA İÇİ HAT (09-18 / 12-21 / 15-24) ─────
-# Ayarlar ve gerekçe H0 PROVIZYON bloğunda. Sözde-vardiyalar (PROV_HI) H8'de
-# eklendi — Model-1'den BAĞIMSIZ, talep'e girmez → COVERAGE DIŞI.
+# %% [HÜCRE 14E] — PROVİZYON: HAFTA İÇİ HAT (H0 hi_hat kütüphanesi) ────────
+# Ayarlar ve gerekçe H0 PROVIZYON bloğunda. Sözde-vardiyalar (PROV_HI, kişi
+# PROV_HI_KISI, zorunlu PROV_HI_ZORUNLU) H8'de hi_hat'ten kuruldu — Model-1'den
+# BAĞIMSIZ, talep'e girmez → COVERAGE DIŞI.
 #   (a) SERT: provizyoncu hafta içi GERÇEK kovalara (talep'tekilere) yazılamaz;
 #       provizyoncu olmayan PROV_HI sözde-vardiyalarını alamaz
-#   (b) SERT: her (gün, sözde-vardiya) en fazla 1 provizyoncu
-#   (c) SERT (kaçışlı): hi_zorunlu başlangıçlarda her hafta içi günü ≥1
-#       provizyoncu → kişi eksilince boşalan 12:00 olur. Kimse müsait değilse
-#       kaçış (W_PROV_HI_BOS), INFEASIBLE olmaz.
+#   (b) SERT: her (gün, hat vardiyası) en fazla `kişi` provizyoncu
+#   (c) SERT (kaçışlı): zorunlu vardiyalarda her hafta içi günü ≥`kişi`
+#       provizyoncu → kişi eksilince boşalan zorunlu olmayan (12:00) olur.
+#       Müsait yoksa eksik her kişi kaçış (W_PROV_HI_BOS), INFEASIBLE olmaz.
 #   (d) YUMUŞAK: hafta içinde her ek vardiya tipi W_PROV_HI_DEGISIM
+#   (e) YUMUŞAK: ay içinde her hat tipinde ≥1 hafta; eksik tip W_PROV_TIP_DENGE
+#       (gösterge (d) ile ortak, iki yönlü bağlı: tip_hafta = 1 ⇔ o hafta o tipte ≥1 gün)
 # Arife yarım vardiyası (ARIFE_YARIM) H16B'nin kuralında kalır. Takım tercihi
 # (H19), sınır kilidi (H19E), haftada tek tip (H20) ve H20H bu agentlara kurulmaz;
 # gerçek kova tipleri H14C genel tip yasağına _kova_calisabilir üzerinden girer.
-prov_hi_bos = {}                                   # (gün, başlangıç) → "provizyoncusuz" kaçışı
+
+
+def _pv_etk(k):
+    """hat vardiyası kodu → '09:00-18:00' (rapor etiketi)."""
+    return f"{PROV_HI[k][0]}-{PROV_HI[k][1]}"
+
+
+prov_hi_bos = {}                                   # (gün, hat kodu) → zorunluda eksik kişi (kaçış)
 prov_hi_degisim = {}                               # (agent, hafta) → ek tip sayısı
+prov_tip_eksik = {}                                # (agent, hat kodu) → ay içinde o tip hiç yok
 if prov_agents:
-    _phz = list(PROVIZYON["hi_zorunlu"])
     _pv_hi_gun = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5]
-    _pv_slot = {}                                  # (gün, başlangıç) → [x]
-    _pv_tip = {}                                   # (agent, hafta, başlangıç) → [x]
+    _pv_slot = {}                                  # (gün, hat kodu) → [x]
+    _pv_tip = {}                                   # (agent, hafta, hat kodu) → [x]
     _pv_n_a = _pv_n_yasak = 0
     for ds in _pv_hi_gun:
         _wk = dt.date.fromisoformat(ds).isocalendar()[:2]
@@ -2539,36 +2611,41 @@ if prov_agents:
                         model.Add(x[(a, ds, v)] == 0)      # (a) gerçek kova kapalı
                         _pv_n_a += 1
                     elif v in PROV_HI:
-                        bas = saat[(ds, v)][0]
-                        _pv_slot.setdefault((ds, bas), []).append(x[(a, ds, v)])
-                        _pv_tip.setdefault((a, _wk, bas), []).append(x[(a, ds, v)])
+                        _pv_slot.setdefault((ds, v), []).append(x[(a, ds, v)])
+                        _pv_tip.setdefault((a, _wk, v), []).append(x[(a, ds, v)])
                 elif v in PROV_HI:
                     model.Add(x[(a, ds, v)] == 0)          # (a) sözde-vardiya yalnız provizyoncu
                     _pv_n_yasak += 1
     _kt14e = []
-    for (ds, bas), _xs in _pv_slot.items():        # (b)
-        if len(_xs) > 1:
-            _kt14e.append(model.Add(sum(_xs) <= 1))
-    _tes_ekle("H14E_prov_vardiya_tek_kisi", *_kt14e)
+    for (ds, v), _xs in _pv_slot.items():          # (b)
+        if len(_xs) > PROV_HI_KISI[v]:
+            _kt14e.append(model.Add(sum(_xs) <= PROV_HI_KISI[v]))
+    _tes_ekle("H14E_prov_vardiya_kisi_tavan", *_kt14e)
     _pv_hi_az = []
-    _pv_kod = {b: k for k, (b, _e) in PROV_HI.items()}   # başlangıç → sözde-vardiya kodu
+    _pv_zor_kisi = sum(PROV_HI_KISI[k] for k in PROV_HI_ZORUNLU)
     for ds in _pv_hi_gun:                          # (c)
-        for bas in _phz:
-            _bb = model.NewBoolVar(f"provhibos_{ds}_{bas}".replace(":", ""))
-            prov_hi_bos[(ds, bas)] = _bb
-            model.Add(sum(_pv_slot.get((ds, bas), [])) + _bb >= 1)
+        for v in sorted(PROV_HI_ZORUNLU):
+            _kv = PROV_HI_KISI[v]
+            if _kv <= 0:
+                continue
+            _bb = model.NewIntVar(0, _kv, f"provhibos_{ds}_{v}")
+            prov_hi_bos[(ds, v)] = _bb
+            model.Add(sum(_pv_slot.get((ds, v), [])) + _bb >= _kv)
             amac.append(PROVIZYON["W_PROV_HI_BOS"] * _bb)
-        # ön kontrol: o gün zorunlu başlangıçları dolduracak kadar müsait provizyoncu var mı
+        # ön kontrol: o gün zorunlu vardiyaları dolduracak kadar müsait provizyoncu var mı
         _mus = [a for a in prov_agents
-                if any(_kova_calisabilir(a, ds, _pv_kod[b]) for b in _phz)]
-        if len(_mus) < len(_phz):
+                if any(_kova_calisabilir(a, ds, k) for k in PROV_HI_ZORUNLU)]
+        if len(_mus) < _pv_zor_kisi:
             _pv_hi_az.append((ds, len(_mus)))
     _pv_wk = {}                                    # (d)
-    for (a, wk, bas), _xs in _pv_tip.items():
-        _ind = model.NewBoolVar(f"provtip_{a}_{wk[0]}{wk[1]}_{bas}".replace(":", ""))
+    _pv_ab = {}                                    # (e) (agent, hat kodu) → [hafta göstergesi]
+    for (a, wk, v), _xs in _pv_tip.items():
+        _ind = model.NewBoolVar(f"provtip_{a}_{wk[0]}{wk[1]}_{v}")
         for _xv in _xs:
             model.Add(_ind >= _xv)
+        model.Add(_ind <= sum(_xs))                # (e) çalışmadan "o tipte" sayılamaz
         _pv_wk.setdefault((a, wk), []).append(_ind)
+        _pv_ab.setdefault((a, v), []).append(_ind)
     for (a, wk), _inds in _pv_wk.items():
         if len(_inds) <= 1:
             continue
@@ -2576,26 +2653,38 @@ if prov_agents:
         model.Add(_dg >= sum(_inds) - 1)
         amac.append(PROVIZYON["W_PROV_HI_DEGISIM"] * _dg)
         prov_hi_degisim[(a, wk)] = _dg
+    if PROVIZYON.get("W_PROV_TIP_DENGE"):          # (e)
+        for (a, v), _inds in _pv_ab.items():
+            _te = model.NewBoolVar(f"provtipeksik_{a}_{v}")
+            model.Add(sum(_inds) + _te >= 1)
+            amac.append(PROVIZYON["W_PROV_TIP_DENGE"] * _te)
+            prov_tip_eksik[(a, v)] = _te
 
     print(f"provizyon hafta içi hat [H14E]: {len(prov_agents)} agent, "
-          f"{len(_pv_hi_gun)} hafta içi günü, sözde-vardiya "
-          f"{' / '.join(f'{b}-{e}' for b, e in PROV_HI.values())} (coverage dışı)")
+          f"{len(_pv_hi_gun)} hafta içi günü (coverage dışı)")
+    for k in PROV_HI:
+        print(f"    {_pv_etk(k)}  kişi {PROV_HI_KISI[k]}  "
+              + ("ZORUNLU" if k in PROV_HI_ZORUNLU else "feda edilebilir"))
     print(f"  (a) SERT: provizyoncuya gerçek kova kapatıldı: {_pv_n_a}  |  "
           f"diğerlerine sözde-vardiya yasağı: {_pv_n_yasak}")
-    print(f"  (b) SERT: her (gün, vardiya) ≤1 provizyoncu — {len(_kt14e)} kısıt")
-    print(f"  (c) SERT: {_phz} her gün ≥1 provizyoncu — {len(prov_hi_bos)} (gün, başlangıç), "
-          f"kaçış ağ. {PROVIZYON['W_PROV_HI_BOS']}")
+    print(f"  (b) SERT: her (gün, vardiya) ≤kişi provizyoncu — {len(_kt14e)} kısıt")
+    print(f"  (c) SERT: zorunlu vardiyalar her gün ≥kişi — {len(prov_hi_bos)} (gün, vardiya), "
+          f"eksik kişi kaçış ağ. {PROVIZYON['W_PROV_HI_BOS']}")
     print(f"  (d) yumuşak: hafta içi vardiya değişimi ağ. {PROVIZYON['W_PROV_HI_DEGISIM']}")
+    print(f"  (e) yumuşak: ayda her tipte ≥1 hafta — {len(prov_tip_eksik)} (agent, tip), "
+          f"eksik tip ağ. {PROVIZYON.get('W_PROV_TIP_DENGE', 0)}"
+          + ("" if prov_tip_eksik else "  [KAPALI]"))
     if _pv_hi_az:
         print(f"  ⚠ {len(_pv_hi_az)} hafta içi gününde müsait provizyoncu "
-              f"<{len(_phz)} → en az bir zorunlu vardiya boş kalacak: {_pv_hi_az[:8]}")
+              f"<{_pv_zor_kisi} (zorunlu kişi toplamı) → zorunlu vardiya eksik kalacak: "
+              f"{_pv_hi_az[:8]}")
     else:
-        print(f"  ✓ her hafta içi gününde ≥{len(_phz)} müsait provizyoncu var "
+        print(f"  ✓ her hafta içi gününde ≥{_pv_zor_kisi} müsait provizyoncu var "
               f"(izin/off_t2 hariç; kota/mesai/dinlenme burada yok)")
     _pv_sabah_hi = sorted(prov_agents & sabah_agents)
     if _pv_sabah_hi:
-        print(f"  ⚠ sabahçı provizyoncu {_pv_sabah_hi}: 15-24'e giremez (H13) → 15'i "
-              f"diğerleri taşır")
+        print(f"  ⚠ sabahçı provizyoncu {_pv_sabah_hi}: bitişi >20:00 hat vardiyalarına "
+              f"giremez (H13) → onları diğerleri taşır")
 else:
     print("provizyon hafta içi hat [H14E]: KAPALI")
 
@@ -4344,6 +4433,20 @@ if prov_agents:
           f"{_pv_mh} mesai (eksik gün ağ. {PROVIZYON['W_PROV_MESAI']}); MESAI_TOL "
           f"oransal tavanından muaf"
           + (f"  |  mesai yapamayan provizyoncu: {_pv_mesaisiz}" if _pv_mesaisiz else ""))
+    # HAT KAPASİTE ÖN KONTROLÜ (H0 hi_hat + hs_kisi): provizyoncular yalnız
+    # sözde-vardiyalarda çalışır → hat kişi-günü kota + mesai hedefini taşımalı.
+    _pv_kap = (sum(PROV_HI_KISI.values())
+               * sum(1 for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() < 5)
+               + int(PROVIZYON["hs_kisi"])
+               * sum(1 for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5))
+    _pv_kota = sum(kota_map.get(a, 0) for a in prov_agents)
+    _pv_ihtiyac = _pv_kota + _pv_mh * len(prov_mesai_eksik)
+    print(f"  hat kapasitesi: {_pv_kap} kişi-gün (hafta içi Σkişi {sum(PROV_HI_KISI.values())} "
+          f"+ hafta sonu {PROVIZYON['hs_kisi']}/gün)  |  provizyoncu Σkota {_pv_kota} + "
+          f"mesai hedefi → {_pv_ihtiyac}")
+    if _pv_kap < _pv_ihtiyac:
+        print(f"  ⚠ hat DAR: {_pv_ihtiyac - _pv_kap} kişi-gün eksik → mesai hedefi / kota "
+              f"tutmaz (kaçışlar devreye girer). H0 hi_hat'e kişi ya da vardiya ekle.")
 
 
 # %% [HÜCRE 20F] — YILLIK MESAİ SAAT TAVANI (SERT, eşik kapısı) ────────
@@ -6206,12 +6309,19 @@ if prov_agents:
     _pv_calisan = {r.tarih for r in _pv_sonuc.itertuples()
                    if r.vardiya == PROV_VARDIYA}
     _pv_muaf = sorted(g for g, _mv in prov_gun_muaf.items() if solver.Value(_mv))
-    _i = [(g, "o gün hiç provizyoncu yok") for g in prov_gun_muaf
-          if g not in _pv_muaf and g not in _pv_calisan]
-    _pv_fz = {g: solver.Value(v) + 1 for g, v in prov_hs_fazla.items() if solver.Value(v)}
-    print(f"  ⓘ H14D hafta sonu 1'den fazla provizyoncu (kaçışlı, yumuşak): {len(_pv_fz)} gün"
+    _pv_hk = int(PROVIZYON["hs_kisi"])
+    _pv_gs = _pv_sonuc[_pv_sonuc["vardiya"] == PROV_VARDIYA].groupby("tarih").size()
+    _i = [(g, f"{int(_pv_gs.get(g, 0))} provizyoncu") for g in prov_gun_muaf
+          if g not in _pv_muaf and _pv_gs.get(g, 0) < _pv_hk]
+    _pv_fz = {g: int(_pv_gs.get(g, 0)) for g in prov_gun_muaf if _pv_gs.get(g, 0) > _pv_hk}
+    print(f"  ⓘ H14D hafta sonu {_pv_hk}'den fazla provizyoncu (kaçışlı, yumuşak): {len(_pv_fz)} gün"
           + (f" → {_pv_fz}" if _pv_fz else ""))
-    _kd_ekle("H14D her hafta sonu GÜNÜ ≥1 provizyoncu", "hafta sonu günü", _i,
+    _pv_ha = _pv_sonuc[_pv_sonuc["vardiya"] == PROV_VARDIYA].groupby("agent").size()
+    print(f"  ⓘ H14D hafta sonu adaleti (gün / pay):  "
+          + "  ".join(f"{a}: {int(_pv_ha.get(a, 0))}/" + (f"{lo}" if lo == hi else f"{lo}-{hi}")
+                      + ("" if lo <= _pv_ha.get(a, 0) <= hi else " ←")
+                      for a, (lo, hi) in sorted(prov_hs_pay.items())))
+    _kd_ekle(f"H14D her hafta sonu GÜNÜ ≥{_pv_hk} provizyoncu", "hafta sonu günü", _i,
              (f"{len(_pv_muaf)} gün MUAF (hiç müsait provizyoncu yok / H18 ile "
               f"çelişti): {_pv_muaf}" if _pv_muaf else "muaf gün yok"))
     _pv_kac = {k for k, _kv in prov_cift_kacis.items() if solver.Value(_kv)}
@@ -6233,27 +6343,35 @@ if prov_agents:
     _i = [(r.agent, f"{r.tarih}: {r.saat}") for r in _pv_hi.itertuples()
           if r.vardiya not in PROV_HI]
     _kd_ekle("H14E provizyoncu hafta içi yalnız sözde-vardiya", "agent×gün", _i,
-             f"izinli: {' / '.join(f'{b}-{e}' for b, e in PROV_HI.values())}")
+             f"izinli: {' / '.join(_pv_etk(k) for k in PROV_HI)}")
     _i = [(r.agent, f"{r.tarih}: {r.vardiya}")
           for r in df_sonuc[~df_sonuc["agent"].isin(prov_agents)
                             & df_sonuc["vardiya"].isin(PROV_SOZDE)].itertuples()]
     _kd_ekle("H14D/E sözde-vardiya yalnız provizyoncu", "agent×gün", _i, "")
-    _pv_bas = _pv_hi[_pv_hi["vardiya"].isin(PROV_HI)].assign(
-        bas=lambda df: df["vardiya"].map(lambda v: PROV_HI[v][0]))
-    _i = [(f"{g} {b}", f"{n} provizyoncu")
-          for (g, b), n in _pv_bas.groupby(["tarih", "bas"]).size().items() if n > 1]
-    _kd_ekle("H14E her vardiyada ≤1 provizyoncu", "gün×başlangıç", _i, "")
-    _pv_dolu = set(zip(_pv_bas["tarih"], _pv_bas["bas"]))
-    _pv_hi_muaf = sorted(k for k, _bv in prov_hi_bos.items() if solver.Value(_bv))
-    _i = [(f"{g} {b}", "provizyoncu yok") for (g, b) in prov_hi_bos
-          if (g, b) not in _pv_dolu and (g, b) not in _pv_hi_muaf]
-    _kd_ekle(f"H14E {PROVIZYON['hi_zorunlu']} her hafta içi günü ≥1 provizyoncu",
-             "gün×başlangıç", _i,
-             (f"{len(_pv_hi_muaf)} BOŞ (kaçış — müsait provizyoncu yetmedi): "
-              f"{[f'{g} {b}' for g, b in _pv_hi_muaf]}" if _pv_hi_muaf else "boş kalan yok"))
+    _pv_bas = _pv_hi[_pv_hi["vardiya"].isin(PROV_HI)]
+    _pv_gv = _pv_bas.groupby(["tarih", "vardiya"]).size()
+    _i = [(f"{g} {_pv_etk(v)}", f"{n} provizyoncu > kişi {PROV_HI_KISI[v]}")
+          for (g, v), n in _pv_gv.items() if n > PROV_HI_KISI[v]]
+    _kd_ekle("H14E her hat vardiyasında ≤kişi provizyoncu", "gün×vardiya", _i, "")
+    _pv_hi_muaf = {k: solver.Value(_bv) for k, _bv in prov_hi_bos.items() if solver.Value(_bv)}
+    _i = [(f"{g} {_pv_etk(v)}", f"{int(_pv_gv.get((g, v), 0))} < kişi {PROV_HI_KISI[v]}")
+          for (g, v) in prov_hi_bos
+          if _pv_gv.get((g, v), 0) + _pv_hi_muaf.get((g, v), 0) < PROV_HI_KISI[v]]
+    _kd_ekle("H14E zorunlu hat vardiyaları her hafta içi günü ≥kişi", "gün×vardiya", _i,
+             (f"{len(_pv_hi_muaf)} EKSİK (kaçış — müsait provizyoncu yetmedi): "
+              f"{[f'{g} {_pv_etk(v)}' for g, v in _pv_hi_muaf]}" if _pv_hi_muaf
+              else "eksik kalan yok"))
     _pv_ms = {a: solver.Value(mesai_ay[a]) for a in sorted(prov_agents) if a in mesai_ay}
     print(f"  ⓘ H14E provizyoncu mesai (hedef {min(PROVIZYON.get('mesai_hedef', 0), MAX_MESAI)}, "
           f"yumuşak): {_pv_ms}")
+    _pv_tw = (_pv_bas.assign(hafta=_pv_bas["tarih"].map(
+                  lambda ds: dt.date.fromisoformat(ds).isocalendar()[1]))
+              .groupby(["agent", "vardiya"])["hafta"].nunique())
+    print(f"  ⓘ H14E tip dengesi (hafta sayısı, hedef her tipte ≥1):")
+    for a in sorted(prov_agents):
+        _tw = {_pv_etk(k): int(_pv_tw.get((a, k), 0)) for k in PROV_HI}
+        _ex = [b for b, n in _tw.items() if n == 0]
+        print(f"      {a}: {_tw}" + (f"  ← hiç yok: {_ex}" if _ex else ""))
     _pv_dg = {k: solver.Value(v) for k, v in prov_hi_degisim.items() if solver.Value(v)}
     print(f"  ⓘ H14E hafta içi vardiya değişimi (yumuşak): {len(_pv_dg)} (agent, hafta)"
           + (f" → {[(a, f'W{w[1]}', n) for (a, w), n in sorted(_pv_dg.items())]}"
@@ -7562,7 +7680,7 @@ _paket31 = {
             "atanan": "modelin fiilen atadığı kişi (arife hariç, coverage ölçüsü)",
             "arife":  "arife yarım vardiyası — coverage'a girmeyen ek kişi",
             "fark":   "atanan − talep  (eksi = açık)",
-            "prov":   "provizyon (h.sonu flexy 10-14 + 18-22, h.içi hat 09/12/15) — coverage dışı ek kişi",
+            "prov":   "provizyon (h.sonu flexy 10-14 + 18-22, h.içi hat H0 hi_hat) — coverage dışı ek kişi",
             "sahada": "atanan + arife + prov (gerçek çağrıyla kıyas için)",
         },
     },
