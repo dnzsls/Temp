@@ -32,7 +32,7 @@ KURUMSAL v2 (kitle v7_gpt üzerine kuruldu, 2026-11-09) — KİTLEDEN FARKLAR:
     COVERAGE DIŞI (hafta sonu flexy gibi). H19 / H19E / H20 / H20H uygulanmaz.
     Ayda mesai_hedef(2) mesai (yumuşak, ağır) ve MESAI_TOL oransal tavanından muaf;
     hafta sonu her gün hs_kisi (1) provizyoncu (iki yönde kaçışlı); hafta sonu gün
-    sayısı müsaitliğe orantılı adil pay (W_PROV_HS_DENGE) → 2 mesai + 1 norm.
+    sayısı eşit adil pay, müsaitlikle sınırlı (W_PROV_HS_DENGE) → 2 mesai + 1 norm.
     Ekip planı: MF37 = mesai flexy.
   • v2'de kitleden GELEN kurallar (kullanıcı kararı 2026-11-09, hepsi): H10 esnek
     band, H18 çift off esnek, H18E h.sonu ≤1 gün (HS_TEK_GUN), H18M mesaiye kalamaz
@@ -170,6 +170,7 @@ GİRDİLER (hepsi GERÇEK — dummy yok):
 
 import pickle
 import math
+from fractions import Fraction
 import datetime as dt
 import pandas as pd
 from ortools.sat.python import cp_model
@@ -625,9 +626,11 @@ W_SINIR_MOD     = 10           # önceki ayda İZİNLİ/OFF olan üyenin YUMUŞA
 #   çalışmazdı. Artık hi_hat listesi (saat, kişi, zorunlu) elle doldurulur;
 #   hafta sonu kişi sayısı hs_kisi. Eski hi_vardiyalar/hi_zorunlu kaldırıldı.
 # HAFTA SONU ADALETİ (W_PROV_HS_DENGE, 2026-11-13): ekip planında herkes 2 mesai
-#   + 1 norm (3 h.sonu günü); model 4/3/2 dağıtmıştı (norm 2/1/0). Pay = toplam
-#   provizyon h.sonu günü × kişinin müsait h.sonu günü ÷ Σ müsait → eşit
-#   müsaitse eşit, izinli olanın payı küçük. Mesai hedefinin (300) altında.
+#   + 1 norm (3 h.sonu günü); model 4/3/2 dağıtmıştı (norm 2/1/0). Pay EŞİT
+#   (2026-11-16): toplam provizyon h.sonu günü kişilere eşit bölünür; yalnız
+#   eşit payı çalışamayacak kadar az müsait olan (izin) müsait olduğu kadar alır,
+#   kalan diğerlerine eşit dağılır. Kişi sayısından bağımsız (3, 4, 5 …).
+#   Mesai hedefinin (300) ve Cmt+Pzr kaçışının (200) altında.
 # Flag kolonu df_agents'te yoksa ya da enabled=False ise HİÇBİR ŞEY kurulmaz.
 PROVIZYON = {
     'enabled': True,
@@ -637,8 +640,8 @@ PROVIZYON = {
     'W_PROV_CIFT_GUN': 200,    # aynı provizyoncu Cmt+Pzr birlikte (kaçış; < W_PROV_GUN_MUAF)
     'hs_kisi': 1,              # hafta sonu her GÜN flexy'de kaç provizyoncu (altı W_PROV_GUN_MUAF,
                                #   üstü W_PROV_HS_FAZLA ile kaçışlı)
-    'W_PROV_HS_DENGE': 150,    # provizyoncunun hafta sonu gün sayısı adil payının (müsait gün
-                               #   orantılı, alt/üst yuvarlama) dışında kalan her gün; 0 → kapalı
+    'W_PROV_HS_DENGE': 150,    # provizyoncunun hafta sonu gün sayısı adil payının (eşit,
+                               #   müsaitlikle sınırlı, alt/üst yuvarlama) dışında kalan her gün; 0 → kapalı
     # ── hafta içi hat (H14E) — KÜTÜPHANE: ekip elle doldurur ──
     # (başlangıç, bitiş, kişi, zorunlu)   bitiş "00:00" = 24:00
     #   kişi    : o vardiyada her hafta içi günü EN FAZLA bu kadar provizyoncu (sert)
@@ -2456,7 +2459,13 @@ print(f"  toplam tip_yasak: {len(tip_yasak)} (agent,tip)  [kıdem + genel]")
 #       iki günü de çalışır (gün boş kalmaz).
 #   (e) YUMUŞAK: hafta sonu adaleti — provizyoncunun h.sonu gün sayısı adil
 #       payın [alt, üst] yuvarlamasında; dışındaki her gün W_PROV_HS_DENGE.
-#       pay = hs_kisi × h.sonu gün sayısı × müsait_a ÷ Σ müsait
+#       pay = EŞİT pay, kişisel tavanla sınırlı (2026-11-16; önceden müsaitliğe
+#       orantılıydı → izinli biri varken 4/3/2 cezasız kalıyordu)
+#         toplam = hs_kisi × h.sonu gün sayısı
+#         tavan_a = müsait günlerinin düştüğü hafta sonu sayısı ((d) yüzünden)
+#         tavanı ortak seviyenin altında kalan tavanını alır, kalan eşit bölünür
+#         örnek 9 gün: 3 kişi → 3/3/3 (biri 6/9 müsait olsa da); 4 kişi → 2-3;
+#         biri yalnız 1 gün müsait → o 1, diğer ikisi 4
 #       (müsait = flexy değişkeni açık + _kova_calisabilir; izin/off_t2/hamile düşer)
 #   H18 (ayda ≥1 çift off) provizyonculara da uygulanır → offlar dağılır.
 # Hamile/süt provizyoncu hafta sonu çalışamaz (H14 kazanır); mesaiye kalamaz
@@ -2515,14 +2524,28 @@ if prov_agents:
     if PROVIZYON.get("W_PROV_HS_DENGE"):          # (e) hafta sonu adaleti
         _pv_mus = {a: [ds for ds in _pv_hs_gun if _kova_calisabilir(a, ds, PROV_VARDIYA)]
                    for a in sorted(prov_agents)}
-        _pv_mus_top = sum(len(g) for g in _pv_mus.values())
-        _pv_hs_top = _pv_hk * len(_pv_hs_gun)
+        # kişisel tavan = müsait gününün düştüğü HAFTA SONU sayısı ((d): Cmt+Pzr birlikte yok)
+        _pv_tavan = {a: len({dt.date.fromisoformat(ds).isocalendar()[:2] for ds in _gl})
+                     for a, _gl in _pv_mus.items() if _gl}
+        # eşit pay, tavanla sınırlı: tavanı ortak seviyenin altında kalan tavanını alır,
+        # kalan günler diğerlerine eşit bölünür (kişi sayısından bağımsız)
+        _kalan = Fraction(_pv_hk * len(_pv_hs_gun))
+        _acik = sorted(_pv_tavan, key=lambda a: _pv_tavan[a])
+        _pv_pay = {}
+        while _acik:
+            _sev = _kalan / len(_acik)
+            if _pv_tavan[_acik[0]] <= _sev:
+                _a0 = _acik.pop(0)
+                _pv_pay[_a0] = Fraction(_pv_tavan[_a0])
+                _kalan -= _pv_pay[_a0]
+            else:
+                _pv_pay.update({a: _sev for a in _acik})
+                break
         for a, _gl in _pv_mus.items():
             if not _gl:
                 continue
-            _pay = _pv_hs_top * len(_gl) / _pv_mus_top
-            _alt = min(int(_pay), len(_gl))                 # alt yuvarlama
-            _ust = min(int(-(-_pay // 1)), len(_gl))        # üst yuvarlama
+            _alt = min(math.floor(_pv_pay[a]), _pv_tavan[a])   # alt yuvarlama
+            _ust = min(math.ceil(_pv_pay[a]), _pv_tavan[a])    # üst yuvarlama
             _hs_a = sum(x[(a, ds, PROV_VARDIYA)] for ds in _gl)
             _sp = model.NewIntVar(0, len(_gl), f"provhsdenge_{a}")
             model.Add(_sp >= _alt - _hs_a)
@@ -2539,7 +2562,7 @@ if prov_agents:
         print(f"  (c') hafta sonu günü TAM {_pv_hk} hedefi: fazla her provizyoncu ağ. "
               f"{PROVIZYON['W_PROV_HS_FAZLA']} (kaçışlı)")
     if prov_hs_pay:
-        print(f"  (e) yumuşak: hafta sonu adil pay (gün, müsaitliğe orantılı) ağ. "
+        print(f"  (e) yumuşak: hafta sonu adil pay (gün, eşit; müsait hafta sonu ile sınırlı) ağ. "
               f"{PROVIZYON['W_PROV_HS_DENGE']} → "
               + ", ".join(f"{a}: {lo}" + (f"-{hi}" if hi != lo else "")
                           for a, (lo, hi) in prov_hs_pay.items()))
