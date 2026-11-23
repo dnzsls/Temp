@@ -355,6 +355,9 @@ INGILIZCE = {
     'W_AKSAM_BONUS': 5,      # akşamda aksam_min üstü bonus kişi eksikse (gün başına; küçük tut)
     'W_FAZLA_GECE': 50,      # bu modelin gece gününde gece_min ÜSTÜ her İngilizceci
                              #   (İngilizceci normal gece nöbetçisi gibi harcanmasın)
+    'W_FAZLA_SABAH': 50,     # takımından 08'e GEÇEN İngilizceci, haftada sabah_min üstü
+                             #   (hafta başına kişi; takımıyla 08'de olan / mecburi gelen
+                             #   sabahçı varsa geçen herkes cezalı) — H19
 }
 # MUAFİYET: İngilizceci H16D (ayda ≤MAX_AKSAM_HAFTA akşam/gece haftası) ve H14C
 # (gece lokasyon nöbeti + takım başına gece tavanı) kurallarına girmez.
@@ -3738,6 +3741,7 @@ _h19_gece_tip = set(GECE_BASLANGIC) if GECE_TAKIM_DISI else set()
 _h19_cezali = []           # W_TAKIM cezası UYGULANACAK sapma değişkenleri
 _h19_gece_muaf = 0         # gece nöbetçisi olduğu için cezadan muaf (üye,hafta)
 takim_tip, takim_sapan = {}, {}
+eng19_sabah = {}           # hafta → [(agent, geçen, takımıyla 08, mecburi)] — 08 fazlası
 n_y = 0
 _h19_elenen = []           # (takım,hafta,tip) — eski ölçüde seçilebilirdi, artık değil
 _h19_gevsek = []           # (takım,hafta) — hiçbir tip eşiği geçmedi → eski ölçüye düşüldü
@@ -3801,19 +3805,47 @@ for T, uyeler in takimlar.items():
             _gn19 = gece_hafta.get((a, wk))
             # İNGİLİZCECİ KAPISI (H14F): (1) sabah_saat'e geçebilir — AMA yalnız takımı
             # sabah_grubu'ndaysa (ya da zaten sabah_saat'teyse); akşam takımındaki geçemez.
+            # (1b) MECBURİ (kullanıcı 2026-11-23): takımı akşamda (sabah_grubu
+            #      dışı) ve kendisi o tipi YAPAMIYORSA (sabahçı/hamile) → sabah_saat'e
+            #      GİDER (08:30 vb. değil). 08 ihtiyacına sayılır.
             # (2) gece takım tipiyse (GECE_TAKIM_DISI kapalı) geceye ayrılabilir.
-            # İkisi de kural gereği → W_TAKIM cezasından MUAF. H20 (haftada tek tip)
+            # Hepsi kural gereği → W_TAKIM cezasından MUAF. H20 (haftada tek tip)
             # geçen İngilizceciyi o hafta boyunca orada tutar.
+            # 08 FAZLASI (W_FAZLA_SABAH): takımı sabah_grubu'nda olup 08'e GEÇEN
+            # İngilizceci ("geçen") haftada en çok sabah_min kişi cezasız; o hafta
+            # takımıyla zaten 08'de olan ya da (1b) ile mecburen gelen varsa geçen
+            # herkes cezalı. Hesap döngü sonunda.
             _eng19 = []
             if a in eng_agents:
                 _es19 = INGILIZCE["hafta_ici"]["sabah_saat"]
+                _sgr19 = INGILIZCE["hafta_ici"]["sabah_grubu"]
                 _s19 = agent_tip.get((a, wk, _es19))
                 if _s19 is not None:
+                    _mec19 = [b for b in secenek               # (1b) mecburi tipler
+                              if b not in _sgr19 and b != _es19
+                              and b not in GECE_BASLANGIC
+                              and ((a, wk, b) not in agent_tip or (a, b) in tip_yasak)]
                     _sg19 = [yv[b] for b in secenek
-                             if b in INGILIZCE["hafta_ici"]["sabah_grubu"] or b == _es19]
+                             if b in _sgr19 or b == _es19 or b in _mec19]
                     _kt_h19.append(model.Add(_s19 <= sum(_sg19)) if _sg19
                                    else model.Add(_s19 == 0))
+                    for b in _mec19:
+                        _kt_h19.append(model.Add(_s19 >= yv[b]))   # mecburen 08
                     _eng19.append(_s19)
+                    # 08 fazlası için haftalık göstergeler
+                    _gec_y = [yv[b] for b in secenek if b in _sgr19 and b != _es19]
+                    _gec = model.NewBoolVar(f"enggec_{a}_{wk[0]}{wk[1]}")
+                    if _gec_y:
+                        model.Add(_gec >= _s19 + sum(_gec_y) - 1)
+                    else:
+                        model.Add(_gec == 0)
+                    _dog = model.NewBoolVar(f"engdog_{a}_{wk[0]}{wk[1]}")   # takımıyla 08'de
+                    if _es19 in yv:
+                        model.Add(_dog >= _s19 + yv[_es19] - 1)
+                    else:
+                        model.Add(_dog == 0)
+                    eng19_sabah.setdefault(wk, []).append(
+                        (a, _gec, _dog, sum(yv[b] for b in _mec19) if _mec19 else 0))
                 if _gn19 is None:
                     _eng19 += [agent_tip[(a, wk, g)] for g in GECE_BASLANGIC
                                if (a, wk, g) in agent_tip]
@@ -3844,10 +3876,32 @@ _tes_ekle("H19_takim_tek_tip", *_kt_h19)
 if _h19_cezali:
     amac.append(W_TAKIM * sum(_h19_cezali))
 
+# İNGİLİZCECİ 08 FAZLASI (yumuşak): hafta başına "geçen" sayısı − izin hakkı
+#   izin hakkı (hak) ≤ sabah_min; o hafta takımıyla 08'de olan ya da mecburen
+#   gelen İngilizceci varsa hak 0 → geçen herkes cezalı.
+_eng19_fs_n = 0
+_W_FS = INGILIZCE.get("W_FAZLA_SABAH", 0)
+if _W_FS and eng19_sabah:
+    _smin19 = INGILIZCE["hafta_ici"].get("sabah_min", 0)
+    for wk, _lst in eng19_sabah.items():
+        _hak = model.NewIntVar(0, _smin19, f"engsh_{wk[0]}{wk[1]}")
+        for _a, _gec, _dog, _mec in _lst if _smin19 >= 1 else []:   # min 0 → hak zaten 0
+            model.Add(_hak + _dog <= _smin19)        # takımıyla 08'de olan hakkı yer
+            if not isinstance(_mec, int):
+                model.Add(_hak + _mec <= _smin19)    # mecburen gelen sabahçı da
+        _fz = model.NewIntVar(0, len(_lst), f"engsf_{wk[0]}{wk[1]}")
+        model.Add(_fz >= sum(_g for _a, _g, _d, _m in _lst) - _hak)
+        amac.append(_W_FS * _fz)
+        _eng19_fs_n += 1
+
 print(f"takım bütünlüğü (haftalık): {len(takimlar)} takım, {n_y} (takım,hafta) tek-tip "
       f"seçimi [SERT]  |  {len(takim_sapan)} (üye,hafta) sapma değişkeni "
       f"— ayrılma SADECE fiziksel imkânsızlıkta (ağ. {W_TAKIM})")
 print(f"  agent-hafta-tip göstergesi: {len(agent_tip)} (H20 ile ortak)")
+if eng_agents:
+    print(f"  İngilizceci: takımı akşamda + kendisi yapamıyorsa MECBUREN "
+          f"{INGILIZCE['hafta_ici']['sabah_saat']}  |  08 fazlası cezası {_eng19_fs_n} hafta "
+          f"(ağ. {_W_FS}, takımından geçen sabah_min üstü)")
 if GECE_TAKIM_DISI:
     print(f"  GECE TAKIM TİPİ DEĞİL (H14C): {sorted(_h19_gece_tip)} takımın seçenek "
           f"listesinden çıkarıldı → hiçbir takım geceye atanmaz")
@@ -7440,6 +7494,26 @@ for T, uyeler in takimlar.items():
 _kd_ekle("H19 takım hafta içi TEK tip (sapma yalnız fiziksel imkânsızlıkta)",
          "üye×hafta", _i, "tatil + sınır haftası muaf; takım tipi = üyelerin MOD tipi")
 
+# İngilizceci (1b): takımı akşamda + kendisi o tipi yapamıyor → sabah_saat'te olmalı
+_i = []
+if eng_agents:
+    _es28 = INGILIZCE["hafta_ici"]["sabah_saat"]
+    _sg28 = INGILIZCE["hafta_ici"]["sabah_grubu"]
+    for (T, wk), _mod in _kd_takim_tip.items():
+        if _mod in _sg28 or _mod == _es28 or _mod in GECE_BASLANGIC:
+            continue
+        for a in takimlar.get(T, []):
+            if a not in eng_agents or (a, wk, _es28) not in agent_tip:
+                continue
+            if not ((a, _mod) in tip_yasak or (a, wk, _mod) not in agent_tip):
+                continue                       # akşamı yapabiliyor → takımıyla kalır
+            _t = _kd_hafta_tip(a, haftalar[wk])
+            if _t and _t != {_es28}:
+                _i.append((a, f"{takim_gor(T, 20)} {wk[0]}-W{wk[1]}: takım {_mod}, "
+                              f"üye {sorted(_t)} (beklenen {_es28})"))
+_kd_ekle("H19 İngilizceci sabahçı: takımı akşamda → 08", "üye×hafta", _i,
+         "sabahçı/hamile İngilizceci takımının akşam tipine giremiyorsa 08'e gider")
+
 _i = [(a, f"{wk[0]}-W{wk[1]}: {_o} off")
       for a in _kd_agent for wk, gunler in haftalar.items()
       for _o in [sum(1 for ds in gunler if roster.at[a, ds] in ("off", "off_t", "off_t2")
@@ -8046,6 +8120,10 @@ _ad_tkm_eng = {T: sum(1 for a in uy if a in eng_agents) for T, uy in takimlar.it
 _ad_tkm_tip = {}                                   # (takım, hafta) → o haftanın tipi (mod, gece hariç)
 for (T, wk), g in _ad_hi[_ad_hi["kutu"] != "gece"].groupby(["takim", "hafta"]):
     _ad_tkm_tip[(T, wk)] = g["bas"].mode().iloc[0]
+# (takım, hafta) → o hafta hafta içi geceye giden FARKLI üye sayısı. Gece takım tipi
+# değil (H14C, kişi kişi) → hafta hücresine "· N gece" olarak eklenir.
+_ad_tkm_gece = (_ad_hi[_ad_hi["kutu"] == "gece"].groupby(["takim", "hafta"])["agent"]
+                .nunique().to_dict())
 _ad_tkm_ort_g = _ad_ort(_ad_tkm_gec, takimlar)
 _ad_tkm_ort_b = _ad_ort(_ad_tkm_bu, takimlar)
 _ta_satir = []
@@ -8065,11 +8143,13 @@ for T in sorted(takimlar, key=lambda T: takim_ad_map.get(T, T)):
     _ak_hafta = 0
     for wk in _AD_HAFTA:
         _t = _ad_tkm_tip.get((T, wk), "")
-        _r[_AD_HK[wk]] = _t
+        _ng = _ad_tkm_gece.get((T, wk), 0)
+        _r[_AD_HK[wk]] = (_t or "—") + f" · {_ng} gece" if _ng else _t
         _ak_hafta += int(bool(_t) and _ad_kutu(_t) == "aksam")
     _r["aksam_hafta"] = _ak_hafta
-    _yap = {"aksam": any(a not in sabah_agents for a in _uy),
-            "gece": any(a not in sabah_agents and a not in junior_agents for a in _uy)}
+    # gece takım kararı DEĞİL (H14C kişi kişi dağıtır) → takım durumunda gece
+    # yorumu yapılmaz; gece adaleti adalet_kisi sayfasında (kişi bazlı)
+    _yap = {"aksam": any(a not in sabah_agents for a in _uy), "gece": False}
     _d = _ad_durum(_ad_tkm_gec.get(T), _ad_tkm_bu.get(T), _ad_tkm_ort_g, _ad_tkm_ort_b, _yap)
     if _ak_hafta and gecmis_katsayi.get((T, "aksam")):
         _d.append(f"cezaya rağmen {_ak_hafta} hafta akşam"
@@ -8291,11 +8371,14 @@ LEJANT = [
      "çizelge; ölçü aynı → doğrudan kıyaslanır. En üstteki ORTALAMA satırı kıyas noktası"),
     ("W45 · W46 …",       None, None,
      "Takımın o HAFTA çalıştığı tip (üyelerin en sık başlangıcı, gece hariç). "
+     "'· 2 gece' = o hafta takımdan 2 kişi tek başına geceye gitti (gece takım "
+     "tipi değil, lokasyon nöbetiyle kişi kişi dağıtılır). "
      "Turuncu = akşam · kırmızı = geçmiş cezası (H19B) olduğu hâlde akşam"),
     ("aksam_hafta",       None, None, "Takımın bu ay kaç hafta akşam tipinde olduğu"),
     ("durum",             None, None,
-     "⚠ sürekli akşam/gece = geçmişte ortalamanın %25 üstünde VE bu ay da · "
-     "↓ hiç = geçmişte ortalamanın yarısının altında VE bu ay hiç yok · 'cezaya rağmen N hafta "
+     "⚠ sürekli akşam = geçmişte ortalamanın %25 üstünde VE bu ay da · "
+     "↓ hiç akşam = geçmişte ortalamanın yarısının altında VE bu ay hiç yok · "
+     "GECE burada yorumlanmaz (kişi kişi dağıtılıyor) → adalet_kisi · 'cezaya rağmen N hafta "
      "akşam' = H19B cezası olduğu hâlde akşama gitti (İngilizcecili takımda sebep "
      "çoğunlukla İngilizceci akşam tabanı) · ✓ dengeli"),
     ("--- adalet_kisi SAYFASI ---", None, None, ""),
