@@ -336,9 +336,18 @@ INGILIZCE = {
     # Hafta sonu gecesi de aynı aralıkla gider. Bu modelin günü → gece_min tabanı;
     # başka modelin günü → İngilizceci gecede çalışırsa W_YANLIS_GUN cezası.
     # Listede olmayan gün serbest (taban yok, ceza yok). Liste BOŞSA her gün bu modelin.
+    # Aralıklar Pzt–Pzr (ISO hafta) → hafta sonu gecesi aynı haftanın modeline gider,
+    # "arka arkaya 2 hafta gece" sayımı da hafta bazında. HER AY güncellenir; gold
+    # modelindeki liste BİREBİR aynı olmalı (iki model aynı takvime bakar).
+    # Kasım 2026: kitle 8 / gold 3 İngilizceci → ayın ortasındaki hafta gold,
+    # ay başı/sonu parça haftalar (1 Kasım Pzr, 30 Kasım Pzt) kitle.
     'gece_rotasyon': [
-        # ("2026-12-01", "2026-12-07", "kitle"),
-        # ("2026-12-08", "2026-12-14", "gold"),
+        ("2026-11-01", "2026-11-01", "kitle"),   # W44 (Ekim'den gelen hafta, tek gün)
+        ("2026-11-02", "2026-11-08", "kitle"),   # W45
+        ("2026-11-09", "2026-11-15", "kitle"),   # W46
+        ("2026-11-16", "2026-11-22", "gold"),    # W47
+        ("2026-11-23", "2026-11-29", "kitle"),   # W48
+        ("2026-11-30", "2026-12-06", "kitle"),   # W49 (ayda yalnız 30 Kasım)
     ],
     'W_EKSIK': 300,          # tabanda eksik kalan her İngilizceci (gün başına)
     'W_YANLIS_GUN': 300,     # başka modelin gece gününde gece çalışan her İngilizceci
