@@ -1,3 +1,9 @@
+
+Notebook'a şu hücreleri kopyala: H0, YENİ H19I, H28B. Önceden kopyaladıysan H18E'yi eski haline döndür.
+H0 (TAKIM_AKSAM_TAVAN = 2), YENİ H19I (H19H'den sonra), H28B (denetim satırı)
+
+
+
 # -*- coding: utf-8 -*-
 """
 AGENT DETAYLI MODEL — tek dosya akışı (hücre hücre, detaylı print)
