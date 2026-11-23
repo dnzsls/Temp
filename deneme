@@ -1,9 +1,20 @@
-print("df_agents kolonlarında 'eng' geçenler:", [c for c in df_agents.columns if "eng" in c.lower()])
-if "english_flg" in df_agents.columns:
-    print("df_agents english_flg değerleri:")
-    print(df_agents["english_flg"].value_counts(dropna=False).head(10).to_string())
-print("df_tam'da var mı:", "english_flg" in df_tam.columns)
-if "english_flg" in df_tam.columns:
-    print(df_tam["english_flg"].value_counts(dropna=False).head(10).to_string())
-print("INGILIZCE enabled:", INGILIZCE.get("enabled"), "| flag_kol:", INGILIZCE.get("flag_kol"))
-print("eng_agents:", len(eng_agents), sorted(eng_agents)[:10])
+import collections
+_e = df_sonuc[df_sonuc.agent.isin(eng_agents)].copy()
+_e["hafta"] = _e.tarih.map(lambda d: dt.date.fromisoformat(d).isocalendar()[1])
+_e["hi"] = _e.tarih.map(lambda d: dt.date.fromisoformat(d).weekday() < 5)
+_e["bas"] = _e.saat.str[:5]
+_e["takim"] = _e.agent.map(agent_takim_ad)
+print("1) İngilizceci × hafta → hafta içi başlangıç")
+print(_e[_e.hi].groupby(["hafta", "takim", "agent"]).bas.agg(lambda s: sorted(set(s))).to_string())
+print("\n2) takım başına İngilizceci:")
+for _t, _n in collections.Counter(agent_takim_ad[a] for a in eng_agents).most_common():
+    print(f"   {_n}  {_t}  (takım {len(takimlar.get(agent_takim[next(a for a in eng_agents if agent_takim_ad[a] == _t)], []))} kişi)")
+print("\n3) İngilizcecili takımlar 15:00'i seçebiliyor mu?")
+for T in sorted({agent_takim[a] for a in eng_agents}):
+    _sec = [wk for wk in sorted(haftalar) if (T, wk, "15:00") in takim_tip]
+    _alan = [f"W{wk[1]}" for wk in _sec if solver.Value(takim_tip[(T, wk, "15:00")])]
+    print(f"   {takim_gor(T, 30):<30} 15:00 seçeneği olan hafta {len(_sec)}/{len(haftalar)} | seçilen {_alan}")
+print("\n4) akşam eksik günleri:", sorted(k[0] for k, v in eng_eksik.items()
+                                       if k[1] == "aksam" and solver.Value(v)))
+print("\n5) çözücü:", solver.StatusName(), "| amaç", round(solver.ObjectiveValue()),
+      "| alt sınır", round(solver.BestObjectiveBound()))
