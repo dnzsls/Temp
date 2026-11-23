@@ -29,6 +29,15 @@ for wk in sorted(haftalar):
 print("\n=== 5) Akşam tabanı eksik günler ===")
 print(" ", sorted(k[0] for k, v in eng_eksik.items() if k[1] == "aksam" and solver.Value(v)))
 
-print("\n=== 6) Çözücü ===")
-print(f"  {solver.StatusName()}  |  amaç {round(solver.ObjectiveValue())}  |  "
-      f"alt sınır {round(solver.BestObjectiveBound())}")
+print("=== 6) Çözücü ===")
+print(f"  {solver.StatusName(status)}  |  amaç {round(solver.ObjectiveValue())}  |  "
+      f"alt sınır {round(solver.BestObjectiveBound())}  |  süre {solver.WallTime():.0f} sn")
+
+print("\n=== 7) İngilizcecili takımların geçmiş akşam cezası (H19B) ===")
+for T in sorted({agent_takim[a] for a in eng_agents}, key=takim_gor):
+    print(f"  {takim_gor(T, 40):<40} akşam cezası/hafta {gecmis_katsayi.get((T, 'aksam'), 0)}")
+
+print("\n=== 8) W47 akşam eksik puanı ===")
+_w47 = sum(solver.Value(v) for (ds, k), v in eng_eksik.items()
+           if k == "aksam" and "2026-11-16" <= ds <= "2026-11-20")
+print(f"  eksik kişi-gün {_w47} × {INGILIZCE['W_EKSIK']} = {_w47 * INGILIZCE['W_EKSIK']} puan")
