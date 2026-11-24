@@ -301,7 +301,7 @@ GECE_TEK_TIP_SERT  = True
 # (coverage dışı, yalnız İngilizceci alabilir, iş günü sayılır).
 # Saat listelerinde Model-1'in açmadığı saatler yok sayılır → ileride açılan
 # vardiya kendiliğinden devreye girer.
-# Tabanlar YUMUŞAK (W_EKSIK): eksik kalan her İngilizceci gün başına cezalı.
+# Tabanlar YUMUŞAK: eksik kalan her İngilizceci gün başına cezalı (hafta içi 1000 > hafta sonu 300).
 INGILIZCE = {
     'enabled': True,
     'flag_kol': 'english_flg',
@@ -351,7 +351,10 @@ INGILIZCE = {
         ("2026-11-23", "2026-11-29", "kitle"),   # W48
         ("2026-11-30", "2026-12-06", "kitle"),   # W49 (ayda yalnız 30 Kasım)
     ],
-    'W_EKSIK': 300,          # tabanda eksik kalan her İngilizceci (gün başına)
+    # Tabanda eksik kalan her İngilizceci (gün başına). Hafta içi > hafta sonu:
+    # fire vermek gerekirse HAFTA SONUNDAN verilsin (kullanıcı 2026-11-24).
+    'W_EKSIK_HAFTA_ICI': 1000,
+    'W_EKSIK_HAFTA_SONU': 300,
     'W_YANLIS_GUN': 300,     # başka modelin gece gününde gece çalışan her İngilizceci
     'W_ARDISIK_GECE': 200,   # aynı İngilizceci arka arkaya 2 hafta gece (önceki ayın son haftası dahil)
     'W_AKSAM_BONUS': 5,      # akşamda aksam_min üstü bonus kişi eksikse (gün başına; küçük tut)
@@ -2775,6 +2778,8 @@ else:
 # %% [HÜCRE 14F] — İNGİLİZCECİ: SABAH / AKŞAM / GECE TABANI + GECE ROTASYONU ─
 # Ayarlar ve gerekçe H0 INGILIZCE bloğunda. eng_agents, özel sabah vardiyası
 # (ENG_SABAH) ve ENG_GECE_GUN H8'de kuruldu.
+#   Eksik cezası hafta içi W_EKSIK_HAFTA_ICI (1000) > hafta sonu W_EKSIK_HAFTA_SONU (300)
+#   → fire gerekirse hafta sonundan verilir.
 #   (a) YUMUŞAK: her gün sabah_saat'te ≥ sabah_min İngilizceci (gerçek kova ya da özel)
 #   (b) YUMUŞAK: her gün akşam grubunda ≥ aksam_min İngilizceci
 #       (hafta sonu: aksam_grubu'ndan hiçbiri açık değilse aksam_yedek sayılır)
@@ -2860,7 +2865,9 @@ if eng_agents:
                 eng_bonus[ds] = _bn
             else:
                 model.Add(sum(_xs[_k]) + _e >= _mn)
-            amac.append(_E["W_EKSIK"] * _e)
+            _w_eks = (_E["W_EKSIK_HAFTA_SONU"] if dt.date.fromisoformat(ds).weekday() >= 5
+                      else _E["W_EKSIK_HAFTA_ICI"])
+            amac.append(_w_eks * _e)
             eng_eksik[(ds, _k)] = _e
         if _hedef["gece"] > 0 and _xs["gece"] and _E.get("W_FAZLA_GECE", 0):   # (f)
             _fg = model.NewIntVar(0, len(_xs["gece"]), f"engfg_{ds}")
@@ -2913,7 +2920,8 @@ if eng_agents:
     print(f"  hafta sonu: {_hs['sabah_saat']} ≥{_hs['sabah_min']}  |  akşam "
           f"{_hs['aksam_grubu']} (yedek {_hs.get('aksam_yedek', [])}) ≥{_hs['aksam_min']}  |  "
           f"gece ≥{_hs['gece_min']}")
-    print(f"  taban: {len(eng_eksik)} (gün,kalem) kuruldu, eksik kişi başı ağ. {_E['W_EKSIK']}")
+    print(f"  taban: {len(eng_eksik)} (gün,kalem) kuruldu, eksik kişi başı ağ. hafta içi "
+          f"{_E['W_EKSIK_HAFTA_ICI']} / hafta sonu {_E['W_EKSIK_HAFTA_SONU']}")
     print(f"  başka modelin gece günü: {len(_eng_yanlis)} değişken cezalı "
           f"(ağ. {_E['W_YANLIS_GUN']})  |  ardışık gece haftası: {_eng_ardisik_n} terim "
           f"(ağ. {_E['W_ARDISIK_GECE']}; önceki ay gecesi olan: {len(_eng_onceki_gece)} kişi)")
