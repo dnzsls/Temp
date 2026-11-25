@@ -1,1 +1,18 @@
-print(df_shifts_dict['kitle'][['shift', 'start', 'end', 'company']].to_string())
+_c = CONFIG['forecast_cols']
+_f = df_forecast.copy()
+_f['_t'] = _f[_c['datetime']].astype(str).str.strip().str.split(' ').str[1].str[:5]
+_f['_d'] = pd.to_datetime(_f[_c['date']], dayfirst=True)
+_r = _f[(_f['_d'] == '2026-11-03') & (_f['_t'].isin(['11:00', '11:15']))]
+
+_sq  = CONFIG['sub_queues']['kitle']['queues']
+_alt = [x for sq in _sq for x in (f"{sq}_nof_call", f"{sq}_NOF_CALL", sq) if x in _f.columns]
+_diger = [k for k in _f.columns
+          if k.lower().endswith('_nof_call') and k not in _alt
+          and k not in [_c[f'{q}_total'] for q in CONFIG['queues']]]
+
+print(_r[['_t', _c['kitle_total']] + _alt].set_index('_t').T)
+print("\nkitle toplamı      :", _r[_c['kitle_total']].sum())
+print("alt kuyruk toplamı :", _r[_alt].sum().sum())
+print("\nlistemizde OLMAYAN çağrı kolonları (11:00 + 11:15 toplamı):")
+for k in _diger:
+    print(f"  {k:<35}{_r[k].sum():>8}")
