@@ -1,71 +1,54 @@
-WITH
-slot AS (
-  SELECT DATE '2026-10-01' + (LEVEL - 1) / 48 AS ts
-  FROM dual CONNECT BY LEVEL <= 31 * 48
-),
-kitle_agent AS (
-  SELECT DISTINCT agent_user_code
-  FROM BNS_VP_AGENT_INFORMATIONS_202610_V2
-  WHERE line_based_main_group = 'kitle_cagrilar'
-),
-vardiya AS (
-  SELECT TO_DATE(p.working_date, 'YYYY-MM-DD') AS gun, p.vardiya, 'inhouse' AS sirket
-  FROM BSEN_VP_EKIM_IS_BIRIMI_PLAN_V1 p
-  JOIN kitle_agent k ON k.agent_user_code = p.agent_user_code
-  WHERE REGEXP_LIKE(p.vardiya, '^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$')
-  UNION ALL
-  SELECT TO_DATE(o."DATE", 'YYYY-MM-DD'), o.vardiya, 'outsource'
-  FROM BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_102026 o
-  WHERE REGEXP_LIKE(o.vardiya, '^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$')
-),
-aralik AS (
-  SELECT sirket,
-         gun + (TO_NUMBER(SUBSTR(vardiya,1,2))*60 + TO_NUMBER(SUBSTR(vardiya,4,2))) / 1440 AS bas,
-         gun + (TO_NUMBER(SUBSTR(vardiya,7,2))*60 + TO_NUMBER(SUBSTR(vardiya,10,2))) / 1440
-             + CASE WHEN SUBSTR(vardiya,7,5) <= SUBSTR(vardiya,1,5) THEN 1 ELSE 0 END AS bit
-  FROM vardiya
-),
-sahada AS (
-  SELECT s.ts,
-         SUM(CASE WHEN a.sirket = 'inhouse'   THEN 1 ELSE 0 END) AS inhouse,
-         SUM(CASE WHEN a.sirket = 'outsource' THEN 1 ELSE 0 END) AS outsource
-  FROM slot s
-  JOIN aralik a ON s.ts >= a.bas AND s.ts < a.bit
-  GROUP BY s.ts
-),
-cagri AS (
-  SELECT TO_DATE(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 10), 'YYYY-MM-DD')
-           + (TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 12, 2)) * 60
-              + FLOOR(TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 15, 2)) / 30) * 30) / 1440 AS ts,
-         SUM(m.n_answered)  AS karsilanan,
-         SUM(m.n_abandoned) AS terk
-  FROM ODS_CCINFL.MIM_AG2_QUEUE_SUBHR m
-  JOIN DM_CAD.CAD_MIM_CAPACITY_RESRC_KEY_LKP k
-    ON TO_CHAR(m.resource_key) = TO_CHAR(k.resource_key_code)
-  JOIN DM_CAD.MVA_MIM_CP_RESRC_KEY_X_GRP x
-    ON x.resource_key_id = k.resource_key_id
-   AND TRUNC(m.data_date) BETWEEN x.start_date AND x.end_date
-  WHERE x.resource_group_key_id IN (1, 2, 3, 4, 8, 17, 20, 21)          -- kitle alt kuyrukları
-    AND SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 7) = '2026-10'
-  GROUP BY TO_DATE(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 10), 'YYYY-MM-DD')
-           + (TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 12, 2)) * 60
-              + FLOOR(TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 15, 2)) / 30) * 30) / 1440
-),
-birlesik AS (
-  SELECT c.ts, s.inhouse + s.outsource AS kisi, c.karsilanan, c.terk,
-         CASE WHEN c.terk >= 0.03 * (c.karsilanan + c.terk) THEN 1 ELSE 0 END AS yogun
-  FROM cagri c
-  JOIN sahada s ON s.ts = c.ts
-  WHERE c.ts - TRUNC(c.ts, 'IW') < 5                                     -- yalnız hafta içi
-)
-SELECT TO_CHAR(ts, 'HH24')                                                    AS saat,
-       ROUND(AVG(kisi))                                                       AS ort_plan_kisi,
-       ROUND(AVG(karsilanan))                                                 AS ort_karsilanan,
-       ROUND(100 * SUM(terk) / NULLIF(SUM(karsilanan + terk), 0), 1)          AS terk_yuzde,
-       ROUND(SUM(karsilanan) / NULLIF(SUM(kisi) * 0.5, 0), 1)                 AS kisi_basi_saatte,
-       SUM(yogun)                                                             AS yogun_dilim,
-       ROUND(SUM(CASE WHEN yogun = 1 THEN karsilanan END)
-             / NULLIF(SUM(CASE WHEN yogun = 1 THEN kisi END) * 0.5, 0), 1)    AS yogunda_kisi_basi
-FROM birlesik
-GROUP BY TO_CHAR(ts, 'HH24')
-ORDER BY saat;
+# %% [GRAFİK] — Saatlik shrinkage grafiği (Excel'e koymak için PNG kaydeder)
+import matplotlib.pyplot as plt
+
+def shrinkage_grafigi(kuyruk="kitle", gun_tipi="hafta_ici", esik=18, dosya=True):
+    s = CONFIG['queue_configs'][kuyruk][gun_tipi]['erlang']['shrinkage']
+    saatler = list(range(24))
+    deger = [s.get(h, s.get('default', 0)) * 100 for h in saatler]
+
+    renk = []
+    for v in deger:
+        if v == 0:
+            renk.append('#D9DEE4')      # gri: 0
+        elif v >= esik:
+            renk.append('#B8691F')      # turuncu: eşik ve üstü
+        else:
+            renk.append('#1E6A85')      # mavi
+
+    fig, ax = plt.subplots(figsize=(10, 3.6))
+    ax.bar(saatler, [v if v > 0 else 0.3 for v in deger], color=renk, width=0.7)
+    for h, v in zip(saatler, deger):
+        if v >= esik:
+            ax.text(h, v + 0.6, f"{v:.0f}", ha='center', fontsize=8)
+
+    ax.set_xticks(range(0, 24, 3))
+    ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 3)], fontsize=9)
+    ust = max(25, max(deger) + 5)
+    ax.set_ylim(0, ust)
+    ax.set_yticks(range(0, int(ust) + 1, 10))
+    ax.set_yticklabels([f"%{y}" for y in range(0, int(ust) + 1, 10)], fontsize=9)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True)
+    for k in ('top', 'right', 'left'):
+        ax.spines[k].set_visible(False)
+    ax.set_title(f"Saatlik shrinkage · {kuyruk} · {gun_tipi}  (turuncu: %{esik} ve üstü)",
+                 fontsize=11, loc='left')
+    fig.tight_layout()
+    if dosya:
+        ad = f"shrinkage_{kuyruk}_{gun_tipi}.png"
+        fig.savefig(ad, dpi=200)
+        print("kaydedildi:", ad)
+    plt.show()
+
+shrinkage_grafigi("kitle", "hafta_ici")
+
+
+
+
+
+
+
+
+for q in CONFIG['queues']:
+    for g in ('hafta_ici', 'cumartesi', 'pazar'):
+        shrinkage_grafigi(q, g)
