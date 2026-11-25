@@ -1,15 +1,8 @@
-_c = CONFIG['forecast_cols']
-_alt = [x for sq in CONFIG['sub_queues']['kitle']['queues']
-        for x in (f"{sq}_nof_call", f"{sq}_NOF_CALL", sq) if x in df_forecast.columns]
-_fark = df_forecast[_c['kitle_total']] - df_forecast[_alt].sum(axis=1)
+_k = df_forecast[_c['kitle_total']]
+print("program_44 ay toplamı:", df_forecast['program_44'].sum(), "· fark ay toplamı:", _fark.sum())
+print("program_44 ilk değerler:", df_forecast['program_44'].head(8).tolist())
+print("fark ~ program_44 korelasyonu:", round(_fark.corr(df_forecast['program_44']), 3))
 
-print("AY TOPLAMI   kitle:", df_forecast[_c['kitle_total']].sum(),
-      "· alt kuyruk:", df_forecast[_alt].sum().sum())
-print("15 dk fark (kitle − alt):", _fark.describe().round(2).to_dict())
-print("fark dağılımı:", _fark.round().value_counts().sort_index().to_dict())
-
-_hepsi = {x for q in CONFIG['sub_queues'] for sq in CONFIG['sub_queues'][q].get('queues', [])
-          for x in (f"{sq}_nof_call", f"{sq}_NOF_CALL", sq)}
-_kul = _hepsi | set(_c.values())
-print("hiçbir yerde KULLANILMAYAN sayısal kolonlar:",
-      [k for k in df_forecast.select_dtypes('number').columns if k not in _kul])
+_s = pd.DataFrame({'kitle': _k, 'fark': _fark})
+_s['cagri_bandi'] = pd.cut(_s['kitle'], [-1, 50, 300, 1000, 1e9], labels=['0-50', '50-300', '300-1000', '1000+'])
+print(_s.groupby('cagri_bandi', observed=True)['fark'].agg(['mean', 'min', 'max', 'count']).round(2))
