@@ -1,8 +1,30 @@
-_k = df_forecast[_c['kitle_total']]
-print("program_44 ay toplamı:", df_forecast['program_44'].sum(), "· fark ay toplamı:", _fark.sum())
-print("program_44 ilk değerler:", df_forecast['program_44'].head(8).tolist())
-print("fark ~ program_44 korelasyonu:", round(_fark.corr(df_forecast['program_44']), 3))
-
-_s = pd.DataFrame({'kitle': _k, 'fark': _fark})
-_s['cagri_bandi'] = pd.cut(_s['kitle'], [-1, 50, 300, 1000, 1e9], labels=['0-50', '50-300', '300-1000', '1000+'])
-print(_s.groupby('cagri_bandi', observed=True)['fark'].agg(['mean', 'min', 'max', 'count']).round(2))
+CREATE TABLE BNS_VP_CAGRI_ADEDI_FORECAST_112026 AS
+SELECT
+  data_date, model_data_date, truncddate,
+  NVL(KARTTEMELBANKACLIK,0) + NVL(EPASSWORD,0) + NVL(KAYIPCALINTISUPHELI,0) + NVL(RETENTION_LINE,0)
+    + NVL(PROGRAM_44,0) + NVL(INTERNET_DESTEK,0) + NVL(BCD,0) + NVL(HIZMETHATTI,0)              AS KITLE_NOF_CALL,
+  NVL(POSHIZMETLERI,0) + NVL(KURUMSALKART,0) + NVL(KURUMSALTELEFONLABANKACILIK,0) + NVL(PROVIZYON,0)
+    + NVL(MAASODEMELERI,0) + NVL(KURUMSAL_INTERNET_DESTEK,0)                                    AS KURUMSAL_NOF_CALL,
+  NVL(YATIRIM,0) + NVL(OZELBANKACILIK,0) + NVL(ENGLISH,0) + NVL(KOCAILEM,0) + NVL(FORDFINANS,0)   AS GOLD_NOF_CALL,
+  NVL(KARTTEMELBANKACLIK,0)          AS KARTTEMELBANKACLIK,
+  NVL(EPASSWORD,0)                   AS EPASSWORD,
+  NVL(KAYIPCALINTISUPHELI,0)         AS KAYIPCALINTISUPHELI,
+  NVL(RETENTION_LINE,0)              AS RETENTION_LINE,
+  NVL(PROGRAM_44,0)                  AS PROGRAM_44,
+  NVL(INTERNET_DESTEK,0)             AS INTERNET_DESTEK,
+  NVL(BCD,0)                         AS BCD,
+  NVL(HIZMETHATTI,0)                 AS HIZMETHATTI,
+  NVL(YATIRIM,0)                     AS YATIRIM,
+  NVL(FORDFINANS,0)                  AS FORDFINANS,
+  NVL(POSHIZMETLERI,0)               AS POSHIZMETLERI,
+  NVL(KURUMSALKART,0)                AS KURUMSALKART,
+  NVL(KURUMSALTELEFONLABANKACILIK,0) AS KURUMSALTELEFONLABANKACILIK,
+  NVL(PROVIZYON,0)                   AS PROVIZYON,
+  NVL(MAASODEMELERI,0)               AS MAASODEMELERI,
+  NVL(KURUMSAL_INTERNET_DESTEK,0)    AS KURUMSAL_INTERNET_DESTEK,
+  NVL(OZELBANKACILIK,0)              AS OZELBANKACILIK,
+  NVL(ENGLISH,0)                     AS ENGLISH,
+  NVL(KOCAILEM,0)                    AS KOCAILEM
+FROM (
+  -- iç sorgu AYNEN (select data_date, model_data_date, trunc(model_data_date) ... group by ... order by 2)
+);
