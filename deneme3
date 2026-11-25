@@ -1,13 +1,34 @@
-SELECT TO_CHAR(ts, 'HH24')                                                    AS saat,
-       ROUND(AVG(kisi))                                                       AS ort_plan_kisi,
-       ROUND(AVG(karsilanan))                                                 AS ort_karsilanan,
-       ROUND(100 * SUM(terk) / NULLIF(SUM(karsilanan + terk), 0), 1)          AS terk_yuzde,
-       ROUND(SUM(karsilanan) / NULLIF(SUM(kisi) * 0.5, 0), 1)                 AS kisi_basi_saatte,
-       SUM(yogun)                                                             AS yogun_dilim,
-       ROUND(SUM(CASE WHEN yogun = 1 THEN karsilanan END)
-             / NULLIF(SUM(CASE WHEN yogun = 1 THEN kisi END) * 0.5, 0), 1)    AS yogunda_kisi_basi,
-       ROUND(100 * (1 - SUM(CASE WHEN yogun = 1 THEN karsilanan END)
-             / NULLIF(SUM(CASE WHEN yogun = 1 THEN kisi END) * 0.5, 0) / 15)) AS gercek_kayip_yuzde
-FROM birlesik
-GROUP BY TO_CHAR(ts, 'HH24')
-ORDER BY saat;
+import collections
+def _durum(a, ds):
+    if ds is None:
+        return "önceki ay"
+    gv = [x[(a, ds, v)] for v in gun_vardiyalari.get(ds, []) if (a, ds, v) in x]
+    if not gv:
+        return "bloklu (izin/off_t2/tatil)"
+    return "ÇALIŞIYOR" if any(solver.Value(g) for g in gv) else "model off"
+
+_pg = list(PLAN_GUNLER)
+say, tip, kisi = collections.Counter(), collections.Counter(), collections.Counter()
+for (a, d2), pv in ardisik_off.items():
+    if solver.Value(pv) != 1:
+        continue
+    i = _pg.index(d2)
+    d1 = _pg[i - 1] if i > 0 else None
+    say[" + ".join(sorted([_durum(a, d1), _durum(a, d2)]))] += 1
+    g = dt.date.fromisoformat(d2).weekday()
+    tip[f"{DAY_TR[(g - 1) % 7]}-{DAY_TR[g]}"] += 1
+    kisi[a] += 1
+
+n = sum(say.values())
+print(f"W_ARDISIK_OFF = {W_ARDISIK_OFF} | cezalı çift: {n} | ceza: {W_ARDISIK_OFF * n}")
+print(f"mesaiye kalamaz: {len(mesai_yok)} agent | çifti olan: {len(kisi)} | "
+      f"toplam ceza terimi: {len(ardisik_off)}")
+print("\nçiftteki iki gün ne durumda:")
+for k, v in say.most_common():
+    print(f"   {v:>4}  {k}")
+print("\nhangi gün çifti:")
+for k, v in tip.most_common():
+    print(f"   {v:>4}  {k}")
+print("\nen çok çifti olan 10 kişi:")
+for a, v in kisi.most_common(10):
+    print(f"   {v:>4}  {a}")
