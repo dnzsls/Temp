@@ -1,13 +1,37 @@
-SELECT
-  ROUND(SUM(KITLE_NOF_CALL), 2)       AS kitle,
-  ROUND(SUM(KARTTEMELBANKACLIK), 2)   AS karttemelbankaclik,
-  ROUND(SUM(KAYIPCALINTISUPHELI), 2)  AS kayipcalintisupheli,
-  ROUND(SUM(RETENTION_LINE), 2)       AS retention_line,
-  ROUND(SUM(INTERNET_DESTEK), 2)      AS internet_destek,
-  ROUND(SUM(HIZMETHATTI), 2)          AS hizmethatti,
-  ROUND(SUM(EPASSWORD), 2)            AS epassword,
-  ROUND(SUM(BCD), 2)                  AS bcd,
-  ROUND(SUM(PROGRAM_44), 2)           AS program_44
-FROM BNS_VP_CAGRI_ADEDI_FORECAST_112026_V3
-WHERE model_data_date >= TO_DATE('03112026 11:00', 'ddmmyyyy hh24:mi')
-  AND model_data_date <  TO_DATE('03112026 11:30', 'ddmmyyyy hh24:mi');
+WITH grp AS (
+  SELECT 1 id, 'karttemelbankaclik' ad, 'kitle' kuyruk FROM dual UNION ALL
+  SELECT 2,  'retention_line',              'kitle'    FROM dual UNION ALL
+  SELECT 3,  'kayipcalintisupheli',         'kitle'    FROM dual UNION ALL
+  SELECT 4,  'epassword',                   'kitle'    FROM dual UNION ALL
+  SELECT 8,  'program_44',                  'kitle'    FROM dual UNION ALL
+  SELECT 17, 'internet_destek',             'kitle'    FROM dual UNION ALL
+  SELECT 20, 'bcd',                         'kitle'    FROM dual UNION ALL
+  SELECT 21, 'hizmethatti',                 'kitle'    FROM dual UNION ALL
+  SELECT 5,  'yatirim',                     'yatirim'  FROM dual UNION ALL
+  SELECT 6,  'ozelbankacilik',              'gold'     FROM dual UNION ALL
+  SELECT 7,  'english',                     'gold'     FROM dual UNION ALL
+  SELECT 10, 'fordfinans',                  'gold'     FROM dual UNION ALL
+  SELECT 22, 'kocailem',                    'gold'     FROM dual UNION ALL
+  SELECT 11, 'poshizmetleri',               'kurumsal' FROM dual UNION ALL
+  SELECT 12, 'kurumsalkart',                'kurumsal' FROM dual UNION ALL
+  SELECT 13, 'kurumsaltelefonlabankacilik', 'kurumsal' FROM dual UNION ALL
+  SELECT 14, 'provizyon',                   'kurumsal' FROM dual UNION ALL
+  SELECT 15, 'maasodemeleri',               'kurumsal' FROM dual UNION ALL
+  SELECT 18, 'kurumsal_internet_destek',    'kurumsal' FROM dual
+)
+SELECT g.kuyruk, g.ad,
+       SUM(m.N_ANSWERED)   AS karsilanan,
+       SUM(m.N_ABANDONED)  AS terk,
+       SUM(m.ABND0_5)      AS terk_0_5
+FROM ODS_CCINFL.MIM_AG2_QUEUE_SUBHR m
+JOIN DM_CAD.CAD_MIM_CAPACITY_RESRC_KEY_LKP k
+  ON TO_CHAR(m.RESOURCE_KEY) = TO_CHAR(k.RESOURCE_KEY_CODE)
+JOIN DM_CAD.MVA_MIM_CP_RESRC_KEY_X_GRP x
+  ON x.RESOURCE_KEY_ID = k.RESOURCE_KEY_ID
+ AND TRUNC(m.DATA_DATE) BETWEEN x.START_DATE AND x.END_DATE
+JOIN grp g ON g.id = x.RESOURCE_GROUP_KEY_ID
+WHERE TRUNC(m.DATA_DATE) = TO_DATE('03112026', 'ddmmyyyy')
+  AND SUBSTR(m.LABEL_YYYY_MM_DD_HH24_15INT, 12, 5) IN ('11:00', '11:15')
+  AND g.kuyruk = 'kitle'
+GROUP BY g.kuyruk, g.ad
+ORDER BY karsilanan DESC;
