@@ -1,12 +1,8 @@
-import collections
-_tk  = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(), df_tam["takim"]))
-_lk  = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(), df_tam[GECE_LOKASYON_KOL]))
-for ds in ["2026-11-02", "2026-11-09", "2026-11-23"]:
-    wk = dt.date.fromisoformat(ds).isocalendar()[:2]
-    kim = [a for v in gun_vardiyalari[ds] if saat[(ds, v)][0] in GECE_BASLANGIC
-           for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1]
-    print(f"\n{ds}  nöbet lokasyonu: {gece_nobet_hafta.get(wk)}  |  gecede {len(kim)} kişi")
-    print("  takım   :", collections.Counter(_tk.get(a) for a in kim).most_common())
-    print("  lokasyon:", collections.Counter(_lk.get(a) for a in kim).most_common())
-    print("  ingilizceci:", [a for a in kim if a in eng_agents],
-          "| mesaiye kalamaz:", sum(a in mesai_yok for a in kim))
+SELECT NVL(a.line_based_main_group, '(eslesmedi)') AS grup,
+       COUNT(DISTINCT p.agent_user_code)         AS agent_sayisi
+FROM BSEN_VP_EKIM_IS_BIRIMI_PLAN_V1 p
+LEFT JOIN (SELECT DISTINCT agent_user_code, line_based_main_group
+           FROM BSEN_VP_AGENT_INFORMATIONS_202611_V2) a
+  ON a.agent_user_code = p.agent_user_code
+GROUP BY NVL(a.line_based_main_group, '(eslesmedi)')
+ORDER BY agent_sayisi DESC;
