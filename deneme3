@@ -1,8 +1,14 @@
-SELECT groupname,
-       SUM(incall)                                AS cagri,
-       ROUND(SUM(aht * incall) / SUM(incall))     AS ort_aht
-FROM BNS_VP_BO_KUYRUKAHTCALL_TOTAL_LINE_202609_202610
-WHERE flddate >= DATE '2026-10-01'
-  AND flddate <  DATE '2026-11-01'
-GROUP BY groupname
-ORDER BY cagri DESC;
+import collections
+_hs_g = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
+_grp, _cz = collections.Counter(), collections.Counter()
+for a in AGENTS:
+    n = sum(solver.Value(x[(a, ds, v)]) for ds in _hs_g
+            for v in gun_vardiyalari[ds] if (a, ds, v) in x)
+    c = W_ADALET_HS * max(0, n - FAIR_HS) + W_ADALET_HS2 * max(0, n - FAIR_HS - 1)
+    if c:
+        g = ("mesaiye kalamaz (H18M)" if a in mesai_hs_agents
+             else "ingilizceci" if a in eng_agents else "diğer")
+        _grp[g] += 1; _cz[g] += c
+print(f"FAIR_HS = {FAIR_HS}")
+for g in _grp:
+    print(f"  {g:<25} {_grp[g]:>3} kişi   ceza {_cz[g]}")
