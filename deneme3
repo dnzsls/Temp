@@ -1,4 +1,84 @@
-ozet AS (
+-- =============================================================================
+-- Kitle · Ekim 2026 · hafta içi · saatlik "kişi başı karşılanan çağrı" ve kayıp önerisi
+-- Plan: BSEN_VP_EKIM_IS_BIRIMI_PLAN_V1 (inhouse) + BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_102026
+-- Çağrı: ODS_CCINFL.MIM_AG2_QUEUE_SUBHR (karşılanan + terk)
+-- Yoğun yarım saat = terk, gelen çağrının %5'i ve üstü (eşik benim seçimim)
+-- =============================================================================
+WITH
+slot AS (   -- Ekim'in bütün yarım saatleri
+  SELECT DATE '2026-10-01' + (LEVEL - 1) / 48 AS ts
+  FROM dual CONNECT BY LEVEL <= 31 * 48
+),
+kitle_agent AS (
+  SELECT DISTINCT agent_user_code
+  FROM BNS_VP_AGENT_INFORMATIONS_202610_V2
+  WHERE line_based_main_group = 'kitle_cagrilar'
+),
+vardiya AS (   -- kitle inhouse + outsource vardiyaları
+  SELECT TO_DATE(p.working_date, 'YYYY-MM-DD') AS gun, p.vardiya, 'inhouse' AS sirket
+  FROM BSEN_VP_EKIM_IS_BIRIMI_PLAN_V1 p
+  JOIN kitle_agent k ON k.agent_user_code = p.agent_user_code
+  WHERE p.vardiya NOT IN ('off', 'izin', 'F37')
+  UNION ALL
+  SELECT TO_DATE(o."DATE", 'YYYY-MM-DD'), o.vardiya, 'outsource'
+  FROM BNS_VP_IS_BIRIMI_PLAN_OUTSOURCE_102026 o
+  WHERE o.vardiya NOT IN ('off', 'izin')
+    AND o.vardiya IS NOT NULL
+    AND o.agent_user_code IS NOT NULL
+),
+aralik AS (   -- '09:30-18:30' -> başlangıç / bitiş zamanı (gece yarısını geçen +1 gün)
+  SELECT sirket,
+         gun + (TO_NUMBER(SUBSTR(vardiya, 1, 2)) * 60 + TO_NUMBER(SUBSTR(vardiya, 4, 2))) / 1440 AS bas,
+         gun + (TO_NUMBER(SUBSTR(vardiya, 7, 2)) * 60 + TO_NUMBER(SUBSTR(vardiya, 10, 2))) / 1440
+             + CASE WHEN SUBSTR(vardiya, 7, 5) <= SUBSTR(vardiya, 1, 5) THEN 1 ELSE 0 END AS bit
+  FROM vardiya
+),
+sahada AS (   -- her yarım saatte planda sahadaki kişi
+  SELECT s.ts, COUNT(*) AS kisi
+  FROM slot s
+  JOIN aralik a ON s.ts >= a.bas AND s.ts < a.bit
+  GROUP BY s.ts
+),
+cagri AS (   -- her yarım saatte kitle karşılanan + terk
+  SELECT TO_DATE(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 10), 'YYYY-MM-DD')
+           + (TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 12, 2)) * 60
+              + FLOOR(TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 15, 2)) / 30) * 30) / 1440 AS ts,
+         SUM(m.n_answered)  AS karsilanan,
+         SUM(m.n_abandoned) AS terk
+  FROM ODS_CCINFL.MIM_AG2_QUEUE_SUBHR m
+  JOIN DM_CAD.CAD_MIM_CAPACITY_RESRC_KEY_LKP k
+    ON TO_CHAR(m.resource_key) = TO_CHAR(k.resource_key_code)
+  JOIN DM_CAD.MVA_MIM_CP_RESRC_KEY_X_GRP x
+    ON x.resource_key_id = k.resource_key_id
+   AND TRUNC(m.data_date) BETWEEN x.start_date AND x.end_date
+  WHERE x.resource_group_key_id IN (1, 2, 3, 4, 8, 17, 20, 21)          -- kitle alt kuyrukları
+    AND SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 7) = '2026-10'
+  GROUP BY TO_DATE(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 1, 10), 'YYYY-MM-DD')
+           + (TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 12, 2)) * 60
+              + FLOOR(TO_NUMBER(SUBSTR(m.label_yyyy_mm_dd_hh24_15int, 15, 2)) / 30) * 30) / 1440
+),
+birlesik AS (   -- yarım saat bazında kişi + çağrı, yalnız hafta içi
+  SELECT c.ts, s.kisi, c.karsilanan, c.terk,
+         CASE WHEN c.terk >= 0.05 * (c.karsilanan + c.terk) THEN 1 ELSE 0 END AS yogun
+  FROM cagri c
+  JOIN sahada s ON s.ts = c.ts
+  WHERE c.ts - TRUNC(c.ts, 'IW') < 5
+),
+mevcut AS (   -- config'teki şu anki kitle hafta içi kayıp tablosu (%)
+  SELECT '00' saat, 0 kayip FROM dual UNION ALL SELECT '01', 0  FROM dual UNION ALL
+  SELECT '02', 0  FROM dual UNION ALL SELECT '03', 0  FROM dual UNION ALL
+  SELECT '04', 0  FROM dual UNION ALL SELECT '05', 0  FROM dual UNION ALL
+  SELECT '06', 0  FROM dual UNION ALL SELECT '07', 0  FROM dual UNION ALL
+  SELECT '08', 0  FROM dual UNION ALL SELECT '09', 18 FROM dual UNION ALL
+  SELECT '10', 5  FROM dual UNION ALL SELECT '11', 8  FROM dual UNION ALL
+  SELECT '12', 21 FROM dual UNION ALL SELECT '13', 19 FROM dual UNION ALL
+  SELECT '14', 7  FROM dual UNION ALL SELECT '15', 18 FROM dual UNION ALL
+  SELECT '16', 22 FROM dual UNION ALL SELECT '17', 18 FROM dual UNION ALL
+  SELECT '18', 10 FROM dual UNION ALL SELECT '19', 8  FROM dual UNION ALL
+  SELECT '20', 5  FROM dual UNION ALL SELECT '21', 15 FROM dual UNION ALL
+  SELECT '22', 17 FROM dual UNION ALL SELECT '23', 8  FROM dual
+),
+ozet AS (   -- saat bazında topla
   SELECT TO_CHAR(ts, 'HH24')                          AS saat,
          COUNT(DISTINCT TRUNC(ts))                    AS gun_sayisi,
          AVG(kisi)                                    AS plan_kisi,
