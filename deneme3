@@ -1,54 +1,13 @@
-# %% [GRAFİK] — Saatlik shrinkage grafiği (Excel'e koymak için PNG kaydeder)
-import matplotlib.pyplot as plt
-
-def shrinkage_grafigi(kuyruk="kitle", gun_tipi="hafta_ici", esik=18, dosya=True):
-    s = CONFIG['queue_configs'][kuyruk][gun_tipi]['erlang']['shrinkage']
-    saatler = list(range(24))
-    deger = [s.get(h, s.get('default', 0)) * 100 for h in saatler]
-
-    renk = []
-    for v in deger:
-        if v == 0:
-            renk.append('#D9DEE4')      # gri: 0
-        elif v >= esik:
-            renk.append('#B8691F')      # turuncu: eşik ve üstü
-        else:
-            renk.append('#1E6A85')      # mavi
-
-    fig, ax = plt.subplots(figsize=(10, 3.6))
-    ax.bar(saatler, [v if v > 0 else 0.3 for v in deger], color=renk, width=0.7)
-    for h, v in zip(saatler, deger):
-        if v >= esik:
-            ax.text(h, v + 0.6, f"{v:.0f}", ha='center', fontsize=8)
-
-    ax.set_xticks(range(0, 24, 3))
-    ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 3)], fontsize=9)
-    ust = max(25, max(deger) + 5)
-    ax.set_ylim(0, ust)
-    ax.set_yticks(range(0, int(ust) + 1, 10))
-    ax.set_yticklabels([f"%{y}" for y in range(0, int(ust) + 1, 10)], fontsize=9)
-    ax.yaxis.grid(True, linestyle='--', alpha=0.4)
-    ax.set_axisbelow(True)
-    for k in ('top', 'right', 'left'):
-        ax.spines[k].set_visible(False)
-    ax.set_title(f"Saatlik shrinkage · {kuyruk} · {gun_tipi}  (turuncu: %{esik} ve üstü)",
-                 fontsize=11, loc='left')
-    fig.tight_layout()
-    if dosya:
-        ad = f"shrinkage_{kuyruk}_{gun_tipi}.png"
-        fig.savefig(ad, dpi=200)
-        print("kaydedildi:", ad)
-    plt.show()
-
-shrinkage_grafigi("kitle", "hafta_ici")
-
-
-
-
-
-
-
-
-for q in CONFIG['queues']:
-    for g in ('hafta_ici', 'cumartesi', 'pazar'):
-        shrinkage_grafigi(q, g)
+SELECT TO_CHAR(ts, 'HH24')                                                    AS saat,
+       ROUND(AVG(kisi))                                                       AS ort_plan_kisi,
+       ROUND(AVG(karsilanan))                                                 AS ort_karsilanan,
+       ROUND(100 * SUM(terk) / NULLIF(SUM(karsilanan + terk), 0), 1)          AS terk_yuzde,
+       ROUND(SUM(karsilanan) / NULLIF(SUM(kisi) * 0.5, 0), 1)                 AS kisi_basi_saatte,
+       SUM(yogun)                                                             AS yogun_dilim,
+       ROUND(SUM(CASE WHEN yogun = 1 THEN karsilanan END)
+             / NULLIF(SUM(CASE WHEN yogun = 1 THEN kisi END) * 0.5, 0), 1)    AS yogunda_kisi_basi,
+       ROUND(100 * (1 - SUM(CASE WHEN yogun = 1 THEN karsilanan END)
+             / NULLIF(SUM(CASE WHEN yogun = 1 THEN kisi END) * 0.5, 0) / 15)) AS gercek_kayip_yuzde
+FROM birlesik
+GROUP BY TO_CHAR(ts, 'HH24')
+ORDER BY saat;
