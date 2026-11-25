@@ -1,23 +1,12 @@
--- =============================================================================
--- BNS gerçekleşen tablosu ile santral (MIM) verisinin karşılaştırması
--- Örnek: 3 Kasım 2026, 11:00-11:30, kitle alt kuyrukları
---
--- NE VERİR:
---   bns_karsilanan : BNS_VP_ACTUAL_CALL_COUNT_BY_TIME_PER_SUB_LINE_2025_2026.NOF_CALL
---   mim_karsilanan : santralde karşılanan çağrı (N_ANSWERED)
---   terk           : müşterinin beklerken kapattığı çağrı (N_ABANDONED)
---   terk_0_5       : muhtemelen ilk 0-5 sn içinde kapatanlar (ABND0_5)
---   mim_gelen      : mim_karsilanan + terk = gelen çağrı
---
--- SONUÇ (2026-11-25):
---   * BNS tablosundaki NOF_CALL = KARŞILANAN çağrı (gelen DEĞİL).
---     3.491 vs 3.490; tek fark karttemelbankacilik'te 1 çağrı (muhtemelen terk_0_5).
---   * Gelen çağrı lazımsa terk, MIM tablosundan eklenmeli.
---   * Bu yarım saatte terk çok düşük (2 çağrı), kuyrukta bekleme yok.
---
--- EŞLEŞME: MIM.RESOURCE_KEY = LKP.RESOURCE_KEY_CODE
---          -> LKP.RESOURCE_KEY_ID = X_GRP.RESOURCE_KEY_ID
---          -> X_GRP.RESOURCE_GROUP_KEY_ID = tahmin SQL'indeki grup numarası
---             (1 karttemel, 2 retention, 3 kayip, 4 epassword, 8 program_44,
---              17 internet_destek, 20 bcd, 21 hizmethatti)
--- =============================================================================
+import collections
+_tk  = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(), df_tam["takim"]))
+_lk  = dict(zip(df_tam["agent_user_code"].astype(str).str.strip(), df_tam[GECE_LOKASYON_KOL]))
+for ds in ["2026-11-02", "2026-11-09", "2026-11-23"]:
+    wk = dt.date.fromisoformat(ds).isocalendar()[:2]
+    kim = [a for v in gun_vardiyalari[ds] if saat[(ds, v)][0] in GECE_BASLANGIC
+           for a in AGENTS if (a, ds, v) in x and solver.Value(x[(a, ds, v)]) == 1]
+    print(f"\n{ds}  nöbet lokasyonu: {gece_nobet_hafta.get(wk)}  |  gecede {len(kim)} kişi")
+    print("  takım   :", collections.Counter(_tk.get(a) for a in kim).most_common())
+    print("  lokasyon:", collections.Counter(_lk.get(a) for a in kim).most_common())
+    print("  ingilizceci:", [a for a in kim if a in eng_agents],
+          "| mesaiye kalamaz:", sum(a in mesai_yok for a in kim))
