@@ -1,14 +1,470 @@
-import collections
-_hs_g = [ds for ds in PLAN_GUNLER if dt.date.fromisoformat(ds).weekday() >= 5]
-_grp, _cz = collections.Counter(), collections.Counter()
-for a in AGENTS:
-    n = sum(solver.Value(x[(a, ds, v)]) for ds in _hs_g
-            for v in gun_vardiyalari[ds] if (a, ds, v) in x)
-    c = W_ADALET_HS * max(0, n - FAIR_HS) + W_ADALET_HS2 * max(0, n - FAIR_HS - 1)
-    if c:
-        g = ("mesaiye kalamaz (H18M)" if a in mesai_hs_agents
-             else "ingilizceci" if a in eng_agents else "diğer")
-        _grp[g] += 1; _cz[g] += c
-print(f"FAIR_HS = {FAIR_HS}")
-for g in _grp:
-    print(f"  {g:<25} {_grp[g]:>3} kişi   ceza {_cz[g]}")
+# Vardiya Planlama Modeli
+
+*Çağrı merkezi · aylık vardiya planı*
+
+Aylık plan iki adımda çıkıyor. **Model-1** her kuyruk, gün ve vardiya için **kaç kişi** gerektiğini buluyor. **Model-2** bu sayılara **isimli agentları** yerleştiriyor.
+
+**İçindekiler:** [00 Akış](#00-genel-akış) · [01 Kuyruklar](#01-kuyruklar-ve-çağrının-yolu) · [02 İhtiyaç](#02-kişi-ihtiyacı-nasıl-bulunuyor) · [03 Shrinkage](#03-shrinkage-yapısı) · [04 Model-1](#04-model-1-kaç-kişi-hangi-vardiya) · [05 Model-2](#05-model-2-kim-hangi-gün) · [06 Parametreler](#06-bilinmesi-gereken-parametreler) · [07 Sorular](#07-sorulabilecek-sorular) · [08 Sözlük](#08-sözlük) · [09 Sınırlar](#09-bilinen-sınırlar-ve-sıradaki-işler)
+
+---
+
+## 00 Genel akış
+
+```
+ GİRDİ: Veri          →   MODEL-1             →   MODEL-2              →   ÇIKTI: Excel
+ ─────────────────        ─────────────────       ──────────────────       ─────────────────
+ Çağrı tahmini            Kaç kişi,               Kim, hangi gün?          Vardiya bazında
+ (15 dk)                  hangi vardiya?                                   kişi sayıları
+ Alt kuyruk × saat AHT    Her hafta ayrı          Tüm ay tek seferde       Kişi bazlı aylık
+ Vardiya listesi          4 kuyruk ayrı           İzin, off, takım,        çizelge
+ Kadro (in/out/PT)        30 dk dilim             kıdem                    Karşılama ve
+ Önceki ayın planı                                Adalet kuralları         adalet raporları
+```
+
+| Adım | Ne yapıyor |
+|---|---|
+| **Girdi** | Çağrı tahmini 15 dakikalık dilimlerle gelir. Her alt kuyruğun saatlik AHT'si kullanılır. Açılabilecek vardiyaların listesi, inhouse, outsource ve PT kadrosu verilir. Ay geçişi için önceki ayın planı okunur. |
+| **Model-1** | Her hafta ayrı çözülür. Dört kuyruk ayrı ayrı planlanır. Hesap 30 dakikalık dilimlerle yapılır. |
+| **Model-2** | Tüm ay tek seferde çözülür. İzin, off talebi, takım ve kıdem dikkate alınır. Adalet kuralları uygulanır. |
+| **Çıktı** | Vardiya bazında kişi sayıları ve her agentın aylık çizelgesi çıkar. Karşılama ve adalet raporları hazırlanır. |
+
+Model-1 tüm kuyruklar için çalışıyor. Model-2 şu an yalnız inhouse agentlar için ve kitle ile kurumsal kuyruklarında çalışıyor. Outsource kişi listesini firmalar kendileri yönetiyor.
+
+---
+
+## 01 Kuyruklar ve çağrının yolu
+
+Dört ana kuyruk var. Her biri ayrı bir ekip olduğu için ayrı planlanıyor. Kuyruklar birbirine kişi vermiyor.
+
+| Kuyruk | Kim karşılıyor | Kasım kadrosu | Not |
+|---|---|---|---|
+| **Kitle** | Inhouse + outsource + part-time | in 392–406 · out 435–501 · PT 19 | En büyük kuyruk. Hafta sonu outsource payı bir bantta tutuluyor. |
+| **Gold** | Inhouse + part-time | in 88–95 · PT 9 | Kasım'dan itibaren yatırım çağrıları gold'dan ayrıldı. |
+| **Yatırım** | Inhouse + part-time | in 31–33 · PT 1 | Gold'dan ayrılan ekip, gold ile aynı mantıkla planlanıyor. |
+| **Kurumsal** | Inhouse + part-time | in 48–51 · PT 4 | Provizyon ekibi kendi sabit hattında dönüyor, çağrı karşılama hesabına girmiyor. |
+
+### Alt kuyruklar nasıl birleşiyor?
+
+- Her ana kuyruğun altında konu bazlı alt kuyruklar var. Her alt kuyruğun saat saat kendi ortalama konuşma süresi (AHT) var.
+- Her yarım saat için alt kuyrukların AHT'si, **çağrı paylarına göre ağırlıklı ortalanıyor**. Böylece o yarım saat için ana kuyruğun tek bir AHT'si çıkıyor.
+- 15 dakikalık tahmin 30 dakikaya toplanıyor. İhtiyaç bu tek çağrı sayısı ve tek AHT ile hesaplanıyor.
+- Bazı alt kuyruklar belli bir şirkete ayrılmış. Örneğin kitlede:
+  - Retention hattına yalnız inhouse bakar.
+  - Kayıp/çalıntı/şüpheli hattına yalnız outsource bakar.
+  - Kart/temel bankacılık çağrılarının 08:00–24:00 arasında en az %20'sini inhouse karşılar.
+
+### Örnek: kitle, 3 Kasım Salı, 11:00–11:30
+
+| Alt kuyruk | Çağrı | AHT (sn) | Çağrı × AHT |
+|---|--:|--:|--:|
+| `karttemelbankaclik` | 3.006 | 207 | 622.242 |
+| `kayipcalintisupheli` | 328 | 129 | 42.312 |
+| `retention_line` | 121 | 221 | 26.741 |
+| `internet_destek` | 80 | 181 | 14.480 |
+| `hizmethatti` | 71 | 224 | 15.904 |
+| `epassword` | 30 | 165 | 4.950 |
+| `bcd` | 11 | 83 | 913 |
+| **Kitle** | **3.647** | **≈ 200** | **727.542** |
+
+- **Çağrı sayısı:** 15 dakikalık tahminin 11:00 ve 11:15 çeyrekleri toplanıyor: 3.647. Kitle toplamı, alt kuyrukların toplamına eşit.
+- **AHT:** Her alt kuyruğun çağrısı kendi AHT'siyle çarpılıyor, sonuçlar toplanıp toplam çağrıya bölünüyor: 727.542 ÷ 3.647 ≈ 200 sn. Çağrının %82'si kart/temel bankacılıktan geldiği için sonuç onun AHT'sine (207) yakın.
+- Sayılar tam sayıya yuvarlanmıştır.
+
+---
+
+## 02 Kişi ihtiyacı nasıl bulunuyor?
+
+Her yarım saat için iki ölçü hesaplanıyor. Erlang, eksik kalınmaması gereken **alt sınırı** veriyor. Kap ölçüsü, planın yaklaşması istenen **denge noktasını** veriyor. Aynı örnek saat üzerinden:
+
+| Yarım saatte çağrı | Erlang: alt sınır | Kap: denge noktası | Planda sahada |
+|--:|--:|--:|--:|
+| **3.647** | **446** | **529** | **566** |
+| AHT 200 sn | hatta 410 ÷ (1 − 0,08) | 3.647 ÷ (7,5 × 0,92) | Kap_RR %107 · pilot koşu |
+
+### Adım 1 · Aynı anda kaç kişi telefonda?
+
+3.647 çağrının her biri ortalama 200 saniye sürüyor. Yarım saat 1.800 saniye. Yani yarım saat boyunca ortalamada **3.647 × 200 ÷ 1.800 ≈ 404 kişi** aynı anda konuşuyor olmalı.
+
+### Adım 2 · Müşteri 30 saniyeden az beklesin diye kaç kişi gerekir?
+
+404 kişi yetmez. Çağrılar düzenli aralıklarla değil, rastgele geliyor. Bazı anlarda üst üste çok çağrı geliyor ve herkes doluyken müşteri bekliyor. Erlang-C hesabı, hatta kaç kişi olursa ortalama beklemenin ne olacağını veriyor. Model, bekleme 30 saniyenin altına ilk indiği sayıyı seçiyor:
+
+| Hattaki kişi | Müşterinin ortalama beklemesi |
+|--:|---|
+| 405 | 224 sn |
+| 406 | 96 sn |
+| 407 | 59 sn |
+| 408 | 41 sn |
+| 409 | 30 sn (hedefin az üstü) |
+| **410** | **23 sn ✓ hedef tuttu** |
+
+Gereken kişi sayısının 404'ün yalnız 6 kişi üstünde olduğuna dikkat. Bu kadar az fazla yetiyor çünkü kitle çok büyük bir ekip (aşağıdaki "Neden alt kuyruklar ayrı hesaplanmıyor?" kısmına bakın).
+
+### Adım 3 · Mola payını ekle (shrinkage)
+
+Vardiyadaki herkes her an telefonda değil; mola ve yemek arası gibi nedenlerle bir kısmı hattan çıkıyor. 11:00'de bu pay %8. Hatta 410 kişi olması için **410 ÷ 0,92 = 446 kişi** planlanmalı. Model bunun altına düşmemeye çalışıyor; altı çok pahalı bir eksik sayılıyor.
+
+### Adım 4 · Ekibin ölçüsüyle karşılaştır (Kap)
+
+Ekip kapasiteyi daha basit bir kuralla ölçüyor: bir kişi saatte 15 çağrı (yarım saatte 7,5) karşılar. Aynı %8 mola payıyla: **3.647 ÷ (7,5 × 0,92) ≈ 529 kişi**. Model planı bu sayıya yakın tutmaya çalışıyor.
+
+**Neden 15?** AHT 200 saniye iken bir agent kesintisiz çalışsa saatte 3.600 ÷ 200 = 18 çağrı alabilir. Sahada ise kayıt dışı kısa aralar ve ölçülemeyen kesintiler yüzünden saatte yaklaşık 15 çağrı alınıyor. Aradaki yaklaşık %17'lik kayıp mola payı tablosunda yok. Kap, sahadaki bu gerçek verimi kullanıyor. Erlang ise teorik alt sınırı veriyor. 446 ile 529 arasındaki farkın büyük kısmı bu görünmeyen kayıp.
+
+### Plan bu yarım saatte ne yaptı? (Kasım pilot koşusu)
+
+Planda 11:00'de **566 kişi** vardı: Erlang'ın istediği 446'nın da, Kap'ın istediği 529'un da üstünde. Sebebi şu: hafta içi inhouse kadronun tamamı her gün plana giriyor. Model önce gereken en az kişiyi yerleştiriyor, kalan kişileri en yoğun sabah vardiyalarına ekliyor (bkz. 4.3). Bu vardiyalar 11:00'de de sahada olduğu için fazla kadro bu saatte görünüyor.
+
+### Neden alt kuyruklar ayrı hesaplanmıyor?
+
+Kitlede 7 alt kuyruk var ama hepsine **aynı ekip** bakıyor. Bir agent bir çağrıyı bitirince, hangi alt kuyruktan olursa olsun sıradaki çağrıyı alabiliyor. Ayrı ekipler olsaydı bir hattın ekibi boşta beklerken başka hattın müşterisi bekleyebilirdi. Her hat kendi "yedek" kişisini tutmak zorunda kalırdı:
+
+| Hesap | Hatta gereken kişi |
+|---|--:|
+| 7 alt kuyruk ayrı ayrı hesaplanıp toplansa | 425 |
+| **Tek ekip, tek hesap (modelin yaptığı)** | **410** |
+
+En küçük hat bunu iyi gösteriyor: `bcd`'ye yarım saatte 11 çağrı geliyor, aynı anda ortalama yarım kişi konuşuyor. Tek başına hesaplansa 2 kişi isterdi. Ortak ekipte bu çağrılar boşta kalan herhangi bir agent'a gidiyor. Bu yüzden ihtiyaç ana kuyruk (kitle) için tek seferde, ağırlıklı AHT ile hesaplanıyor.
+
+---
+
+## 03 Shrinkage yapısı
+
+Shrinkage, vardiyada olan bir agentın o saatte hatta olmadığı zamanın oranı. Model bunu sabit tek bir oran olarak değil, **saat saat** kullanıyor.
+
+### Üç boyutta tanımlı
+
+| Boyut | Değerler | Neden |
+|---|---|---|
+| **Saat** | 00:00 … 23:00 (24 değer) | Mola ve yemek belli saatlerde yoğunlaşıyor. |
+| **Gün tipi** | Hafta içi · Cumartesi · Pazar | Hafta sonu mola düzeni ve yoğunluk farklı. |
+| **Kuyruk** | Kitle · gold · yatırım · kurumsal | Her ekibin düzeni farklı olabiliyor. |
+
+### Örnek: kitle, hafta içi (saatlik)
+
+| Saat | 00–08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Kayıp % | 0 | **18** | 5 | 8 | **21** | **19** | 7 | **18** | **22** | **18** | 10 | 8 | 5 | 15 | 17 | 8 |
+
+Kalın değerler %18 ve üstü olan saatler. Gece saatlerinde kayıp 0 tanımlı.
+
+### Gün tipine göre ortalama (09:00–24:00)
+
+| Kuyruk | Hafta içi | Cumartesi | Pazar | Gece (00–09) |
+|---|--:|--:|--:|--:|
+| **Kitle** | %13 | %18 | %20 | %0–7 |
+| **Gold · yatırım · kurumsal** | %16 | %17 | %20 | %0–7 |
+
+### Shrinkage'a ne girer, ne girmez?
+
+**Shrinkage'ın içinde (Model-1)**
+- Vardiya içinde hatta geçmeyen zaman buraya girer: mola, yemek arası gibi.
+- Saat bazlı bir orandır ve kişi ihtiyacını büyütür.
+
+**Shrinkage'ın dışında (kişi bazlı düşülüyor)**
+- Yıllık izin, off günü, rapor, resmi tatil ve arife kişi bazında düşülür.
+- Hamile ve süt izinli agentlar hafta sonu çalışamaz; bu da kişi bazında düşülür.
+- Bunlar kadro hesabında (NET kadro) ve Model-2'de isim isim düşülüyor.
+
+Bu ayrım **çift saymayı** önlüyor: izinli kişi kadrodan zaten düşüldüğü için shrinkage oranına bir daha eklenmiyor.
+
+### Outsource için gün kaybı
+
+Firmalar haftalık kişi sayısı veriyor. Model bunu `kişi × gün × 0,8` adam-gün olarak kullanıyor. Kalan %20, outsource agentın off günleri (ayda yaklaşık 6 gün).
+
+---
+
+## 04 Model-1: kaç kişi, hangi vardiya?
+
+Her hafta, her kuyruk için ayrı bir optimizasyon modeli çözülüyor (ayda 4 kuyruk × 4–6 hafta, yani 16–24 model). Sonuç: her gün ve her vardiya için inhouse, outsource ve part-time kişi sayısı.
+
+### 4.1 Elde kaç kişi var? Üç kaynak, üç ayrı hesap
+
+Model kişi sayısını sıfırdan uydurmuyor. Her kaynak için elde ne kadar kişi olduğu baştan veriliyor. Model bu kişileri saatlere ve günlere dağıtıyor.
+
+| Kaynak | Nereden geliyor | Modelde nasıl kullanılıyor |
+|---|---|---|
+| **Inhouse** | **NET kadro.** Her gün için: tam zamanlı agent − o gün yazılamayan agent. Haftanın hafta içi günlerinin ortalaması alınıyor. Kasım'da kitle için haftaya göre 392–406. | Hafta içi **her gün** bu kadar inhouse plana yazılıyor. Hafta sonu için tavan yok; sayıyı ihtiyaç belirliyor. |
+| **Outsource** | **Firmanın verdiği haftalık kişi sayısı.** Firma her hafta kitle için kaç kişisi olduğunu bildiriyor. Kasım'da haftaya göre 435–501. | Bu sayı modelde iki kural olarak kullanılıyor: 1) **Günlük tavan:** Bir günde en çok bu kadar outsource yazılabiliyor. 2) **Haftalık bütçe:** Hafta boyunca toplam `kişi × gün × 0,8` adam-gün kullanılabiliyor, çünkü her outsource agent ortalama %20 off'ta. Örnek: 450 kişi → günde en çok 450, haftada en çok 450 × 7 × 0,8 = 2.520 adam-gün. |
+| **Part-time** | **Kuyruk başına PT kişi sayısı.** Kasım'da kitle 19, gold 9, kurumsal 4, yatırım 1 kişi. | Her PT agent haftada 5 gün çalışıyor, yani haftalık bütçe `kişi × 5` adam-gün. Cumartesi ve Pazar PT'lerin hepsi çalışıyor. Kalan 3 günü hafta içine dağıtılıyor. Örnek, kitle: 19 × 5 = 95 adam-gün. Bunun 38'i hafta sonu (19 + 19), 57'si hafta içi (günde ortalama 11 kişi). |
+
+### NET kadroda kim düşülüyor?
+
+Bir agent o gün aşağıdakilerden biri yüzünden çalışamıyorsa o günün NET sayısından düşülüyor. Birden fazla sebep varsa yalnız bir kez sayılıyor (öncelik soldan sağa):
+
+> Yıllık / idari izin › Kesin off talebi › Hamile / süt (hafta sonu) › Mesaiye kalamaz (resmi tatil) › Arife kısıtı
+
+- **Esnek off talepleri düşülmüyor.** Bunları Model-2 mümkünse karşılıyor. Karşılayamazsa kişi o gün çalışıyor.
+- Part-time agentlar ve eğitimdeki ekip NET kadroya girmiyor.
+- Resmi tatil ve arife günleri haftalık ortalamaya katılmıyor.
+
+### 4.2 Adam-gün hesabı: Kasım, kitle
+
+Adam-gün, bir kişinin bir gün çalışması demek. Üç kaynak da aynı birimle ölçülüyor, böylece toplanabiliyor. Önce bir haftanın hesabı, sonra ayın tamamı.
+
+| 2. hafta (2–8 Kasım) | Girdi | Hesap | Plan |
+|---|---|---|---|
+| **Inhouse** | NET kadro 403 kişi | 403 kişi × 5 hafta içi günü = 2.015 adam-gün | 2.015 hafta içi + 272 hafta sonu = 2.287 adam-gün |
+| **Outsource** | 450 kişi | 450 kişi × 7 gün × 0,8 = 2.520 adam-gün | 2.520 adam-gün kullanıldı; en yoğun gün 441 kişi |
+| **Part-time** | 19 kişi | 19 kişi × 5 gün = 95 adam-gün (38'i hafta sonu, 57'si hafta içi) | 93 adam-gün |
+
+| Hafta | Gün | Inhouse / gün | Inhouse h.sonu (adam-gün) | Outsource kişi | Outsource bütçe (adam-gün) | Kullanılan (adam-gün) | En yoğun gün | PT adam-gün (hedef) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| **1 · 1 Kas** | 1 | – | 92 | 435 | 348 | 253 | 253 | 19 (14) |
+| **2 · 2–8** | 7 | 403 | 272 | 450 | 2.520 | 2.520 | 441 | 93 (95) |
+| **3 · 9–15** | 7 | 400 | 256 | 468 | 2.621 | 2.617 | 456 | 93 (95) |
+| **4 · 16–22** | 7 | 392 | 266 | 485 | 2.716 | 2.449 | 445 | 93 (95) |
+| **5 · 23–29** | 7 | 399 | 264 | 501 | 2.806 | 2.518 | 433 | 93 (95) |
+| **6 · 30 Kas** | 1 | 406 | – | 501 | 401 | 401 | 401 | 14 (14) |
+
+- **Inhouse'ta neden 0,8 yok?** NET kadroda izinli ve off'taki kişiler zaten isim isim düşülmüş. 403, o hafta her gün gerçekten çalışabilecek kişi sayısı. Outsource'ta kişi listesi bizde olmadığı için off payı ortalama oranla (%20) düşülüyor.
+- **Outsource 0,8 katsayısı:** Firmanın her agentı ayda yaklaşık 6 gün off kullanıyor. Firmanın verdiği kişilerin hepsi her gün gelmiyor, haftada ortalama %80'i sahada.
+- **Günlük tavan:** Bir günde en çok firmanın kişi sayısı kadar outsource yazılıyor. En yoğun günler 433–456 kişi, hep tavanın altında.
+- **Bütçe her zaman dolmuyor:** 4. ve 5. haftada firmanın kişi sayısı arttı (485, 501). Model bütçenin %90'ını kullandı, ihtiyaçtan fazla kişi yazmadı.
+- **Kısa hafta:** Ay Pazar başladığı için 1. hafta tek gün. Hesap o haftanın gün sayısıyla yapılıyor: 435 × 1 × 0,8 = 348.
+- **Hafta sonu inhouse:** Kadro tavanı yok, ihtiyaç kadar yazılıyor (Kasım'da hafta sonu başına 256–272 adam-gün). Model-2 bunu hafta içi off'u hafta sonuna kaydırarak ve fazla mesaiyle dolduruyor.
+
+### 4.3 İki aşamada çözüm
+
+**1. Optimizasyon: gereken en az kişi**
+- Her yarım saatin ihtiyacını karşılayan en uygun vardiya karmasını buluyor.
+- Inhouse, outsource ve part-time birlikte düşünülüyor.
+- Kadronun hepsini kullanmak zorunda değildir.
+
+**2. Dağıtım: kalan kadro**
+- Kalan inhouse kadro, en sıkışık vardiyalara birer birer ekleniyor.
+- Kalan kişiler saat aralıklarına belli paylarla dağıtılıyor. Kitlede 08:00–08:30'a %20, 09:30–10:30'a %50, 15:00'e %30 gidiyor. Diğer kuyruklarda sabaha (08:00–10:30) %70, akşama (15:00–19:00) %30 gidiyor.
+- Kapalı bir vardiya ancak 13 kişi alabilecekse açılıyor.
+
+| Kitle, 3 Kasım Salı | 1. aşama (en az) | 2. aşama sonrası |
+|---|--:|--:|
+| **Inhouse** | 342 | 403 (+61) |
+| **Outsource** | 413 | 413 |
+| **Part-time** | 11 | 11 |
+
+Model o gün 342 inhouse'u yeterli buldu. Kalan 61 kişi dağıtımla eklendi ve NET kadronun tamamı (403) plana girdi.
+
+### O günün vardiya planı
+
+Kitle, 3 Kasım Salı. Inhouse vardiyalar 9 saat, part-time vardiyalar 4 saat sürüyor. Outsource vardiyaları aynı başlangıçta inhouse'tan 30 dakika uzun tanımlı: gündüz 9,5 saat, akşam (17:00 ve sonrası) ve gece 8,5 saat. Model bu süreleri olduğu gibi kullanıyor. ● işaretli satırlar 11:00'de sahada olanlar.
+
+| Başlangıç | Inhouse | Outsource | Part-time |
+|---|--:|--:|--:|
+| 00:00 | 6 | 2 | · |
+| ● 07:00 | · | 23 | · |
+| ● 07:30 | 15 | · | · |
+| ● 08:00 | 71 | · | · |
+| ● 08:30 | 61 | · | · |
+| ● 09:00 | 133 | 89 | · |
+| ● 09:30 | 18 | 21 | · |
+| ● 10:00 | 13 | · | 11 |
+| ● 10:30 | 13 | 36 | · |
+| ● 11:00 | · | 62 | · |
+| 12:00 | · | 35 | · |
+| 13:00 | · | 21 | · |
+| 13:30 | · | 46 | · |
+| 15:00 | 73 | 17 | · |
+| 17:00 | · | 13 | · |
+| 18:00 | · | 35 | · |
+| 19:00 | · | 13 | · |
+| **Toplam** | **403** | **413** | **11** |
+| **11:00'de sahada** | **324** | **231** | **11** |
+
+- **11:00'de sahada 566 kişi** (324 + 231 + 11). 02'deki örnekte gördüğümüz sayı bu.
+- **13 kişilik vardiyalar:** 10:00 ve 10:30 inhouse vardiyaları tam 13 kişi, yani en küçük takım büyüklüğünde açılmış.
+- **Gece yarısını geçenler:** 15:00 ve sonrasında başlayan vardiyalar ertesi günün ilk saatlerini kapatıyor (19:00 outsource 03:30'a kadar).
+- **İş bölümü:** Sabah ağırlıkla inhouse, öğleden sonra ve akşam ağırlıkla outsource.
+
+### 4.4 Öncelik sırası
+
+Model çelişen hedefleri şu sırayla tartıyor. Üstteki hedef, alttakinden çok daha ağır basıyor.
+
+| Sıra | Hedef | Anlamı |
+|--:|---|---|
+| 1 | **Eksik bırakma** | İhtiyacın altında kalan her kişi-yarım saat çok pahalı (ceza 50.000). |
+| 2 | **Kapasite dengesi** | Fazla ve eksik, ihtiyaca oranla küçük tutulsun (kademeler aşağıda). |
+| 3 | **Kaynak payları** | Outsource adam-gün ve part-time günleri hedefe yakın kullanılsın; hafta sonu outsource payı bantta kalsın. |
+| 4 | **Az vardiya** | Plan gereksiz yere çok parçalı olmasın. |
+| 5 | **Maliyet** | Erken saatler (07:00, 07:30) daha pahalı sayılıyor. |
+
+### Kapasite dengesi kademeleri
+
+Denge, Kap ölçüsüne göre kuruluyor (bkz. 02). Küçük sapma neredeyse bedava, büyük sapma pahalı. Böylece model bir yerde büyük açık bırakmak yerine sapmayı saatlere küçük küçük yayıyor.
+
+| Kap ihtiyacından sapma | Eksik cezası | Fazla cezası |
+|---|--:|--:|
+| %2'ye kadar | 10 | 10 |
+| Orta kademe | 500 (%2–10) | 200 (%2–20) |
+| Daha fazlası | 1.500 | 1.500 |
+
+Kitle değerleri, sapan her kişi-yarım saat için. Diğer kuyruklarda eksik orta kademesi 200. Erlang alt sınırının altındaki eksik ise 50.000.
+
+### Saate göre ağırlık
+
+Bazı saatlerde ceza çarpanla ağırlaştırılıyor ya da hafifletiliyor:
+
+| Kuyruk | Gün | Saat | Kural |
+|---|---|---|---|
+| **Kitle** | Hafta içi | 11–14 | Eksik 3 kat pahalı sayılır. |
+| **Kitle** | Hafta içi | 17–19 | Eksik 2 kat pahalı sayılır. |
+| **Kitle** | Her gün | 19–23 | Eksik yarı fiyatına sayılır. |
+| **Kitle** | Hafta içi | 07–09 | Fazla 3 kat pahalı sayılır. |
+| **Kitle, gold** | Hafta sonu | 09–16 | Eksik 3 kat pahalı sayılır. |
+| **Gold** | Her gün | 07–08 | Fazla 2 kat pahalı sayılır. |
+
+### 4.5 Temel kurallar
+
+- **Inhouse hafta içi sabit:** Bir inhouse vardiyanın kişi sayısı Pazartesi'den Cuma'ya aynı. Takımlar hafta boyu aynı saatte çalışabilsin diye.
+- **Vardiya en az 13 kişi:** Kitle ve gold'da hafta içi bir vardiya açılırsa en az 13 kişiyle açılıyor (takım büyüklüğü). Kitlede hafta sonu en az 5.
+- **Outsource haftalık ortak set:** Outsource vardiya saatleri hafta içi aynı, kişi sayısı günlük değişebiliyor (firma talebi).
+- **Hafta sonu outsource payı:** Kitlede outsource toplamın %60–70'i arasında.
+- **Part-time vardiyaları:** 4 saatlik vardiyalar. 09:00–13:00'ten 13:00–17:00'ye kadar her saat başı bir vardiya başlıyor; ayrıca 19:00–23:00 ve 20:00–24:00 vardiyaları var.
+- **Alt kuyruk payları:** Retention yalnız inhouse, kayıp/çalıntı yalnız outsource gibi kurallar her yarım saatte ayrıca sağlanıyor.
+- **Gece hattı açık:** 00:00–08:00 arası çağrı tahmini 0 olsa da her kuyrukta en az 1 kişi bulunuyor.
+
+### 4.6 Haftalar ve ay sınırı
+
+- **Hafta tanımı:** Ayın 1'i 1. hafta. Her Pazartesi yeni hafta başlıyor. İlk ve son hafta kısa olabiliyor.
+- **Gece yarısını geçen vardiyalar:** 17:00, 18:00 ve 19:00'da başlayan vardiyalar ertesi günün 00:00–03:00 saatlerini de kapatıyor. Model bunu hesaba katıyor.
+- **Hafta geçişi:** Pazar akşamı vardiyası, Pazartesi gecesinin yükünü görüyor. Pazar gecesinden sarkan kişiler bir sonraki haftaya hazır kadro olarak geçiyor.
+- **Ay geçişi:** Ay Salı–Cuma arası başlıyorsa ilk hafta içinde önceki ayın son gününün inhouse vardiya dağılımı korunuyor. Takımlar hafta ortasında vardiya değiştirmiyor.
+
+### 4.7 Çıktı ve ölçüler
+
+| Ölçü | Ne soruyor | Nasıl |
+|---|---|---|
+| **Erlang karşılama** | Her yarım saatte yeterli kişi var mı? | 1 − eksik ÷ ihtiyaç ile hesaplanıyor. Bir saatteki fazla, başka saatteki eksiği kapatmıyor. |
+| **Kap_RR** | Çağrının yüzde kaçı karşılanabilir? (ekibin ölçüsü) | Net kişi × 7,5 ÷ çağrı ile hesaplanıyor (7,5 = kişi başı yarım saatte çağrı). Net kişi, sahadaki kişiden saatlik kayıp düşülerek bulunuyor. |
+| **Eksik / fazla** | Nerede kaç kişi açık ya da boşta? | Excel'de gün, saat ve kuyruk bazında gösteriliyor. |
+| **Adam-gün kullanımı** | Outsource bütçesi ne kadar kullanıldı? | Her hafta kullanılan adam-gün bütçeye bölünüyor. |
+| **Adam-gün** | Ay boyunca toplam kaç adam-gün planlandı? | Her gün vardiyaya yazılan inhouse + outsource + PT kişi sayısı, ayın günleri boyunca toplanıyor. |
+
+### Kasım 2026 sonucu
+
+| Kuyruk | Tahmini çağrı | Planlanan adam-gün | Günlük ortalama | Erlang karşılama | Kap_RR |
+|---|--:|--:|--:|--:|--:|
+| **Kitle** | 2.133.955 | 20.689 | ≈ 690 | %100 | %99 |
+| **Gold** | 173.030 | 2.344 | ≈ 78 | %100 | %100 |
+| **Kurumsal** | 73.065 | 1.241 | ≈ 41 | %100 | %100 |
+| **Yatırım** | 32.470 | 766 | ≈ 26 | %100 | %100 |
+
+- **Kaynak:** Çağrı sayıları düzeltilmiş tahmin tablosundan. Adam-gün ve karşılama oranları Kasım pilot koşusundan. Pilot koşuda tahmin her 15 dakikada küsurat atılarak okunuyordu ve her kuyruk ayda ~1.400 çağrı eksik sayılıyordu (yatırımda %4, kurumsalda %2). Aralık'tan itibaren model düzeltilmiş tahminle çalışacak.
+- **Adam-gün, kadro × 30 değil.** İzinli ve off'taki kişiler o günün sayısına girmiyor, hafta sonu daha az kişi çalışıyor. Örnek, kitle 2. hafta: 2.015 (hafta içi inhouse) + 272 (hafta sonu inhouse) + 2.520 (outsource) + 93 (PT) = 4.900 adam-gün, günde ortalama 700 kişi.
+- Part-time 4 saat çalışsa da 1 adam-gün sayılıyor.
+- %100 değerleri yuvarlanmış: kitlede ay boyunca toplam 216 kişi-yarım saat eksik kaldı, ihtiyacın binde birinden az.
+
+---
+
+## 05 Model-2: kim, hangi gün?
+
+Model-1'in sayılarını isimli inhouse agentlarla dolduruyor. Tüm ay tek seferde çözülüyor (yaklaşık 45 dakika). Kurallar iki türlü: hiçbir koşulda bozulmayan **sert** kurallar ve mümkün olduğunca tutulan **esnek** hedefler.
+
+### Girdiler
+
+- Model-1'in her kuyruk, gün ve vardiya için bulduğu kişi sayıları.
+- Agent listesi: her agentın takımı, lokasyonu ve kıdemi; hamile/süt, sabahçı, İngilizce bilen ve mesaiye kalamaz bilgileri.
+- İzinler, off talepleri, önceki ayın son günleri ve geçmiş aylarda kimin hangi vardiyada çalıştığı.
+
+### Kurallar
+
+| Kural | Tür |
+|---|---|
+| Bir kişi günde en çok 1 vardiyada çalışır ve 7 günde en az 1 gün off yapar. | sert |
+| İki vardiya arasında en az 11 saat dinlenme olur. | sert |
+| Takım hafta içi aynı vardiyada çalışır; kişi hafta içi tek vardiya tipinde kalır. | sert |
+| Bir kişi hafta sonu en çok 1 gün çalışır. | sert |
+| Kıdemi 6 aydan az olan gece çalışmaz; hamile/süt izinli hafta sonu çalışmaz; sabahçı 20:00'de çıkar. | sert |
+| Bir kişiye ayda en çok 2 gün fazla mesai yazılır; kimse ortalamanın 1 günden fazla üstüne çıkmaz. | sert |
+| Bir kişi ayda en çok 2 hafta akşam/gece çalışır; bir takım ayda en çok 2 hafta akşamda olur. | sert |
+| Hafta içi gece nöbeti lokasyonlar arasında döner. | sert |
+| İzinli ve kesin off günü olan kişiye vardiya yazılmaz. | sert |
+| Vardiyalardaki kişi sayısı Model-1'e yakın olsun; eksik kalmak, fazla olmaktan daha pahalı. | esnek |
+| Esnek off talepleri mümkün olduğunca karşılansın. | esnek |
+| Adalet: hafta sonu, akşam ve gece yükü kişiler ve takımlar arasında eşit; geçmişte çok akşam/gece yapan daha az alsın. | esnek |
+| İngilizce bilen bir agent her gün sabah, akşam ve gecede bulunsun. | esnek |
+
+---
+
+## 06 Bilinmesi gereken parametreler
+
+Planı en çok etkileyen ayarlar. Hepsi bir ayar dosyasında tutuluyor ve ay ay değiştirilebiliyor.
+
+| Parametre | Değer | Ne etkiler |
+|---|---|---|
+| **Hizmet hedefi** | ≤ 30 sn bekleme | Kişi ihtiyacı bu hedefe göre hesaplanır. |
+| **Shrinkage** | saat × gün tipi × kuyruk | Kişi ihtiyacını büyütür (bkz. 03). |
+| **Inhouse kadro** | haftalık NET ortalama | Hafta içi her gün yazılan inhouse sayısını belirler (Kasım kitle 392–406). |
+| **Outsource kişi** | firma verisi, haftalık | Bir günde yazılabilecek en çok outsource sayısını belirler (Kasım kitle 435–501). |
+| **Outsource off oranı** | 0,2 | Outsource haftalık bütçesini belirler: kişi × gün × 0,8 adam-gün. |
+| **Eksik cezası** | 50.000 | Erlang alt sınırının altında kalmak her şeyden pahalı sayılır. |
+| **Min vardiya büyüklüğü** | 13 kişi | Kitle ve gold'da hafta içi açılan vardiya en az 13 kişi olur (kitlede hafta sonu 5). |
+| **H.sonu outsource payı** | %60–70 | Kitlede hafta sonu çalışanların %60–70'i outsource olur. |
+| **Part-time** | 19 · 9 · 4 · 1 kişi | Sırasıyla kitle, gold, kurumsal, yatırım. Her PT haftada 5 gün çalışır. |
+| **Kişi başı saatlik çağrı** | 15 | Ekibin kapasite ölçüsü. Kap ihtiyacı ve Kap_RR raporu buna göre hesaplanır. |
+| **Fazla mesai tavanı** | ayda 2 gün | Model-2 bir kişiye ayda en çok 2 gün fazla mesai yazar. |
+| **Akşam/gece tavanı** | kişi 2 hafta · takım 2 hafta | Model-2 bir kişiye ya da takıma ayda en çok 2 hafta akşam/gece yazar. |
+| **Gece için kıdem** | 6 ay | Kıdemi 6 aydan az olan agent gece çalışmaz (Model-2). |
+| **Hafta sonu** | en çok 1 gün | Model-2 bir kişiye hafta sonu en çok 1 gün yazar. |
+
+---
+
+## 07 Sorulabilecek sorular
+
+**Outsource'ta neden 0,8 ile çarpılıyor?**
+Firmanın verdiği kişi sayısı kadronun tamamı. Her outsource agent ayda yaklaşık 6 gün off kullandığı için ortalama günde kadronun %80'i sahada. Model bu yüzden haftalık bütçeyi kişi × gün × 0,8 olarak alıyor. Bir günde kadronun tamamından fazlası ise asla yazılmıyor.
+
+**Inhouse kadro fazlaysa ne oluyor?**
+Model önce gereken en az kişiyi yerleştiriyor. Kalanı en sıkışık vardiyalara ekliyor. Bu yüzden fazla kadro planda "boşta" kalmıyor, Erlang karşılama ve Kap_RR yükseliyor.
+
+**Hafta sonu inhouse sayısı nereden geliyor?**
+Hafta sonu için kadro tavanı yok. Model-1 ihtiyaç kadar inhouse yazıyor. Model-2 bunu hafta içi off'u hafta sonuna kaydırarak ve fazla mesaiyle dolduruyor. Yazamadığı kısım Excel'de eksik olarak görünüyor.
+
+**Shrinkage neden tek bir oran değil?**
+Mola ve yemek belli saatlerde yoğunlaşıyor. Tek oran kullanılsaydı öğle saatlerinde eksik, sabah ve gece fazla kişi planlanırdı.
+
+**İzin ve off shrinkage'ın içinde mi?**
+Hayır. İzin, off ve rapor kişi bazında, kadro hesabında ve Model-2'de düşülüyor. Shrinkage yalnız vardiya içindeki kaybı kapsıyor. Böylece aynı kayıp iki kez sayılmıyor.
+
+**Kuyruklar neden ayrı çözülüyor?**
+Her kuyruk ayrı bir ekip ve agentlar kuyruklar arasında geçmiyor. Ayrı çözmek hem gerçeğe uygun hem de çözüm süresini kısa tutuyor.
+
+**Neden iki ayrı model var?**
+"Kaç kişi" sorusu saatlik çağrıya, "kim" sorusu kişilerin izinlerine, takımlarına ve adalet kurallarına bağlı. Tek modelde ikisini birden çözmek çok yavaş olurdu. Model-1 sayıyı veriyor, Model-2 isimleri yerleştiriyor.
+
+**Erlang ve Kap neden farklı sayı veriyor?**
+Erlang gerçek AHT'yi (örnekte 200 sn) ve çağrıların rastgele gelişini kullanıyor. Kap ise kişi başı saatte 15 çağrı, yani çağrı başı 240 sn varsayıyor. Kitle gibi büyük bir kuyrukta Erlang, aynı anda konuşan kişi sayısına çok yakın çıkıyor. Bu yüzden 3 Kasım 11:00'de Erlang 446, Kap 529 kişi istedi. Model ikisini birlikte kullanıyor: Erlang'ın altına düşmüyor, Kap'a yakın durmaya çalışıyor.
+
+**Aynı veriyle iki kez çalıştırınca plan aynı çıkıyor mu?**
+Model-1 aynı çıkıyor. Model-2 belli bir süre içinde en iyi bulduğu planı veriyor. Bu yüzden iki koşuda kişilerin yeri biraz değişebilir, ama kurallar ve kalite aynı kalıyor.
+
+**Bayram, arife gibi özel günler nasıl ele alınıyor?**
+Model-1'de özel gün etkisi çağrı tahmininin içinde geliyor. Model-2 resmi tatil ve arife için ayrı kurallar uyguluyor (ör. mesaiye kalamayan agent resmi tatilde çalışmaz).
+
+---
+
+## 08 Sözlük
+
+| Terim | Anlamı |
+|---|---|
+| **AHT** | Bir çağrının ortalama süresi (konuşma + çağrı sonrası iş), saniye. |
+| **Bekleme hedefi (ASA)** | Müşterinin ortalama bekleme süresi. Hedef 30 saniye. |
+| **Erlang-C** | Çağrı sayısı ve AHT'den, bekleme hedefini tutan kişi sayısını veren standart hesap. |
+| **Shrinkage** | Vardiyadaki agentın hatta olmadığı zamanın oranı (mola, yemek vb.). Saat saat tanımlı. |
+| **NET kadro** | Tam zamanlı agent sayısından o gün izinli veya çalışamayacak olanların düşülmüş hali. |
+| **Adam-gün** | Bir kişinin bir gün çalışması. 10 kişi × 5 gün = 50 adam-gün. Part-time da günde 1 adam-gün sayılır. |
+| **Inhouse / outsource / PT** | Kendi personelimiz / dış firma personeli / 4 saatlik part-time personel. |
+| **Off talebi** | Agentın istediği izin günü. Kesin olanı mutlaka verilir, esnek olanı mümkünse. |
+| **Fazla mesai** | Agentın aylık iş günü kotasının üstünde çalıştığı gün. Ayda en çok 2. |
+| **Kap_RR** | Ekibin kullandığı kapasite ölçüsü: kişi başı saatte 15 çağrı varsayımıyla karşılanabilecek çağrı oranı. |
+| **Kuyruk / alt kuyruk** | Ayrı ekibin karşıladığı çağrı grubu (kitle, gold…) / onun içindeki konu bazlı hat. |
+
+---
+
+## 09 Bilinen sınırlar ve sıradaki işler
+
+- Gold için Model-2 hazırlanıyor. Yatırım için Model-2 henüz yok.
+- Hafta sonu İngilizce bilen agent kitle ekibinden tek başına yetmiyor. Gold ekibinin de pay alması planlanıyor.
+- Outsource ve part-time ek kişileri hâlâ eski yöntemle dağıtılıyor. Kapasite dengesine geçirilmesi önerildi.
+
+---
+
+*Rakamlar Kasım 2026 Model-1 koşusundan ve o koşunun ayarlarından alınmıştır. Ayarlar ay ay güncellenebilir.*
