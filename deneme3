@@ -1,37 +1,50 @@
 WITH grp AS (
-  SELECT 1 id, 'karttemelbankaclik' ad, 'kitle' kuyruk FROM dual UNION ALL
-  SELECT 2,  'retention_line',              'kitle'    FROM dual UNION ALL
-  SELECT 3,  'kayipcalintisupheli',         'kitle'    FROM dual UNION ALL
-  SELECT 4,  'epassword',                   'kitle'    FROM dual UNION ALL
-  SELECT 8,  'program_44',                  'kitle'    FROM dual UNION ALL
-  SELECT 17, 'internet_destek',             'kitle'    FROM dual UNION ALL
-  SELECT 20, 'bcd',                         'kitle'    FROM dual UNION ALL
-  SELECT 21, 'hizmethatti',                 'kitle'    FROM dual UNION ALL
-  SELECT 5,  'yatirim',                     'yatirim'  FROM dual UNION ALL
-  SELECT 6,  'ozelbankacilik',              'gold'     FROM dual UNION ALL
-  SELECT 7,  'english',                     'gold'     FROM dual UNION ALL
-  SELECT 10, 'fordfinans',                  'gold'     FROM dual UNION ALL
-  SELECT 22, 'kocailem',                    'gold'     FROM dual UNION ALL
-  SELECT 11, 'poshizmetleri',               'kurumsal' FROM dual UNION ALL
-  SELECT 12, 'kurumsalkart',                'kurumsal' FROM dual UNION ALL
-  SELECT 13, 'kurumsaltelefonlabankacilik', 'kurumsal' FROM dual UNION ALL
-  SELECT 14, 'provizyon',                   'kurumsal' FROM dual UNION ALL
-  SELECT 15, 'maasodemeleri',               'kurumsal' FROM dual UNION ALL
-  SELECT 18, 'kurumsal_internet_destek',    'kurumsal' FROM dual
+  SELECT 1 id, 'karttemelbankaclik' ad FROM dual UNION ALL
+  SELECT 2,  'retention_line'          FROM dual UNION ALL
+  SELECT 3,  'kayipcalintisupheli'     FROM dual UNION ALL
+  SELECT 4,  'epassword'               FROM dual UNION ALL
+  SELECT 8,  'program_44'              FROM dual UNION ALL
+  SELECT 17, 'internet_destek'         FROM dual UNION ALL
+  SELECT 20, 'bcd'                     FROM dual UNION ALL
+  SELECT 21, 'hizmethatti'             FROM dual
+),
+mim AS (   -- santral: karşılanan / terk
+  SELECT g.ad,
+         SUM(m.N_ANSWERED)  AS karsilanan,
+         SUM(m.N_ABANDONED) AS terk,
+         SUM(m.ABND0_5)     AS terk_0_5
+  FROM ODS_CCINFL.MIM_AG2_QUEUE_SUBHR m
+  JOIN DM_CAD.CAD_MIM_CAPACITY_RESRC_KEY_LKP k
+    ON TO_CHAR(m.RESOURCE_KEY) = TO_CHAR(k.RESOURCE_KEY_CODE)
+  JOIN DM_CAD.MVA_MIM_CP_RESRC_KEY_X_GRP x
+    ON x.RESOURCE_KEY_ID = k.RESOURCE_KEY_ID
+   AND TRUNC(m.DATA_DATE) BETWEEN x.START_DATE AND x.END_DATE
+  JOIN grp g ON g.id = x.RESOURCE_GROUP_KEY_ID
+  WHERE TRUNC(m.DATA_DATE) = TO_DATE('03112026', 'ddmmyyyy')
+    AND SUBSTR(m.LABEL_YYYY_MM_DD_HH24_15INT, 12, 5) IN ('11:00', '11:15')
+  GROUP BY g.ad
+),
+akt AS (   -- senin gerçekleşen tablon
+  SELECT LOWER(TRIM(RESOURCE_GROUP_KEY)) AS ad,
+         SUM(NOF_CALL) AS tablom
+  FROM BNS_VP_ACTUAL_CALL_COUNT_BY_TIME_PER_SUB_LINE_2025_2026
+  WHERE TRUNC(DATA_DATE) = TO_DATE('03112026', 'ddmmyyyy')
+    AND MIN_TIME_PERIOD_VALUE IN ('11:00', '11:15')
+    AND LINE_BASED_MAIN_GROUP = 'kitle_cagrilar'
+  GROUP BY LOWER(TRIM(RESOURCE_GROUP_KEY))
+),
+birlesik AS (
+  SELECT COALESCE(a.ad, m.ad) AS ad,
+         NVL(a.tablom, 0)     AS tablom,
+         NVL(m.karsilanan, 0) AS karsilanan,
+         NVL(m.terk, 0)       AS terk,
+         NVL(m.terk_0_5, 0)   AS terk_0_5
+  FROM akt a FULL OUTER JOIN mim m ON m.ad = a.ad
 )
-SELECT g.kuyruk, g.ad,
-       SUM(m.N_ANSWERED)   AS karsilanan,
-       SUM(m.N_ABANDONED)  AS terk,
-       SUM(m.ABND0_5)      AS terk_0_5
-FROM ODS_CCINFL.MIM_AG2_QUEUE_SUBHR m
-JOIN DM_CAD.CAD_MIM_CAPACITY_RESRC_KEY_LKP k
-  ON TO_CHAR(m.RESOURCE_KEY) = TO_CHAR(k.RESOURCE_KEY_CODE)
-JOIN DM_CAD.MVA_MIM_CP_RESRC_KEY_X_GRP x
-  ON x.RESOURCE_KEY_ID = k.RESOURCE_KEY_ID
- AND TRUNC(m.DATA_DATE) BETWEEN x.START_DATE AND x.END_DATE
-JOIN grp g ON g.id = x.RESOURCE_GROUP_KEY_ID
-WHERE TRUNC(m.DATA_DATE) = TO_DATE('03112026', 'ddmmyyyy')
-  AND SUBSTR(m.LABEL_YYYY_MM_DD_HH24_15INT, 12, 5) IN ('11:00', '11:15')
-  AND g.kuyruk = 'kitle'
-GROUP BY g.kuyruk, g.ad
-ORDER BY karsilanan DESC;
+SELECT ad, tablom, karsilanan, terk, terk_0_5,
+       karsilanan + terk AS karsilanan_arti_terk
+FROM birlesik
+UNION ALL
+SELECT 'TOPLAM', SUM(tablom), SUM(karsilanan), SUM(terk), SUM(terk_0_5),
+       SUM(karsilanan + terk)
+FROM birlesik;
