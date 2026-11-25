@@ -386,24 +386,36 @@ Model-1'in sayılarını isimli inhouse agentlarla dolduruyor. Tüm ay tek sefer
 
 ## 06 Bilinmesi gereken parametreler
 
-Planı en çok etkileyen ayarlar. Hepsi bir ayar dosyasında tutuluyor ve ay ay değiştirilebiliyor.
+Planı en çok etkileyen ayarlar. Hepsi bir ayar dosyasında tutuluyor ve ay ay değiştirilebiliyor. İki türlü: yönetimin karar verdiği kurallar ve her ay güncellenen girdiler.
+
+### Yönetimin karar verdiği kurallar
+
+Bunlar değişirse plan belirgin biçimde değişir. Değişiklik yönetim onayıyla yapılmalı.
 
 | Parametre | Değer | Ne etkiler |
 |---|---|---|
-| **Hizmet hedefi** | ≤ 30 sn bekleme | Kişi ihtiyacı bu hedefe göre hesaplanır. |
-| **Shrinkage** | saat × gün tipi × kuyruk | Kişi ihtiyacını büyütür (bkz. 03). |
+| **Hizmet hedefi** | ≤ 30 sn bekleme | Kişi ihtiyacı bu hedefe göre hesaplanır. Hedef değişirse planın tamamı değişir. |
+| **Kişi başı saatlik çağrı** | 15 | Ekibin kapasite ölçüsü. Kap ihtiyacı ve Kap_RR raporu buna göre hesaplanır. Teorik değer 18; aradaki fark görünmeyen kayıp (bkz. 02). |
+| **Shrinkage** | saat × gün tipi × kuyruk | Mola ve yemek payı kişi ihtiyacını büyütür (bkz. 03). |
+| **Min vardiya büyüklüğü** | 13 kişi | Kitle ve gold'da hafta içi açılan vardiya en az 13 kişi olur (kitlede hafta sonu 5). Takım büyüklüğünden geliyor. Bedeli, bazı saatlerde fazla kişi olması. |
+| **H.sonu outsource payı** | %60–70 | Kitlede hafta sonu çalışanların %60–70'i outsource olur. Hafta sonu inhouse için kadro tavanı yok; açık kalan kısmı Model-2 off kaydırma ve fazla mesaiyle dolduruyor. |
+| **Sabah inhouse** | 07:00 ve 07:30 pahalı | Kitlede hafta içi 07:00 ve 07:30 inhouse vardiyası çok pahalı tanımlı. Bu yüzden sabahı outsource açıyor, inhouse 07:30–08:00'de başlıyor. |
+| **Tahmin tamponu** | Cmt 10–13 +%15 · Cmt 13–17 +%12 | Kitle Cumartesi tahmininin bilinen sapması düzeltiliyor. Eylül ve Ekim'de gerçekleşen çağrı tahminin yaklaşık %13 üstünde kaldı. Raporlar ham tahminle ölçülüyor. |
+
+### Her ay güncellenen girdiler
+
+Bunlar operasyon verisi. Her koşudan önce güncel değerler giriliyor.
+
+| Parametre | Değer | Ne etkiler |
+|---|---|---|
 | **Inhouse kadro** | haftalık NET ortalama | Hafta içi her gün yazılan inhouse sayısını belirler (Kasım kitle 392–406). |
 | **Outsource kişi** | firma verisi, haftalık | Bir günde yazılabilecek en çok outsource sayısını belirler (Kasım kitle 435–501). |
-| **Outsource off oranı** | 0,2 | Outsource haftalık bütçesini belirler: kişi × gün × 0,8 adam-gün. |
-| **Eksik cezası** | 50.000 | Erlang alt sınırının altında kalmak her şeyden pahalı sayılır. |
-| **Min vardiya büyüklüğü** | 13 kişi | Kitle ve gold'da hafta içi açılan vardiya en az 13 kişi olur (kitlede hafta sonu 5). |
-| **H.sonu outsource payı** | %60–70 | Kitlede hafta sonu çalışanların %60–70'i outsource olur. |
+| **Outsource off oranı** | 0,2 | Haftalık bütçe kişi × gün × 0,8 adam-gün. Firmanın verdiği kişilerin %80'i sahada sayılıyor. |
 | **Part-time** | 19 · 9 · 4 · 1 kişi | Sırasıyla kitle, gold, kurumsal, yatırım. Her PT haftada 5 gün çalışır. |
-| **Kişi başı saatlik çağrı** | 15 | Ekibin kapasite ölçüsü. Kap ihtiyacı ve Kap_RR raporu buna göre hesaplanır. |
-| **Fazla mesai tavanı** | ayda 2 gün | Model-2 bir kişiye ayda en çok 2 gün fazla mesai yazar. |
-| **Akşam/gece tavanı** | kişi 2 hafta · takım 2 hafta | Model-2 bir kişiye ya da takıma ayda en çok 2 hafta akşam/gece yazar. |
-| **Gece için kıdem** | 6 ay | Kıdemi 6 aydan az olan agent gece çalışmaz (Model-2). |
-| **Hafta sonu** | en çok 1 gün | Model-2 bir kişiye hafta sonu en çok 1 gün yazar. |
+
+> **Model kadro yaratmıyor.** Yalnız eldeki inhouse, outsource ve part-time kişileri saatlere ve günlere dağıtıyor. Hafta içi planda eksik çıkıyorsa, o hafta için kadro yetmiyor demektir.
+
+Model-2'nin sınırları (fazla mesai, akşam/gece, gece için kıdem, hafta sonu) 05'teki kurallar tablosunda. Ceza değerleri ve çözücü ayarları teknik ayarlar; bunlarda sayılar değil, öncelik sırası önemli (bkz. 4.4).
 
 ---
 
