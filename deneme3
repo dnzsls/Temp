@@ -1,2 +1,38 @@
-print("çifti olan hamile/süt:", sum(1 for a in kisi if a in hafta_sonu_yasak),
-      "| mesaiye kalamaz ∩ hamile/süt:", len(mesai_yok & hafta_sonu_yasak))
+ozet AS (
+  SELECT TO_CHAR(ts, 'HH24')                          AS saat,
+         COUNT(DISTINCT TRUNC(ts))                    AS gun_sayisi,
+         AVG(kisi)                                    AS plan_kisi,
+         SUM(karsilanan)                              AS karsilanan,
+         SUM(terk)                                    AS terk,
+         SUM(kisi)                                    AS kisi_toplam,
+         SUM(yogun)                                   AS yogun_yarim_saat,
+         SUM(CASE WHEN yogun = 1 THEN karsilanan END) AS y_karsilanan,
+         SUM(CASE WHEN yogun = 1 THEN kisi END)       AS y_kisi_toplam
+  FROM birlesik
+  GROUP BY TO_CHAR(ts, 'HH24')
+),
+hesap AS (
+  SELECT o.saat, o.yogun_yarim_saat, m.kayip AS mevcut_kayip,
+         ROUND(o.plan_kisi)                                AS plan_kisi,
+         ROUND(o.karsilanan / o.gun_sayisi)                AS saatlik_karsilanan,
+         ROUND(100 * o.terk / (o.karsilanan + o.terk), 1)  AS terk_yuzde,
+         o.karsilanan * 2 / o.kisi_toplam                  AS hiz,     -- ×2: yarım saatlik veriyi saate çevirir
+         o.y_karsilanan * 2 / o.y_kisi_toplam              AS y_hiz    -- aynısı, yalnız yoğun yarım saatler
+  FROM ozet o
+  JOIN mevcut m ON m.saat = o.saat
+)
+SELECT saat,
+       plan_kisi,
+       saatlik_karsilanan,
+       terk_yuzde,
+       ROUND(hiz, 1)                    AS kisi_basi_saatte,
+       yogun_yarim_saat,
+       ROUND(y_hiz, 1)                  AS yogunda_kisi_basi_saatte,
+       mevcut_kayip,
+       ROUND(100 * (1 - y_hiz / 15))    AS yogun_kayip,
+       ROUND(100 * (1 - hiz / 15))      AS ust_sinir_kayip,
+       CASE WHEN yogun_yarim_saat < 4 THEN mevcut_kayip
+            ELSE GREATEST(mevcut_kayip, ROUND(100 * (1 - GREATEST(y_hiz, hiz) / 15)))
+       END                              AS onerilen_kayip
+FROM hesap
+ORDER BY saat;
