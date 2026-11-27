@@ -1,20 +1,20 @@
-# ==== ÖLÇÜM B: 15 çağrısız, yalnız Erlang (2026-11-27, v5) ====
-OLCUM = 'B'      # 'A' = normal (Kap dengesi) · 'B' = yalnız Erlang
+# ==== ÖLÇÜM: Model-2 yalnız MIP1 talebiyle çözsün (surplus yok) ====
+df_talep["talep"]   = df_talep["mip_ihtiyac"]
+df_talep["surplus"] = 0
+print("talep = MIP1 | hafta içi toplam:", int(df_talep.loc[df_talep.hafta_sonu == 0, "talep"].sum()),
+      "| hafta sonu toplam:", int(df_talep.loc[df_talep.hafta_sonu == 1, "talep"].sum()))
 
-if OLCUM == 'B':
-    CONFIG['kap_denge']['kitle']['enabled'] = False                     # MIP 15 çağrıyı görmesin
-    CONFIG['slot_cap_olcu'] = 'erlang'                                  # slot_cap bantları Erlang'a göre
-    for _g in ('hafta_ici', 'cumartesi', 'pazar'):                      # 15 çağrılı tabanları çıkar
-        for _b in CONFIG['queue_configs']['kitle'][_g]['slot_cap']['bands']:
-            _b.pop('min_kap_rr', None)
-            _b.pop('min_penalty', None)
-    CONFIG['surplus_distribution']['inhouse_yontem'] = {                # dağıtıcı Erlang'a göre
-        'kitle': 'rr_first', 'gold': 'kap_dengeli', 'kurumsal': 'kap_dengeli', 'yatirim': 'kap_dengeli'}
-    CONFIG['ceza']['yayma']['kitle'] = 0.0                              # inhouse eşitleme yok
-    CONFIG['ceza']['vardiya_acma']['kitle'] = {'outsource': 0.0}        # outsource vardiya açmak bedava
 
-print('ÖLÇÜM', OLCUM, '| kap_denge:', CONFIG['kap_denge']['kitle']['enabled'],
-      '| slot_cap ölçü:', CONFIG['slot_cap_olcu'],
-      '| dağıtıcı kitle:', CONFIG['surplus_distribution']['inhouse_yontem'],
-      '| yayma:', CONFIG['ceza']['yayma']['kitle'],
-      '| vardiya_acma:', CONFIG['ceza']['vardiya_acma']['kitle'])
+
+
+
+_c = df_cov.copy()
+_c["d"]     = pd.to_datetime(_c["tarih"])
+_c["tip"]   = _c["d"].dt.weekday.map(lambda w: "hafta_sonu" if w >= 5 else "hafta_ici")
+_c["hafta"] = _c["tarih"].map(_week_of_month) if "_week_of_month" in globals() else _c["d"].dt.isocalendar().week
+_c["fazla"] = (_c["atanan"] - _c["mip_ihtiyac"]).clip(lower=0)
+
+gun = _c.groupby(["tarih", "tip", "hafta"], as_index=False)[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].sum()
+print(gun.groupby(["tip", "hafta"])[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].mean().round(0))
+print("\nTÜM AY (adam-gün):")
+print(gun.groupby("tip")[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].sum())
