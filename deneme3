@@ -1,8 +1,4 @@
-_cift = sorted((a, d) for (a, d), v in ardisik_off.items() if solver.Value(v))
-for a, d2 in _cift:
-    d1 = (dt.date.fromisoformat(d2) - dt.timedelta(days=1)).isoformat()
-    _g = lambda ds: ("izin/blok" if not any((a, ds, v) in x for v in gun_vardiyalari.get(ds, []))
-                     else ("çalışıyor" if any(solver.Value(x[(a, ds, v)]) for v in gun_vardiyalari.get(ds, [])
-                                               if (a, ds, v) in x) else "model off"))
-    print(f"{a}  {d1} ({_g(d1) if d1 in gun_vardiyalari else 'önceki ay'})  →  {d2} ({_g(d2)})",
-          "| hamile/süt" if a in hafta_sonu_yasak else "")
+for a in ["U087876", "U090580", "U096558", "U096580"]:
+    _og = {str(k)[:10]: v for k, v in onceki_gunluk.get(a, {}).items()}
+    print(a, {d: _og.get(d, "-") for d in ["2026-10-26", "2026-10-27", "2026-10-28",
+                                           "2026-10-29", "2026-10-30", "2026-10-31"]})
