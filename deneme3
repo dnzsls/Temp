@@ -1,15 +1,22 @@
-# ==== ÖLÇÜM B: YALNIZ ERLANG — inhouse fazlası (2026-11-27) ====
-CONFIG['surplus_distribution']['enabled'] = False          # Model-1 yalnız MIP'in "en az"ını yazsın
-CONFIG['kap_denge']['kitle']['enabled'] = False             # 15 çağrı / Kap dengesi kapalı
-for _g in ('hafta_ici', 'cumartesi', 'pazar'):
-    CONFIG['queue_configs']['kitle'][_g]['slot_cap']['enabled'] = False   # Kap_RR bantları geri gelmesin
+# ==== ÖLÇÜM: inhouse fazlası (2026-11-27, v3) ====
+OLCUM = 'B'      # 'A' = 15 çağrı (Kap) · 'B' = yalnız Erlang
 
-print('dağıtıcı:', CONFIG['surplus_distribution']['enabled'],
-      '| kap_denge kitle:', CONFIG['kap_denge']['kitle']['enabled'],
-      '| slot_cap kitle:', [CONFIG['queue_configs']['kitle'][g]['slot_cap']['enabled']
-                             for g in ('hafta_ici', 'cumartesi', 'pazar')])
+# --- iki koşuda da aynı ---
+CONFIG['surplus_distribution']['enabled'] = False            # yalnız MIP'in "en az"ı
+CONFIG['ceza']['yayma']['kitle'] = 0.0                       # inhouse 51'lere eşitlenmesin
+CONFIG['ceza']['vardiya_acma']['kitle'] = {'outsource': 0.0} # outsource yayılabilsin
 
+# --- yalnız B ---
+if OLCUM == 'B':
+    CONFIG['kap_denge']['kitle']['enabled'] = False
+    for _g in ('hafta_ici', 'cumartesi', 'pazar'):
+        CONFIG['queue_configs']['kitle'][_g]['slot_cap']['enabled'] = False
 
+print('ÖLÇÜM', OLCUM,
+      '| dağıtıcı:', CONFIG['surplus_distribution']['enabled'],
+      '| yayma:', CONFIG['ceza']['yayma']['kitle'],
+      '| vardiya_acma:', CONFIG['ceza']['vardiya_acma']['kitle'],
+      '| kap_denge:', CONFIG['kap_denge']['kitle']['enabled'])
 
 
 
