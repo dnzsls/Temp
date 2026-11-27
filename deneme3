@@ -1,48 +1,16 @@
-# ==== ÖLÇÜM: inhouse fazlası (2026-11-27, v3) ====
-OLCUM = 'B'      # 'A' = 15 çağrı (Kap) · 'B' = yalnız Erlang
+# ==== ÖLÇÜM B: 15 çağrısız, yalnız Erlang (2026-11-27, v4) ====
+OLCUM = 'B'
 
-# --- iki koşuda da aynı ---
-CONFIG['surplus_distribution']['enabled'] = False            # yalnız MIP'in "en az"ı
-CONFIG['ceza']['yayma']['kitle'] = 0.0                       # inhouse 51'lere eşitlenmesin
-CONFIG['ceza']['vardiya_acma']['kitle'] = {'outsource': 0.0} # outsource yayılabilsin
-
-# --- yalnız B ---
 if OLCUM == 'B':
-    CONFIG['kap_denge']['kitle']['enabled'] = False
-    for _g in ('hafta_ici', 'cumartesi', 'pazar'):
-        CONFIG['queue_configs']['kitle'][_g]['slot_cap']['enabled'] = False
+    CONFIG['kap_denge']['kitle']['enabled'] = False                     # 1) MIP 15 çağrıyı görmesin
+    CONFIG['slot_cap_olcu'] = 'erlang'                                  # 2) bantlar Erlang'a göre
+    for _g in ('hafta_ici', 'cumartesi', 'pazar'):                      # 3) 15 çağrılı tabanları çıkar
+        for _b in CONFIG['queue_configs']['kitle'][_g]['slot_cap']['bands']:
+            _b.pop('min_kap_rr', None)
+            _b.pop('min_penalty', None)
+    CONFIG['surplus_distribution']['inhouse_yontem'] = {                # 4) dağıtıcı Erlang'a göre
+        'kitle': 'rr_first', 'gold': 'kap_dengeli', 'kurumsal': 'kap_dengeli', 'yatirim': 'kap_dengeli'}
 
-print('ÖLÇÜM', OLCUM,
-      '| dağıtıcı:', CONFIG['surplus_distribution']['enabled'],
-      '| yayma:', CONFIG['ceza']['yayma']['kitle'],
-      '| vardiya_acma:', CONFIG['ceza']['vardiya_acma']['kitle'],
-      '| kap_denge:', CONFIG['kap_denge']['kitle']['enabled'])
-
-
-
-
-results_B = results
-
-from weekly_pipeline_unified_v3 import _resolve_kadro
-
-def inhouse_fazla(results, config, kuyruk='kitle'):
-    rows = []
-    for ds in sorted(results):
-        if kuyruk not in results[ds]:
-            continue
-        mi = results[ds][kuyruk]['mip_info']
-        rows.append({'tarih': ds, 'hafta': _week_of_month(ds), 'gun_tipi': mi.get('gun_tipi'),
-                     'en_az_inhouse': mi.get('total_inhouse_kisi', 0),
-                     'eksik': mi.get('total_shortfall', 0),
-                     'net_kadro': _resolve_kadro(config['kadro']['inhouse'][kuyruk], date_str=ds)})
-    df = pd.DataFrame(rows)
-    hi = df[df.gun_tipi == 'hafta_ici']
-    hs = df[df.gun_tipi != 'hafta_ici'].groupby('hafta')['en_az_inhouse'].sum().rename('hsonu_inhouse_adam_gun')
-    ozet = hi.groupby('hafta').agg(net_kadro=('net_kadro', 'max'),
-                                   en_az_inhouse=('en_az_inhouse', 'max'),
-                                   eksik=('eksik', 'sum')).join(hs)
-    ozet['fazla'] = ozet['net_kadro'] - ozet['en_az_inhouse']
-    return ozet
-
-B = inhouse_fazla(results_B, CONFIG)
-print(B)
+print('ÖLÇÜM', OLCUM, '| kap_denge:', CONFIG['kap_denge']['kitle']['enabled'],
+      '| slot_cap ölçü:', CONFIG['slot_cap_olcu'],
+      '| dağıtıcı kitle:', CONFIG['surplus_distribution']['inhouse_yontem'])
