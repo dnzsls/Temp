@@ -1,4 +1,8 @@
-for a in ["U087876", "U090580", "U096558", "U096580"]:
-    _og = {str(k)[:10]: v for k, v in onceki_gunluk.get(a, {}).items()}
-    print(a, {d: _og.get(d, "-") for d in ["2026-10-26", "2026-10-27", "2026-10-28",
-                                           "2026-10-29", "2026-10-30", "2026-10-31"]})
+_ids = ["U087876", "U090580", "U096558", "U096580"]
+_kol = [c for c in df_tam.columns if c.endswith("_flg")] + [c for c in ["takim", "lokasyon"] if c in df_tam.columns]
+_d = df_tam[df_tam["agent_user_code"].astype(str).isin(_ids)].set_index("agent_user_code")[_kol]
+print(_d.loc[:, (_d != 0).any()].T)                     # sadece en az birinde 1 olan bayraklar
+for a in _ids:
+    print(a, "| sabahçı:", a in sabah_agents, "| İngilizceci:", a in eng_agents,
+          "| izin:", sorted(str(d) for d in izin_map.get(a, set()))[:6],
+          "| off_t2:", sorted(str(d) for d in off_block_map.get(a, set()))[:6])
