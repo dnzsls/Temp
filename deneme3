@@ -1,20 +1,7 @@
-# ==== ÖLÇÜM: Model-2 yalnız MIP1 talebiyle çözsün (surplus yok) ====
-df_talep["talep"]   = df_talep["mip_ihtiyac"]
-df_talep["surplus"] = 0
-print("talep = MIP1 | hafta içi toplam:", int(df_talep.loc[df_talep.hafta_sonu == 0, "talep"].sum()),
-      "| hafta sonu toplam:", int(df_talep.loc[df_talep.hafta_sonu == 1, "talep"].sum()))
-
-
-
-
-
-_c = df_cov.copy()
-_c["d"]     = pd.to_datetime(_c["tarih"])
-_c["tip"]   = _c["d"].dt.weekday.map(lambda w: "hafta_sonu" if w >= 5 else "hafta_ici")
-_c["hafta"] = _c["tarih"].map(_week_of_month) if "_week_of_month" in globals() else _c["d"].dt.isocalendar().week
-_c["fazla"] = (_c["atanan"] - _c["mip_ihtiyac"]).clip(lower=0)
-
-gun = _c.groupby(["tarih", "tip", "hafta"], as_index=False)[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].sum()
-print(gun.groupby(["tip", "hafta"])[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].mean().round(0))
-print("\nTÜM AY (adam-gün):")
-print(gun.groupby("tip")[["mip_ihtiyac", "atanan", "fazla", "eksik_cekirdek"]].sum())
+_sh = {g: CONFIG['queue_configs']['kitle'][g]['erlang']['shrinkage']
+       for g in ('hafta_ici', 'cumartesi', 'pazar')}
+_tab = pd.DataFrame({g: {h: (s.get(h, s.get('default', 0.10)) if isinstance(s, dict) else s)
+                         for h in range(24)} for g, s in _sh.items()})
+_tab.index.name = 'saat'
+print((_tab * 100).round(1).astype(str).add(' %'))
+print('\nOrtalama 09–23 (%):', (_tab.loc[9:23].mean() * 100).round(1).to_dict())
