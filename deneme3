@@ -1,16 +1,24 @@
-# ==== ÖLÇÜM B: 15 çağrısız, yalnız Erlang (2026-11-27, v4) ====
-OLCUM = 'B'
+from weekly_pipeline_unified_v3 import _resolve_kadro
 
-if OLCUM == 'B':
-    CONFIG['kap_denge']['kitle']['enabled'] = False                     # 1) MIP 15 çağrıyı görmesin
-    CONFIG['slot_cap_olcu'] = 'erlang'                                  # 2) bantlar Erlang'a göre
-    for _g in ('hafta_ici', 'cumartesi', 'pazar'):                      # 3) 15 çağrılı tabanları çıkar
-        for _b in CONFIG['queue_configs']['kitle'][_g]['slot_cap']['bands']:
-            _b.pop('min_kap_rr', None)
-            _b.pop('min_penalty', None)
-    CONFIG['surplus_distribution']['inhouse_yontem'] = {                # 4) dağıtıcı Erlang'a göre
-        'kitle': 'rr_first', 'gold': 'kap_dengeli', 'kurumsal': 'kap_dengeli', 'yatirim': 'kap_dengeli'}
+def inhouse_fazla(results, config, kuyruk='kitle'):
+    rows = []
+    for ds in sorted(results):
+        if kuyruk not in results[ds]:
+            continue
+        qr = results[ds][kuyruk]
+        mi = qr['mip_info']
+        once = ((mi.get('mip_info_stage1') or qr.get('mip_info_stage1') or {}).get('assignments') or {})
+        sc = mi.get('shift_coverage', {}) or {}
+        rows.append({'hafta': _week_of_month(ds), 'gun_tipi': mi.get('gun_tipi'),
+                     'en_az': sum(k for s, k in once.items() if sc.get(s, {}).get('company') == 'inhouse'),
+                     'son_plan': mi.get('total_inhouse_kisi', 0),
+                     'eksik': mi.get('total_shortfall', 0),
+                     'net_kadro': _resolve_kadro(config['kadro']['inhouse'][kuyruk], date_str=ds)})
+    df = pd.DataFrame(rows)
+    oz = (df[df.gun_tipi == 'hafta_ici'].groupby('hafta')
+          .agg(net_kadro=('net_kadro', 'max'), en_az=('en_az', 'max'),
+               son_plan=('son_plan', 'max'), eksik=('eksik', 'sum')))
+    oz['fazla'] = oz['net_kadro'] - oz['en_az']
+    return oz
 
-print('ÖLÇÜM', OLCUM, '| kap_denge:', CONFIG['kap_denge']['kitle']['enabled'],
-      '| slot_cap ölçü:', CONFIG['slot_cap_olcu'],
-      '| dağıtıcı kitle:', CONFIG['surplus_distribution']['inhouse_yontem'])
+print(inhouse_fazla(results, CONFIG))
